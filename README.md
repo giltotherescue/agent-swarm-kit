@@ -173,11 +173,12 @@ whole internet.
    Tailscale: `sudo bash scripts/setup-worker.sh --lockdown`.
 8. Follow the [first week walkthrough](docs/first-week.md) to take one task from start to finish.
 
-**Honest note (tested on):** version 0.2.0 was run on a fresh Ubuntu 24.04 server. That test found real
-bugs (Claude Code did not install, every task failed, and the lockdown step could lock out a server that
-had only root). Version 0.2.1 fixes them. A clean retest of 0.2.1 on a fresh server is in progress and has
-not passed yet. Model logins, GitHub and Tailscale have not been tested on a real server. Run
-`scripts/smoke-test.sh` after setup and tell us what fails.
+**Honest note (tested on):** version 0.2.1 passed a clean install on a fresh Ubuntu 24.04 server on
+2026-11-18: setup, smoke test, admin user, firewall and SSH hardening, lockdown refusal checks, and the
+task and cleanup flow. Not yet tested on a real server: joining Tailscale (so the real lockdown, Tailscale
+Serve and Tailscale SSH), Claude and Codex login, running a model task, GitHub login and repo pushes, and
+bot notify delivery. Version 0.2.0 had bugs that 0.2.1 fixed. Run `scripts/smoke-test.sh` after setup
+and tell us what fails.
 
 ## What is in the box
 

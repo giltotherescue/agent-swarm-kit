@@ -8,8 +8,11 @@ See docs/updating-the-kit.md for how to update.
 
 Fix release from the first install test of 0.2.0 on a fresh Ubuntu 24.04 server. That test found that
 no task could finish on a new install, that Claude Code did not install, and that the lockdown step could
-lock out a server that has only root. **0.2.1 fixes these, but a clean retest on a fresh server is in
-progress and has not passed yet.** Model logins, GitHub and Tailscale are still untested on a real server.
+lock out a server that has only root. 0.2.1 fixes these. **0.2.1 passed a clean install on a fresh Ubuntu
+24.04 server on 2026-11-18** (setup, smoke test, admin user, firewall and SSH hardening, lockdown refusal
+checks, task and cleanup flow). Still not tested on a real server: joining Tailscale (so the real lockdown,
+Tailscale Serve and Tailscale SSH), Claude and Codex login, running a model task, GitHub login and repo
+pushes, and bot notify delivery.
 Upgrade steps: docs/updating-the-kit.md ("Upgrading from 0.2.0 to 0.2.1").
 
 Why 0.2.1 and not a changed 0.2.0: 0.2.0 was already installed on a test server, and a version that

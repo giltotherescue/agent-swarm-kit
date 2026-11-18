@@ -2,7 +2,7 @@
 
 This doc takes you from "I have no server" to "a worker is running tasks safely". The worker is an always-on Linux server that runs Claude Code and Codex on your behalf. It also runs the task backend by default. Any cloud provider works. You need about an hour, most of it waiting for installs.
 
-**Tested on:** version 0.2.0 was run on a fresh Ubuntu 24.04 server (DigitalOcean, 4 vCPU, 8 GB) on 2026-11-18. That test found real bugs: Claude Code did not install, every task failed before it started, and the lockdown step could lock a root-only server out. Version 0.2.1 fixes them, and most fixes have an automated test. **A clean retest of 0.2.1 on a fresh server is in progress and has not passed yet.** Model logins (Claude, Codex), GitHub login and pushes, and joining Tailscale have not been tested on a real server at all. Run the script first on a server you can throw away and rebuild, and run the smoke test (step 9) afterwards.
+**Tested on:** version 0.2.1 passed a clean install on a fresh Ubuntu 24.04 server (DigitalOcean, 4 vCPU, 8 GB) on 2026-11-18. That run covered setup right after first boot, the smoke test (0 failed, 2 expected warnings), the admin user, firewall and SSH hardening, the lockdown refusal checks, and the task and cleanup flow. **Not yet tested on a real server:** joining Tailscale (so also the real lockdown, Tailscale Serve and Tailscale SSH), Claude and Codex login, running a model task, GitHub login and repo pushes, and bot notify delivery. Earlier, version 0.2.0 had real bugs that 0.2.1 fixed. Run the script first on a server you can throw away and rebuild, and run the smoke test (step 9) afterwards.
 
 If you do not want a server yet, read [grokbot-only.md](grokbot-only.md) first. You can add a worker later.
 
