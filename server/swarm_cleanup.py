@@ -20,6 +20,9 @@ Rules:
     Both are checked (git bundle verify, tar -t) before anything is deleted. If a check fails, the folder stays.
     Backups are kept SWARM_BACKUP_KEEP_DAYS (default 30).
   - anything changed in the last 48 hours is skipped.
+  - outbox folders (HANDOFF/outbox/TASK, made by the agent at collect) of finished tasks go after
+    SWARM_KEEP_DAYS too, backed up first like task folders. The runner normally asks agent-exec to remove
+    them right after the results are saved; this catches the ones it kept (results not confirmed saved).
 Run with --dry-run to see what it would do.
 """
 import json
@@ -36,6 +39,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.realpath(__file__))
 WORK = os.path.expanduser(os.environ.get("SWARM_WORK_DIR", "~/work"))
 BACKUPS = os.path.expanduser(os.environ.get("SWARM_BACKUP_DIR", "~/backups/work"))
+HANDOFF = os.path.expanduser(os.environ.get("SWARM_HANDOFF_DIR", "~/.local/share/swarm/handoff"))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 KEEP = float(os.environ.get("SWARM_KEEP_DAYS", "7"))
 SLIM = float(os.environ.get("SWARM_SLIM_AFTER_DAYS", "1"))
@@ -222,6 +226,7 @@ def act(states, dry):
                     if d in BULKY and is_git and git(path, "check-ignore", "-q", full).returncode == 0:
                         remove(full, "bulky folder of a finished task", dry)  # only what git ignores, never tracked files
                         dirs.remove(d)
+    act_outbox(states, t0, dry)
     if os.path.isdir(BACKUPS):
         for d in os.listdir(BACKUPS):
             p = os.path.join(BACKUPS, d)
@@ -229,10 +234,38 @@ def act(states, dry):
                 remove(p, "old backup", dry)
 
 
+def outbox_root():
+    """The outbox folder, or None if it is missing or a link (never followed)."""
+    root = os.path.join(HANDOFF, "outbox")
+    return root if os.path.isdir(root) and not os.path.islink(root) else None
+
+
+def act_outbox(states, t0, dry):
+    root = outbox_root()
+    if not root:
+        return
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if os.path.islink(path) or not os.path.isdir(path):
+            continue
+        task = states.get(name)
+        if not task or task["state"] not in ("done", "failed", "cancelled"):
+            continue
+        if t0 - last_change(path) < 2 * DAY:
+            continue
+        age = t0 - (task.get("finished_at") or task.get("updated_at") or t0)
+        if age > KEEP * DAY and backup(path, "outbox-" + name, dry):
+            remove(path, f"outbox of task {task['state']} {age / DAY:.0f} days ago", dry)
+
+
 def list_folders():
-    if not os.path.isdir(WORK):
-        return []
-    return sorted(n for n in os.listdir(WORK) if os.path.isdir(os.path.join(WORK, n)) and n not in SKIP and n != "scratch")
+    names = set()
+    if os.path.isdir(WORK):
+        names |= {n for n in os.listdir(WORK) if os.path.isdir(os.path.join(WORK, n)) and n not in SKIP and n != "scratch"}
+    root = outbox_root()
+    if root:
+        names |= {n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)) and not os.path.islink(os.path.join(root, n))}
+    return sorted(names)
 
 
 # ---------------- plan half (swarm-runner) ----------------
@@ -262,7 +295,7 @@ def plan(dry):
     prefix, handoff = agent_cmd()
     me = os.path.realpath(__file__)
     env_keys = ("SWARM_KEEP_DAYS", "SWARM_SLIM_AFTER_DAYS", "SWARM_SCRATCH_DAYS", "SWARM_BACKUP_KEEP_DAYS")
-    settings = [f"{k}={os.environ[k]}" for k in env_keys if os.environ.get(k)]
+    settings = [f"{k}={os.environ[k]}" for k in env_keys if os.environ.get(k)] + [f"SWARM_HANDOFF_DIR={handoff}"]
     r = subprocess.run(prefix + ["exec", ".", "--", "env"] + settings + ["python3", me, "--list"], capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"swarm-cleanup: cannot list task folders: {r.stderr.strip()[-300:]}")

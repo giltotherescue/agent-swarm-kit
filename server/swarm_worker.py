@@ -310,6 +310,9 @@ class Runner(threading.Thread):
         self.default_branch = None
         self.warnings = []
         self.prompt_n = 0
+        self.collected = False   # agent-exec collect ran, so the outbox may hold results
+        self.uploaded = False    # every result in the outbox reached the backend
+        self.finished = False    # the backend acknowledged the finish
 
     # ---------- backend calls with the task token ----------
     def tapi(self, method, path, body=None, raw=None, headers=None, timeout=60):
@@ -440,12 +443,32 @@ class Runner(threading.Thread):
             finally:
                 self.hb_stop.set()
                 self.stop_agent()
-                for d in (self.inbox, self.outbox):
-                    shutil.rmtree(d, ignore_errors=True)
+                self.cleanup_handoff()
                 if status in ("done", "failed") or self.lost:
                     shutil.rmtree(self.clone, ignore_errors=True)
                 mark_running(t["id"], False)
                 self.slots.release()
+
+    def cleanup_handoff(self):
+        """Remove this task's inbox and outbox folders, but the outbox only once its results are saved.
+
+        The runner owns the inbox folder and removes it itself. The agent owns the outbox folder, so the runner
+        asks agent-exec to remove it (one narrow action through the same sudo rule). If the results were not
+        uploaded and acknowledged, the outbox stays; the daily cleanup backs it up and removes it after
+        SWARM_KEEP_DAYS.
+        """
+        shutil.rmtree(self.inbox, ignore_errors=True)
+        if not os.path.lexists(self.outbox):
+            return
+        if not self.finished or (self.collected and not self.uploaded):
+            log("task", self.task["id"], "outbox kept: results not confirmed saved; the daily cleanup handles it")
+            return
+        try:
+            r = self.agent("cleanup", self.task["id"], check=False, timeout=300)
+            if r.returncode != 0:
+                log("task", self.task["id"], "outbox cleanup failed:", (r.stderr or r.stdout).strip()[-300:])
+        except Exception as e:
+            log("task", self.task["id"], "outbox cleanup failed:", e)
 
     def fill_inbox(self):
         """Write the brief, an empty messages file and the attachments into the task's inbox folder."""
@@ -559,6 +582,8 @@ class Runner(threading.Thread):
         return None
 
     def collect(self):
+        self.collected = True
+        self.uploaded = False
         r = self.agent("collect", self.task["id"], self.workname)
         return json.loads(r.stdout or "{}")
 
@@ -585,6 +610,7 @@ class Runner(threading.Thread):
         bundle = safe_read(self.outbox, "work.bundle") if (summary.get("git") or {}).get("bundled") else None
         if bundle:
             self.tapi("PUT", "/files/bundle/work.bundle", raw=bundle, headers=h, timeout=600)
+        self.uploaded = True
         return bundle
 
     def decide(self, code, started, provider, model, summary):
@@ -714,6 +740,7 @@ class Runner(threading.Thread):
         for attempt in range(6):
             try:
                 r = self.tapi("POST", "/finish", body)
+                self.finished = True
                 log("task", self.task["id"], "->", status, "(repeat)" if r.get("replayed") else "")
                 return
             except ClaimLost as e:

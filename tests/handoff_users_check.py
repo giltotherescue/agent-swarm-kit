@@ -182,7 +182,47 @@ def main():
             fail(f"the artifact did not reach the upload: {res['uploads']}")
         if (res["status"] or "").strip() != "done":
             fail("the runner could not read AGENT_STATUS")
-        print("HANDOFF CHECK OK: runner wrote the inbox, agent read it and wrote the outbox, runner read it back", flush=True)
+
+        # Cleanup (round 3, defect B). The runner removes its own inbox folder and asks agent-exec for the outbox.
+        def runner_cleans_up():
+            run = sw.Runner.__new__(sw.Runner)
+            run.task = task
+            run.inbox = os.path.join(handoff, "inbox", task_id)
+            run.outbox = os.path.join(handoff, "outbox", task_id)
+            run.finished, run.collected, run.uploaded = True, True, True
+            asked = []
+            run.agent = lambda *a_, **k_: asked.append(a_) or subprocess.CompletedProcess(a_, 0, "", "")
+            try:   # the runner itself must NOT be able to delete the agent's outbox folder
+                shutil.rmtree(run.outbox)
+                raise RuntimeError("the runner could delete the agent's outbox folder by itself")
+            except PermissionError:
+                pass
+            run.cleanup_handoff()
+            if asked != [("cleanup", task_id)]:
+                raise RuntimeError(f"the runner did not ask agent-exec to clean up: {asked}")
+
+        if not as_user(RUNNER, runner_cleans_up):
+            fail("runner cleanup failed")
+        if os.path.exists(os.path.join(inbox, task_id)):
+            fail("the runner did not remove its inbox folder")
+
+        def agent_cleans_outbox():
+            env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+            c = subprocess.run(agent_exec + ["cleanup", task_id], capture_output=True, text=True, env=env)
+            if c.returncode != 0:
+                raise RuntimeError(f"agent-exec cleanup failed: {c.stderr.strip()}")
+            bad = subprocess.run(agent_exec + ["cleanup", "../inbox"], capture_output=True, text=True, env=env)
+            if bad.returncode == 0:
+                raise RuntimeError("agent-exec cleanup accepted ../inbox")
+
+        if not as_user(AGENT, agent_cleans_outbox):
+            fail("agent-exec cleanup failed as the agent user")
+        if os.path.exists(os.path.join(outbox, task_id)):
+            fail("the outbox folder is still there after agent-exec cleanup")
+        if not (os.path.isdir(inbox) and os.path.isdir(outbox)):
+            fail("cleanup removed a handoff root")
+        print("HANDOFF CHECK OK: runner wrote the inbox, agent read it and wrote the outbox, runner read it back, "
+              "and both task folders were cleaned up", flush=True)
     finally:
         shutil.rmtree(base, ignore_errors=True)
         if not keep:

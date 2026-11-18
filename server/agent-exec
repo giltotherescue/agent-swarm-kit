@@ -15,6 +15,7 @@ Usage (all paths are passed by the runner; sudo removes the caller's environment
   agent-exec --work DIR --handoff DIR stop TASK [--grace 20]
   agent-exec --work DIR --handoff DIR stop-all
   agent-exec --work DIR --handoff DIR collect TASK WORKNAME
+  agent-exec --work DIR --handoff DIR cleanup TASK
   agent-exec --work DIR --handoff DIR exists WORKNAME
   agent-exec --work DIR --handoff DIR exec WORKNAME [--agent-env FILE] -- COMMAND ARGS...
 Output is JSON on stdout for prepare and collect. No secrets are ever printed.
@@ -25,6 +26,7 @@ import pwd
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -44,7 +46,7 @@ def die(msg, code=2):
 
 
 def check_name(v, what):
-    if not NAME_RE.match(v or "") or ".." in v:
+    if not NAME_RE.fullmatch(v or "") or ".." in v:
         die(f"bad {what}: {v!r}")
     return v
 
@@ -178,7 +180,7 @@ def cmd_prepare(p, task, name, branch, origin):
     att = os.path.join(inbox, "attachments")
     if os.path.isdir(att):
         for f in os.listdir(att):
-            if NAME_RE.match(f):
+            if NAME_RE.fullmatch(f):
                 copy_in(os.path.join(att, f), os.path.join(ctx, "attachments", f))
     msg = os.path.join(ctx, "messages.md")
     if os.path.lexists(msg):
@@ -346,6 +348,42 @@ def cmd_collect(p, task, name):
     print(json.dumps(summary))
 
 
+def cmd_cleanup(p, task):
+    """Remove HANDOFF/outbox/TASK after the runner has saved the results. Only that one folder.
+
+    The agent made the folder, so only the agent can remove it; the runner asks through this narrow action
+    instead of getting any power over the agent's files. The task id is checked (no slashes, no "..", no
+    leading dot), and a link anywhere on the way is refused, never followed. A missing folder is fine.
+    The runner removes HANDOFF/inbox/TASK itself: it owns that folder.
+    """
+    root = os.path.join(p.handoff, "outbox")
+    try:
+        rst = os.lstat(root)
+    except FileNotFoundError:
+        return 0
+    if not stat.S_ISDIR(rst.st_mode):
+        die(f"{root} is not a real folder; nothing removed", 3)
+    target = p.outbox(task)   # check_name rejects path tricks
+    if os.path.dirname(target) != root:
+        die("bad task id", 2)
+    try:
+        st = os.lstat(target)
+    except FileNotFoundError:
+        return 0
+    if stat.S_ISLNK(st.st_mode):
+        die(f"{target} is a link; refusing to remove it", 3)
+    if not stat.S_ISDIR(st.st_mode):
+        die(f"{target} is not a folder; refusing to remove it", 3)
+    if os.path.realpath(target) != os.path.join(os.path.realpath(root), task):
+        die(f"{target} is not inside the outbox; refusing", 3)
+    # shutil.rmtree works with folder handles on Linux and never follows links inside the tree.
+    if not shutil.rmtree.avoids_symlink_attacks:
+        die("this Python cannot remove folders safely; nothing removed", 3)
+    shutil.rmtree(target)
+    print(json.dumps({"removed": target}))
+    return 0
+
+
 def main(argv):
     work = handoff = None
     while argv and argv[0].startswith("--"):
@@ -387,6 +425,8 @@ def main(argv):
         cmd_stop_all(p)
     elif cmd == "collect" and len(positional) == 2:
         cmd_collect(p, positional[0], positional[1])
+    elif cmd == "cleanup" and len(positional) == 1 and not opts and not command:
+        return cmd_cleanup(p, positional[0])
     elif cmd == "exists" and len(positional) == 1:
         return 0 if os.path.isdir(p.wd(positional[0])) else 1
     elif cmd == "exec" and len(positional) == 1 and command:
