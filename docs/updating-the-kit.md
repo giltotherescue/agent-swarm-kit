@@ -110,8 +110,14 @@ The database stays as the newer version left it. Newer versions only add tables 
 0.3.0 adds the project log, the goals meeting and work heartbeat, and new docs. Re-run the setup script
 as in "Pulling an update". What changes for you:
 
-- The backend adds the `log_entries` table by itself the first time it starts. Nothing to run by hand,
-  and nothing in your tasks, bots or Waiting on you list changes.
+- The backend adds the `log_entries` table, and the new log and task columns, by itself the first time
+  it starts. Nothing to run by hand, and nothing in your tasks, bots or Waiting on you list changes.
+- Feedback and decisions logged through the API now need `by` (who said or decided it). Update any
+  routine that logs feedback (prompt 8 in templates/routine-prompts.md has the new wording).
+- New settings, all optional, for `/etc/agent-swarm/swarm.env` (setup does not change an existing file):
+  `SWARM_LOG_EXPORT_DIR=/var/lib/agent-swarm/log-exports` turns on the weekly log export,
+  `SWARM_RULES_CAP` (25), `SWARM_TASK_TIMEOUT_MAX` (86400) and `SWARM_MAX_CYCLES` (200). Restart the
+  backend after editing: `sudo systemctl restart swarm-backend`.
 - Bind each project bot to its projects if you have not yet, including projects with no repo:
   `sudo swarmctl project set marketing --bot marketing-bot`. A bot can only use the log of projects it is
   bound to.

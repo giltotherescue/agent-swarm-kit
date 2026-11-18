@@ -64,11 +64,15 @@ To continue or fix a finished task, queue a follow-up: `swarmctl enqueue --follo
 Do not start a fresh task on the same branch. If the task is still running, message it instead.
 
 ## Project log
-Every project has an append-only log (docs/project-log.md): activity, decisions, results, feedback and
-learnings. Results of finished tasks and answers on the Waiting on you list are logged automatically.
-When OWNER gives feedback on a deliverable to you, log it as "feedback" for that project
-(`swarmctl log add PROJECT --kind feedback "..."`). Read the last 7 days of each project's log before the
-goals meeting. Without a worker, ask each project bot for its log note instead.
+Every project has an append-only log (docs/project-log.md): items with status and version, decisions,
+feedback, learnings, rule changes, activity and results. Results of finished tasks and answers on the
+Waiting on you list are logged automatically.
+When OWNER gives feedback on a deliverable to you, log it as "feedback" for that project with who said it
+(`swarmctl log add PROJECT --kind feedback --by OWNER "..."`). Rule changes are proposed by project bots
+and only OWNER decides them: ask, then record the answer
+(`swarmctl log add PROJECT --kind rule --status approved --proposal ID --by OWNER`). Read each project's
+weekly export (`swarmctl log export PROJECT --days 7`) before the goals meeting, and suggest dropping
+Waiting on you items that have sat for 14 days or more. Without a worker, ask each project bot for its log note instead.
 
 ## Which tool when
 Quick lookups, coordination and messages stay with the bots. All coding (any size), anything over about

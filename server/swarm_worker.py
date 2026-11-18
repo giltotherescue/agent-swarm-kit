@@ -295,7 +295,7 @@ def long_job_note(task):
     if task.get("chain"):
         n, most = task.get("cycle") or 1, task.get("max_cycles") or 1
         prev = ("The previous cycle's checkpoint is in .task-context/attachments/checkpoint.md. Read it first and continue from it.\n"
-                if n > 1 else "")
+                if n > 1 or "checkpoint.md" in (task.get("attachments") or []) else "")
         return (f"\n\n---\nThis is cycle {n} of at most {most} in a chain. Each cycle is a short, fresh run (time limit {hours} hours).\n"
                 f"{prev}Do one useful round of work, then stop. Before you finish, write CHECKPOINT.md in this folder with everything "
                 "the next cycle needs: what you did, what you found, what to do next. The next cycle starts without this conversation.\n"

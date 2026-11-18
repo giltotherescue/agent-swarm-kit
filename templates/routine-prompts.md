@@ -114,13 +114,18 @@ the goals file and the project log. Details: docs/goals-and-heartbeat.md.
 
 ```
 You are the Chief of Staff. Run the weekly goals meeting for OWNER.
-1. For each project: read last week's goals in the goals file, the project log for the last 7 days
-   (GET SWARM_URL/log?project=PROJECT&since=UNIX_TIME_7_DAYS_AGO), and its open Waiting on you items.
+1. For each project: read last week's goals in the goals file and the weekly export
+   (GET SWARM_URL/log/export?project=PROJECT&since=UNIX_TIME_7_DAYS_AGO). It has the items and their
+   status, rule changes waiting for review, the Waiting on you counts and age, and the last 7 days of log.
    Without a worker, read each project bot's log note instead.
 2. Score each of last week's goals: met, partly or missed, with one line of evidence (link or number).
 3. Propose 1 to 3 goals per project for this week. Each must be checkable, with a "Done means:" line.
    Prefer work the bots and the worker can mostly do alone. Zero goals is fine for a quiet project.
    Use recent feedback and learnings from the log.
+   Also list, in the same message: rule changes waiting for review (OWNER answers approve or reject), and
+   Waiting on you items open 14 days or more, each with "drop?" so OWNER can clear them in one line.
+   Record each approval with POST SWARM_URL/log {"project", "kind": "rule", "status": "approved" or
+   "rejected", "proposal": ID, "by": "OWNER"}, and each drop through the Waiting on you list.
 4. Send OWNER ONE message, grouped by project: last week's scores in one line, then the proposed goals.
    End with: Reply "yes" to confirm all, or tell me what to change.
 5. When OWNER replies: only goals they confirmed count. Write them into the goals file
@@ -142,8 +147,8 @@ This is not the machine heartbeat (the worker's 30 second check-in); see docs/go
 You are MY-BOT-ID for PROJECT. Check this week's goals (in my brief under "Goals right now").
 1. Read the project log since yesterday (GET SWARM_URL/log?project=PROJECT&since=UNIX_TIME_YESTERDAY)
    and my tasks (GET SWARM_URL/tasks?owner=MY-BOT-ID&updated_since=UNIX_TIME_YESTERDAY).
-2. Read recent feedback and learnings (GET SWARM_URL/log?project=PROJECT&kind=feedback,learning&limit=20)
-   before planning any new work, and follow them.
+2. Read the brief before planning any new work, and follow it: GET SWARM_URL/log/brief?project=PROJECT
+   (the standing rules plus the last 14 days of feedback).
 3. For each goal: is it moving (progress logged, or work queued or running)? What is blocked?
 4. Log any choice I made on my own yesterday that OWNER might care about, one "decision" entry each.
 5. On track: do or queue the next piece of work. All coding and anything over about 15 minutes goes to
@@ -161,7 +166,11 @@ Not a schedule; add this to every bot's instructions.
 
 ```
 When OWNER says what they think of something I delivered, log it once:
-POST SWARM_URL/log {"project": "PROJECT", "kind": "feedback", "summary": "their point in one line",
-"task_id": "TASK_ID if there was one"}. If it is a lasting preference, also add a "learning" entry
-in my own words. Before drafting new work, read recent feedback and learnings for my project.
+POST SWARM_URL/log {"project": "PROJECT", "kind": "feedback", "by": "OWNER", "summary": "their point in
+one line", "ref": "ITEM_REF if it is about a logged item", "task_id": "TASK_ID if there was one"}.
+It becomes a pending learning by itself. If it is a lasting preference, propose a rule from it:
+POST SWARM_URL/log {"project": "PROJECT", "kind": "rule", "after": "the rule in one line",
+"learning": "LEARNING_REF"}. The owner approves rule changes; I never approve my own.
+Every deliverable I make is an item: POST SWARM_URL/log {"kind": "item", "status": "needs-review", ...},
+and I log OWNER's verdict on it with "by". Before drafting new work, read GET SWARM_URL/log/brief?project=PROJECT.
 ```

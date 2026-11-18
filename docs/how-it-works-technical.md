@@ -210,14 +210,33 @@ flowchart TD
 flowchart LR
     finish["POST /tasks/ID/finish (done or failed)"] -->|"auto: result"| log[("log_entries")]
     answer["Waiting on you: answer or drop, or a human-waiting task answered"] -->|"auto: decision"| log
-    bots["Project bots: POST /log (bound projects only)"] -->|"activity, decision, feedback, learning"| log
+    bots["Project bots: POST /log (bound projects only)"] -->|"item, decision, feedback, learning, rule proposal, activity"| log
     task["Running task: POST /log (its own project)"] --> log
-    log -->|"GET /log, kind=feedback,learning"| bots
+    log -->|"feedback: auto pending learning"| log
+    owner["Owner via Chief of Staff or admin"] -->|"rule approved or rejected"| log
+    log -->|"GET /log/brief: standing rules + 14 days of feedback"| bots
     log -->|"GET /log, last 7 days"| meeting["Weekly goals meeting (Chief of Staff)"]
     meeting -->|"confirmed goals: decision entries"| log
     meeting -->|"goals"| bots
-    log -->|"GET /log/export"| md["Markdown digest per project"]
+    log -->|"GET /log/export, weekly to SWARM_LOG_EXPORT_DIR"| md["Markdown export per project (optional git)"]
 ```
+
+Records that change (items, learnings, rules) are runs of entries sharing a `ref`; the newest entry is
+the current state, so nothing is edited in place. A verdict names the item version it judged, and a new
+version makes older verdicts stale.
+
+## Chains (long-running jobs)
+
+```mermaid
+flowchart LR
+    c1["Cycle 1 runs (fresh session)"] -->|"done + CHECKPOINT.md"| fin["POST /finish with checkpoint"]
+    fin -->|"cycle < max_cycles"| c2["Cycle 2 queued as a follow-up, checkpoint.md attached"]
+    fin -->|"no checkpoint, max reached, or failed"| stop["Chain ends: owner notified"]
+    fin -->|"one result entry per cycle"| log[("log_entries")]
+    cancel["Cancel any cycle"] -->|"cancels every live cycle"| stop
+```
+
+Every cycle shares `chain_root` (the first cycle's id). See [long-running-jobs.md](long-running-jobs.md).
 
 Auto-entries carry a dedupe key (`task:ID:result`, `item:ID:answer:REVISION`, and so on) in a unique
 index per project, so a replayed finish or answer never logs twice. Details and permissions:

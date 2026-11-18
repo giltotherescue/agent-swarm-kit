@@ -206,8 +206,8 @@ def log_query(a):
 
 def cmd_log(a):
     if a.action == "add":
-        if not a.project or not a.summary:
-            sys.exit("swarmctl: log add needs a project and a summary: swarmctl log add PROJECT --kind KIND \"SUMMARY\"")
+        if not a.project:
+            sys.exit("swarmctl: log add needs a project: swarmctl log add PROJECT --kind KIND \"SUMMARY\"")
         detail = read_prompt(a.detail) if a.detail else None
         body = {"project": a.project, "kind": a.kind or "activity", "summary": a.summary, "detail": detail,
                 "links": a.link or [], "task_id": a.task_id, "dedupe_key": a.key, "by": a.by, "status": a.status, "ref": a.ref,

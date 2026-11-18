@@ -14,6 +14,7 @@ worker.
 | **Grok Bot connectors** | Your own accounts: Gmail, Slack, calendar, analytics, docs | Data you do not own, bulk pulls |
 | **treg** | Paid data without a subscription (SEO, search results, enrichment), and your own private tools it connects to, like Google Search Console and Google Ads | Accounts a connector already covers well, big batches without asking |
 | **The worker** | All coding of any size, jobs over about 15 minutes, design, deep research, bulk scraping, work that should run on a specific model | Quick replies, chat, anything that needs you right now |
+| **A chain on the worker** | Jobs that run for days and steer themselves, as short cycles that each hand a checkpoint to the next | One-off tasks; anything you want to watch step by step |
 | **Executor** | Later: when a worker task needs one of your connected tools too | Day one. Skip it at first |
 
 ## The bot itself
@@ -84,6 +85,12 @@ Examples:
 
 The bot writes the brief, queues it, and gets the result back in its own inbox. You hear about it only
 when there is something to look at or decide.
+
+**Jobs that run for days.** Some jobs are their own orchestrator, like a "polisher" that keeps walking
+through the app, fixing bugs and testing again. Run those as a **chain**: each cycle is a short run that
+writes a checkpoint and queues the next cycle, so a stuck cycle costs little, and cancelling any cycle
+stops the whole chain. A single long run with a bigger time limit is possible too, but it is not the
+default. See [long-running-jobs.md](long-running-jobs.md).
 
 ## Executor
 

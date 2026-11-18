@@ -58,7 +58,7 @@ Walk the bot through [../templates/bot-setup-checklist.md](../templates/bot-setu
 
 - **Check:** `swarmctl status` lists it under `STUCK (no heartbeat)` when its lease ran out.
 - **What happens:** the worker heartbeats every 30 seconds. With no heartbeat for 10 minutes, the backend requeues the task (outcome `lost`), or fails it after `max_attempts`. Nothing to do in most cases.
-- **If it is running but slow:** look at the runner's log `/var/lib/swarm-runner/logs/TASK_ID.log`, and the agent's files in `/home/agent/work/TASK_ID/.task-context/`. Runs (model and script) stop after `SWARM_TASK_TIMEOUT` seconds (default 4 hours). The watchdog alerts the Chief of Staff if a task runs 30 minutes past that.
+- **If it is running but slow:** look at the runner's log `/var/lib/swarm-runner/logs/TASK_ID.log`, and the agent's files in `/home/agent/work/TASK_ID/.task-context/`. Runs (model and script) stop after `SWARM_TASK_TIMEOUT` seconds (default 4 hours), or the task's own `--timeout-minutes`. The watchdog alerts the Chief of Staff if a task runs 30 minutes past that.
 - **To stop it:** `swarmctl cancel TASK_ID`. The task is cancelled at once; the runner stops the agent within a minute and publishes nothing.
 
 ## A task waits forever

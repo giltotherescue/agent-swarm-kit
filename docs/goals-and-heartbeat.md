@@ -19,8 +19,11 @@ The word "heartbeat" means two separate things in this kit. They have nothing to
 | Who runs it | Each project bot, as a Grok Bot routine | The worker program, automatically |
 | How often | Once a day | Every 30 seconds while a task runs |
 | What happens if it is missed | Nothing breaks; a goal may slip unnoticed | After 10 minutes of silence the backend puts the task back in the queue, and the Chief of Staff gets an alert if no worker checks in |
-| Costs tokens | A little, once a day per bot | No |
+| Costs tokens | A little, once a day per bot | None. It is a plain network call from the worker program to the backend, with no model involved |
 | Needs a worker | No | Yes |
+
+The machine heartbeat never runs a model, so it costs nothing however long a task runs, including
+chains and long-running jobs ([long-running-jobs.md](long-running-jobs.md)).
 
 This page is about the work heartbeat. The machine heartbeat is described in
 [how-it-works-technical.md](how-it-works-technical.md) and [routines.md](routines.md).
@@ -95,8 +98,8 @@ little each day, so keep it tight.
 3. **What did I decide?** Any choice it made on its own yesterday that the human might care about
    gets one `decision` entry in the project log (for example "used the blue banner, the red one
    failed contrast checks").
-4. **Read recent feedback and learnings** in the project log before planning new work, so the same note
-   never has to be given twice.
+4. **Read the brief** (`swarmctl log brief PROJECT`: the standing rules plus the last 14 days of
+   feedback) before planning new work, so the same note never has to be given twice.
 
 ### What the bot does next
 

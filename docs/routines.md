@@ -47,8 +47,8 @@ The Waiting on you list (`GET /waiting?status=due`) holds every open decision an
 
 The goals meeting gives every project one to three goals a week, each with a "Done means" line you
 confirmed. The work heartbeat is each project bot checking those goals once a day. It is not the
-worker's machine heartbeat (a check-in every 30 seconds while a task runs, with the task put back in the
-queue after 10 minutes of silence). Both are explained in [goals-and-heartbeat.md](goals-and-heartbeat.md).
+worker's machine heartbeat (a plain network check-in every 30 seconds while a task runs, which uses no
+model and no tokens, with the task put back in the queue after 10 minutes of silence). Both are explained in [goals-and-heartbeat.md](goals-and-heartbeat.md).
 The project log ([project-log.md](project-log.md)) is what they both read.
 
 ### Nightly memory cleanup

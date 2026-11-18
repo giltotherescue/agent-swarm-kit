@@ -1,4 +1,5 @@
 """Project log (0.3.0): permissions, auto-entries, export, migration and the swarmctl commands."""
+import json
 import os
 import sqlite3
 import subprocess
@@ -322,6 +323,13 @@ class ProjectLogTest(unittest.TestCase):
         r = ctl("log", "export", "--dir", os.path.join(tmp, "all"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sorted(os.listdir(os.path.join(tmp, "all"))), ["marketing-log.md", "marketing-rules.md"])
+        # Record commands need no summary: a status move and the brief.
+        r = ctl("log", "add", "marketing", "--kind", "item", "--status", "draft", "Newsletter header")
+        ref = json.loads(r.stdout)["entry"]["ref"]
+        r = ctl("log", "add", "marketing", "--kind", "item", "--ref", ref, "--status", "needs-review")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{ref}", ctl("log", "items", "marketing").stdout)
+        self.assertIn("# Rules: marketing", ctl("log", "brief", "marketing").stdout)
         r = ctl("log", "add", "site", "--kind", "activity", "not mine")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("403", r.stderr)

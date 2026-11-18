@@ -8,7 +8,7 @@ See docs/updating-the-kit.md for how to update.
 
 Easier to start and easier to keep going. The README is friendlier, your Grok Bot can now set the whole
 kit up for you, bots get weekly goals and a daily check, and every project keeps a log. The backend
-change (the project log) is covered by automated tests; 0.3.0 has not had its own fresh-server install
+changes (the project log and long-running jobs) are covered by automated tests; 0.3.0 has not had its own fresh-server install
 run yet (0.2.1 has, see docs/worker-setup.md "Tested on").
 Upgrade steps: docs/updating-the-kit.md ("Upgrading from 0.2.1 to 0.3.0").
 
@@ -18,13 +18,40 @@ Added:
   backend, project bots, connectors, treg, Executor, approvals, goals meeting time) is explained in plain
   words with a recommended default. It never asks for secrets in chat and confirms anything that costs
   money.
-- Project log: one append-only history per project in the backend (new `log_entries` table, created
-  automatically on upgrade). Kinds: activity, decision, result, feedback, learning. `swarmctl log
-  add|list|export`, and `POST /log`, `GET /log`, `GET /log/export` (Markdown digest). Finished and
-  failed tasks add a `result` entry by themselves; answering or dropping a Waiting on you item, or
-  answering a task's question for the human, adds a `decision` entry. Project bots read and write only
-  projects they are bound to; a running task writes only to its own project; the worker token has no
-  access. Repeated requests never log twice. Docs: docs/project-log.md.
+- Project log: one append-only, typed history per project in the backend (new `log_entries` table,
+  created automatically on upgrade). Docs: docs/project-log.md, with a marketing example.
+  - Records: items (deliverables with status draft, needs-review, approved, changes or rejected, and a
+    version), decisions (`by`, answer, source, date), feedback (`by` required), learnings (pending or
+    standing), rule changes, activity and results. Items, learnings and rules have a stable `ref`; a
+    change is a new entry, never an edit.
+  - A new version of an item voids older verdicts; a verdict on an old version is refused.
+  - Feedback becomes a pending learning automatically. Rule changes are proposals that store the text
+    before and after, and only the owner (admin or Chief of Staff) approves them. Each project has one
+    short rules doc (at most 25 rules, `SWARM_RULES_CAP`) with a changelog.
+  - Bots read the standing rules plus a 14-day feedback digest before drafting: `swarmctl log brief`,
+    `GET /log/brief`.
+  - Bad records are refused: unknown kind, status or bot, missing `by`, unknown `ref`.
+  - Throwaway items take `expires_days`; once expired they leave every view and are deleted.
+  - `swarmctl log add|list|export|items|rules|brief`; `POST /log`, `GET /log`, `/log/items`,
+    `/log/rules`, `/log/brief`, `/log/export`. Plain Markdown and JSON, readable by agents with their
+    own token.
+  - Weekly Markdown export per project to `SWARM_LOG_EXPORT_DIR`, and an optional local git repo per
+    project (`swarmctl project set NAME --log-git`) so changes show as diffs.
+  - Automatic entries: finished and failed tasks add a `result`; answering or dropping a Waiting on you
+    item, or answering a task's question for the human, adds a `decision`. Repeated requests never log
+    twice. Project bots read and write only projects they are bound to; a running task writes only to
+    its own project; the worker token has no access.
+- Waiting on you shows counts and age: open, snoozed, oldest in days, and how many have been open 14
+  days or more. The weekly export lists those old items under "Consider dropping these", and the goals
+  meeting prompt asks the Chief of Staff to suggest drops.
+- Long-running jobs (docs/long-running-jobs.md):
+  - Chains, the recommended way: `swarmctl enqueue --chain --max-cycles N`. Each cycle is a short, fresh
+    run that writes `CHECKPOINT.md`; the backend queues the next cycle as a follow-up with the checkpoint
+    attached. One project log entry per cycle; the owner hears only when the chain ends. Cancelling any
+    cycle cancels the whole chain.
+  - Per-task time limit: `--timeout-minutes`, up to the admin maximum `SWARM_TASK_TIMEOUT_MAX`
+    (default one day), and a `long-running` task kind that uses that maximum and keeps a checkpoint in
+    its folder. The task token and the watchdog follow the task's own limit.
 - Weekly goals meeting (Chief of Staff) and daily work heartbeat (each project bot): prompts 6 to 8 in
   templates/routine-prompts.md, a goals file template (templates/goals.md), and
   docs/goals-and-heartbeat.md, which also explains how this differs from the worker's 30 second machine
@@ -43,6 +70,10 @@ Changed:
 - Chief of Staff and project bot templates: goals meeting, work heartbeat, project log and the feedback
   loop (bots read recent feedback and learnings before drafting), setup choices, and "all coding goes to
   the worker". The model routing template says the same.
+- Docs say plainly that the worker's 30 second machine heartbeat is a network call with no model, so it
+  uses no tokens.
+- README "which tool when" has a row for chains, linking docs/long-running-jobs.md.
+- Logging feedback or a decision through the API now needs `by`. Routine prompt 8 shows the new call.
 - Backend, worker, `agent-exec` and `swarmctl` report version 0.3.0.
 
 ## 0.2.1 (2026-11-18)

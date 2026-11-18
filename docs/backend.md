@@ -11,7 +11,7 @@ A background loop runs every few seconds. It:
 - puts running tasks back in the queue when their runner stopped checking in (the lease is 10 minutes), or fails them after `SWARM_MAX_ATTEMPTS` tries;
 - reopens snoozed Waiting on you items when the snooze ends;
 - sends one reminder to a bot whose task has waited on it for `SWARM_REMIND_HOURS` (12), and after `SWARM_ESCALATE_HOURS` (24) puts it on Waiting on you and tells the Chief of Staff;
-- runs a watchdog: one alert when tasks are due but no runner has checked in for 10 minutes, and one alert when a task runs 30 minutes past `SWARM_TASK_TIMEOUT`;
+- runs a watchdog: one alert when tasks are due but no runner has checked in for 10 minutes, and one alert when a task runs 30 minutes past its time limit (its own `timeout`, or `SWARM_TASK_TIMEOUT`);
 - delivers pending notices to bot inboxes, with retries and a fallback to the Chief of Staff;
 - once a day, deletes files of tasks that finished more than `SWARM_FILE_RETENTION_DAYS` (90) days ago, and sent notices older than 30 days.
 
@@ -28,7 +28,7 @@ A background loop runs every few seconds. It:
 | `projects` | Default repo, extra repos, bound bots, provider and model, and the push rules |
 | `items` | The Waiting on you list |
 | `notices` | The delivery outbox. One row per event per bot, with a unique key so nothing is queued twice |
-| `log_entries` | The project log (0.3.0): one append-only history per project, with activity, decisions, results, feedback and learnings. See [project-log.md](project-log.md) |
+| `log_entries` | The project log (0.3.0): one append-only, typed history per project: items (status and version), decisions, feedback, learnings, rule changes, activity and results. See [project-log.md](project-log.md) |
 
 Task states: `queued`, `running`, `waiting`, `done`, `failed`, `cancelled`. A waiting task has `waiting_on` set to `owner` (the bot that queued it) or `human`.
 

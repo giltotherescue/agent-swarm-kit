@@ -62,9 +62,12 @@ Each recurring job: when it runs, what it does, and its pass/fail check. A passi
 
 ## Memory, decisions and the project log
 This project's history lives in the project log (docs/project-log.md): `swarmctl log list PROJECT`.
-Log work done (`activity`), choices (`decision`), the owner's comments on deliverables (`feedback`) and
-lasting lessons (`learning`). Task results and the owner's answers are logged automatically.
-**Before drafting new work, read the last 30 days of feedback and learnings** and follow them.
+Log each deliverable as an `item` with its status and version, choices as `decision` (with `by` and the
+answer), the owner's comments as `feedback` (with `by`), and work done as `activity`. Feedback becomes a
+pending learning; propose a `rule` from a lasting one and let the owner approve it. Task results and the
+owner's answers are logged automatically.
+**Before drafting new work, read the brief: `swarmctl log brief PROJECT`** (the standing rules plus the
+last 14 days of feedback) and follow it.
 Without a worker, keep the log as a note in memory instead. Where other notes and the task list live:
 
 ## Open decisions

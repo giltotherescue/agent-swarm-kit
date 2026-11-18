@@ -76,6 +76,7 @@ worker, or an afternoon with one.
 | **Grok Bot connectors** | Your own accounts, quick reads and drafts | Gmail, Slack, your calendar, analytics |
 | **treg** | Paid data with no subscription, and some private tools it connects to | Keyword and SERP data, contact enrichment, Google Search Console, Google Ads |
 | **The worker** | All coding (any size), jobs over about 15 minutes, design, deep research, bulk scraping, a specific model | A pricing page change, a 40-page competitor study, a second-model review |
+| **A chain on the worker** | Jobs that run for days as their own orchestrator, in short cycles that hand on a checkpoint ([long-running jobs](docs/long-running-jobs.md)) | A "polisher" that keeps walking the app, fixing bugs and testing again |
 | **The bot itself** | Quick lookups, coordination, messages | "What did we decide about the logo?", replying in Slack |
 | **Executor** | Later, only if the worker needs your connected tools too | A worker task that must read your CRM |
 
@@ -185,7 +186,8 @@ Start with the concepts, then follow your path.
 - [Concepts](docs/concepts.md): bots, tasks, states, reports, the Waiting on you list.
 - [Which tool when](docs/which-tool-when.md): connectors, treg, the worker or Executor.
 - [Goals meeting and work heartbeat](docs/goals-and-heartbeat.md): how bots keep moving each week.
-- [Project log](docs/project-log.md): a history of work, decisions and feedback for every project.
+- [Project log](docs/project-log.md): items with status and version, decisions, feedback, and a short rules doc per project.
+- [Long-running jobs](docs/long-running-jobs.md): jobs that run for days, as a chain of short cycles.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Worker server setup](docs/worker-setup.md): any provider, Tailscale, and the security baseline.
 - [Sizing and sandboxes](docs/sizing-and-sandboxes.md): how big a server, and when to offload tests.

@@ -71,7 +71,8 @@ Subscriptions have usage limits, and sometimes one runs out before the reset.
 - `SWARM_MAX_PARALLEL` (default 2) caps how many tasks run at once. More parallel tasks burn your subscription limits faster and need a bigger server. See [sizing and sandboxes](sizing-and-sandboxes.md).
 - When Claude hits a usage limit, the worker retries on `SWARM_FALLBACK_PROVIDER` (Codex by default). Without a fallback, the task waits and retries later (one hour, then doubling up to a day).
 - `SWARM_MAX_ATTEMPTS` (default 5) caps how many times a task resumes on its own before it asks its owner. This stops a confused task from looping all night.
-- `SWARM_TASK_TIMEOUT` (default 14400 seconds, 4 hours) stops a single run that never ends, model or script.
+- `SWARM_TASK_TIMEOUT` (default 14400 seconds, 4 hours) stops a single run that never ends, model or script. A task may ask for its own limit with `--timeout-minutes`, up to `SWARM_TASK_TIMEOUT_MAX` (default one day). Jobs that run for days are best run as a chain of short cycles ([long-running jobs](long-running-jobs.md)).
+- The worker's 30 second heartbeat is a plain network call to the backend. It runs no model and uses no tokens.
 - The worker does not claim new work when the box is busy (`SWARM_MAX_LOAD_PER_CPU`, `SWARM_MIN_FREE_MEM_MB`).
 
 All of these live in the [settings file](../config/swarm.env.example).
