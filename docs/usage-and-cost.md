@@ -38,7 +38,7 @@ See [routine prompts](../templates/routine-prompts.md) for routines written this
 
 The backend posts each result straight to the owning bot. The Chief of Staff does not relay results, so you do not pay for two bot turns per result. The Chief of Staff only wakes for ownerless tasks, questions for the human, alerts and fallbacks.
 
-Notices are sent only when a task changes to done, failed, cancelled or waiting. Nothing is sent for "queued" or "running", and the same event is never sent twice.
+Notices are sent only when a task changes to done, failed, cancelled or waiting (plus a reminder or escalation if a task waits too long). Nothing is sent for "queued" or "running". A notice can arrive more than once, so each bot skips an `event_id` it has already handled; that check is cheap.
 
 ## Pick the right model
 
@@ -58,19 +58,27 @@ The worker runs the command, uploads `artifacts/script.log`, and reports the exi
 
 Tell coding agents to run only the tests for the files they touched, and leave the full suite to a script task or to your CI (continuous integration, for example GitHub Actions).
 
+## When a provider runs out
+
+Subscriptions have usage limits, and sometimes one runs out before the reset.
+
+- **Shift work to the other provider.** If Claude is out, queue new work with `-P codex`, and the other way round. The worker does this by itself for a task that hits a limit when `SWARM_FALLBACK_PROVIDER` is set.
+- **Banked resets need a yes every time.** Some plans let you bank a usage reset and spend it early. Spending one needs the owner's explicit OK each time. A bot never spends one on its own, and an earlier yes does not cover the next one.
+- **Check the provider's own usage page** to see where you stand. Do not guess from task counts.
+
 ## Limits and fallback
 
 - `SWARM_MAX_PARALLEL` (default 2) caps how many tasks run at once. More parallel tasks burn your subscription limits faster and need a bigger server. See [sizing and sandboxes](sizing-and-sandboxes.md).
 - When Claude hits a usage limit, the worker retries on `SWARM_FALLBACK_PROVIDER` (Codex by default). Without a fallback, the task waits and retries later (one hour, then doubling up to a day).
 - `SWARM_MAX_ATTEMPTS` (default 5) caps how many times a task resumes on its own before it asks its owner. This stops a confused task from looping all night.
-- `SWARM_TASK_TIMEOUT` (default 14400 seconds, 4 hours) stops a single run that never ends.
+- `SWARM_TASK_TIMEOUT` (default 14400 seconds, 4 hours) stops a single run that never ends, model or script.
 - The worker does not claim new work when the box is busy (`SWARM_MAX_LOAD_PER_CPU`, `SWARM_MIN_FREE_MEM_MB`).
 
 All of these live in the [settings file](../config/swarm.env.example).
 
 ## Duplicates
 
-Queuing the same brief twice while the first copy is still queued, running or waiting returns the first task instead of starting a second run. Use `--key` with a stable idempotency key when a bot might retry, and `--allow-duplicate` only when you really want two runs.
+Queuing the same work twice (same brief, repo, branch, flags and attachments) from the same owner while the first copy is still queued, running or waiting returns the first task instead of starting a second run. Use `--key` with a stable idempotency key when a bot might retry, and `--allow-duplicate` only when you really want two runs.
 
 ## A monthly look
 

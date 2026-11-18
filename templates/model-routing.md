@@ -13,7 +13,8 @@ to let a CLI pick its own default). Check the current list with `claude` then `/
 | Everyday coding | worker | `-P codex -m default` or `-P claude -m sonnet` |
 | Frontend and web design | worker | `-P claude -m sonnet` |
 | Cheap research, scraping, bulk lookups | worker | `-P claude -m haiku` or a small Codex model |
-| Running a full test suite | worker, no model | `--command "npm test"` (script task) |
+| Running a full test suite | worker, no model | `--command "npm test"` (script task; always, never in a model session) |
+| Images (graphics, illustrations, mockups) | worker | `-P codex -m default` (Codex CLI's built-in image generation, no image API key) |
 | Inbox triage, support queues, stats, scheduling, coordination | the bot itself | none |
 | Quick lookups that take under a few minutes | the bot itself | none |
 

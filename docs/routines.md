@@ -14,11 +14,16 @@ These are installed by `scripts/setup-worker.sh` as systemd timers.
 
 | Timer | When | What it does |
 | --- | --- | --- |
-| `swarm-cleanup.timer` | Daily, 03:40 | `server/swarm_cleanup.py`. Removes git-ignored bulky folders (such as `node_modules`) of tasks finished over 1 day ago, and whole folders of tasks finished over 7 days ago. Saves unpushed commits and uncommitted changes to `~/backups/work/DATE/` first. Never touches queued, running or waiting tasks, or anything changed in the last 48 hours |
+| `swarm-cleanup.timer` | Daily, 03:40 | `server/swarm_cleanup.py`. Removes git-ignored bulky folders (such as `node_modules`) of tasks finished over 1 day ago, and whole folders of tasks finished over 7 days ago. Before deleting a folder it saves an archive of everything in it (including new untracked files) plus a git bundle of unpushed commits to `~/backups/work/DATE/`, and checks the archive first. Never touches queued, running or waiting tasks, anything changed in the last 48 hours, or a repo that a live git worktree points into |
 | `swarm-backup.timer` | Nightly, 03:10 | `scripts/backup.sh`. Copies the backend database to `/var/lib/agent-swarm/backups` |
 | `swarm-disk-alert.timer` | Hourly | `scripts/disk-alert.sh`. If the disk is over 80 percent, sends one alert per day to the Chief of Staff |
 
-The backend itself requeues tasks whose worker went quiet and resumes tasks that ended with `next` or hit a usage limit. You do not need an AI supervisor for that.
+The backend itself requeues tasks whose worker went quiet and resumes tasks that ended with `next` or hit a usage limit. It also:
+
+- reminds the owner bot once when a task has waited on it for 12 hours, and puts it on the Waiting on you list (once) after 24 hours;
+- sends one alert to the Chief of Staff when tasks are queued but no worker has checked in for 10 minutes, or when a task runs well past its time limit (a watchdog).
+
+You do not need an AI supervisor for that.
 
 If you make a folder by hand on the worker, put it in `/home/agent/work/scratch/`. Cleanup removes scratch folders unchanged for 14 days, after backing up unpushed work.
 
@@ -29,7 +34,7 @@ If you make a folder by hand on the worker, put it in `/home/agent/work/scratch/
 | Task result handler | Every bot | Its own webhook | Acts on its own task results and questions. See [results-routing.md](results-routing.md) |
 | Morning decision batch | Chief of Staff | Daily, early morning | All decisions for the human in one message, each with a recommendation |
 | Nightly memory cleanup | Every bot | Daily, night | Keeps memory short, which keeps every run cheaper |
-| Fallback and alerts handler | Chief of Staff | Its own webhook | Ownerless results, failed deliveries, waiting-on-human questions, disk alerts |
+| Fallback and alerts handler | Chief of Staff | Its own webhook | Ownerless results, failed deliveries, waiting-on-human questions, escalated waits, watchdog and disk alerts |
 | Weekly kit improvement note | Chief of Staff, optional | Weekly | Turns patterns in failures into concrete suggestions |
 
 ### Morning decision batch
@@ -38,7 +43,11 @@ The Waiting on you list (`GET /waiting?status=due`) holds every open decision an
 
 ### Nightly memory cleanup
 
-Bot memory grows every day. Long memory makes every run slower and more expensive. The cleanup merges duplicates, moves lasting facts into the project brief, and drops stale notes. It also withdraws the bot's own obsolete Waiting on you items.
+Bot memory grows every day. Long memory makes every run slower and more expensive. The cleanup merges duplicates, moves lasting facts into the project brief, and drops stale notes. It also withdraws the bot's own obsolete Waiting on you items, and scans the day's chat for asks to the human that were never filed on the list, and files them (with a stable key, so nothing is filed twice).
+
+### One inbox, one dispatcher
+
+Every bot has one inbox routine. It looks at the `event` field (what happened: `task`, `item_answer`, `item_drop`, `reminder`, `escalated`, `watchdog`, `alert`, `test`) and skips anything whose `notify_target` is not its own bot id. It also skips any `event_id` it already handled, because a delivery can arrive more than once.
 
 ## Keeping routines cheap
 

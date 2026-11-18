@@ -14,7 +14,8 @@ Who is involved, what they own, how to reach them. Include other bots that touch
 
 ## Repos and environments
 Repos (owner/name and default branch), hosting, and each environment with its address (production,
-staging). How deploys happen. Who merges (default: a human).
+staging). How deploys happen. Who merges (default: a human). The project must list this bot
+(`swarmctl project set PROJECT --repo OWNER/REPO --bot BOT-ID`) before it can queue repo work.
 
 ## Channels to watch
 Inboxes, chat channels, support queues, and how often to check them.
@@ -34,7 +35,9 @@ with the backend, see templates/bot-setup-checklist.md) and the date it was last
 
 ## Tests
 How tests run for each repo: the command for one file, and for the full suite. Full suites run as
-script tasks (`swarmctl enqueue --command "..."`), not inside a model session. Anything that cannot
+script tasks (`swarmctl enqueue --command "..."`), not inside a model session: no tokens, reliable, and
+they run next to model work. If tests are heavy, say where they run instead (CI or a cloud sandbox,
+proven once against CI). Never edit tests just to make them pass somewhere else. Anything that cannot
 run on the worker (needs real services or secrets) and where it runs instead.
 
 ## Permissions
@@ -43,6 +46,9 @@ Defaults are in docs/approvals.md. Changes for this project:
 - Production data: none / read-only through WHAT.
 - Always needs the owner's yes: messages that go outside, spending money, deleting things, LIST MORE.
 - Never touches: ONE LINE. Paste it into every task brief for work near any of it.
+
+There is exactly one "Never touches" line. On day one the bot repeats it back to the owner in one
+message ("I will never touch: ...") so the owner can correct it.
 
 ## Routines and their checks
 Each recurring job: when it runs, what it does, and its pass/fail check. A passing run sends no message.

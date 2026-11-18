@@ -1,9 +1,26 @@
 # agent-swarm-kit
 
-Set up your own swarm of AI agents: a team of Grok Bot bots that plan and coordinate, and an always-on
-server (the "worker") that does the real work with Claude Code and Codex on your own subscriptions.
+Set up your own team of AI helpers. You chat with a few Grok Bot bots that plan and keep you organized,
+and (if you want) an always-on computer in the cloud does the long, heavy work for them with Claude Code
+and Codex, on the subscriptions you already pay for.
 
-This kit gives you the instructions, templates and code to run it. It works in two ways:
+## What you get
+
+- **A Chief of Staff bot.** One bot you talk to about everything. It keeps track of what needs you and
+  sends you one short list of decisions each morning.
+- **A project bot for each project.** A business, a website, an app. Each one owns its project from end
+  to end and knows its goals, people and limits.
+- **A worker that does the heavy lifting (optional).** A worker is a rented server (a computer in the
+  cloud that is always on). It runs long jobs, code changes, research and anything that needs a strong or
+  specific AI model, while you sleep if you like.
+- **Results that come back to the right bot.** When a job finishes, the bot that asked for it gets the
+  result directly. No middleman bot reading everything.
+- **One "Waiting on you" list.** Every decision that needs you lands in one place. You can answer, snooze
+  or drop each one. Dropping is fine.
+- **Light rules.** Nothing goes outside, nothing is deleted, and no money is spent without your yes.
+  Everything else just gets done.
+
+## Two ways to run it
 
 - **Grok Bot only.** No server. Good for non-technical people. Your bots plan, draft, research and keep
   you organized. [Start here](docs/grokbot-only.md).
@@ -12,109 +29,90 @@ This kit gives you the instructions, templates and code to run it. It works in t
 
 You can start with the first and add a worker later. Nothing has to be redone.
 
+## How it works, in pictures
+
+### Who does what
+
+```mermaid
+flowchart LR
+    you(["You"])
+    cos["Your Chief of Staff bot: keeps you organized"]
+    pb["Your project bots: one per project"]
+    worker["The worker: does the heavy lifting"]
+    list["Your Waiting on you list"]
+
+    you <-->|"chat"| cos
+    you <-->|"chat"| pb
+    cos <-->|"coordinates"| pb
+    pb -->|"hands off big jobs"| worker
+    worker -->|"results"| pb
+    cos -->|"one morning list"| list
+    list -->|"you decide"| you
+```
+
+Your bots are the managers. They talk with you, plan, and write up jobs. The worker is the doer: it uses
+Claude Code and Codex to do the long or hard work.
+
+### A day in the life of a request
+
+```mermaid
+flowchart TD
+    a["You ask your website bot: refresh the pricing page"]
+    b["The bot writes up the job and hands it to the worker"]
+    c["The worker does the work with Claude or Codex"]
+    d{"Does it need a choice?"}
+    e["The website bot gets the result and checks it"]
+    f["You get one short message with a link to review"]
+
+    a --> b --> c --> d
+    d -->|"no"| e
+    d -->|"yes, the bot answers or asks you"| c
+    e --> f
+```
+
+The result goes back to the same bot that asked. If the worker gets stuck on a question, that bot
+answers it, or asks you if only you can decide. The work then picks up where it stopped.
+
+### Where decisions land
+
+```mermaid
+flowchart LR
+    pb["Your project bots"]
+    job["Jobs on the worker"]
+    cos["Your Chief of Staff bot"]
+    list["Waiting on you list"]
+    you(["You: yes, no, later or drop"])
+
+    pb -->|"a decision for you"| list
+    job -->|"a question only you can answer"| list
+    cos -->|"one message each morning"| you
+    list --> cos
+    you -->|"your answer"| cos
+    cos -->|"passes it back so work continues"| pb
+```
+
+Developers who want the full technical view (states, tokens, routing rules) can read
+[how it works, technical](docs/how-it-works-technical.md).
+
 ## Who it is for
 
 - People who already use Grok Bot and want several bots to work as one team.
 - Developers who want agents to make pull requests overnight while they sleep, and wake up to a short list
   of decisions.
-- Anyone who wants AI help without paying per token: the default runs on the Claude and ChatGPT
+- Anyone who wants AI help without paying per use: the default runs on the Claude and ChatGPT
   subscriptions you already have.
 
-## How it works
+## Trust model
 
-You talk to one bot, the **Chief of Staff**. Each project (a business, a website, an app) gets its own
-**project bot** that owns that project end to end. The bots are the managers. They do not do long work.
-They write it down as a **task** and send it to the **worker**.
+This kit is for **one trusted owner** (you) running a **dedicated worker** (a server used only for this).
+The bots are your own bots. It is not a shared service for strangers. Within that:
 
-The worker is a server you rent (about 4 CPUs and 8 GB of memory to start). It runs a small **backend**
-that stores every task, and a runner that picks up tasks and runs them with the Claude Code or Codex
-command line tools (CLI means command line interface). When a task finishes, or needs an answer, the
-backend tells the bot that owns it, directly.
+- One job on the worker cannot read or change another job.
+- A project bot cannot see or act on another bot's jobs.
+- Jobs never hold the worker's long-lived key or your GitHub login. The worker itself pushes code and
+  opens draft pull requests after checking the rules.
 
-```mermaid
-flowchart LR
-    human([You])
-    subgraph grok[Grok Bot: command and control]
-        cos[Chief of Staff bot]
-        pb1[Project bot A]
-        pb2[Project bot B]
-    end
-    subgraph worker[Worker server, reached over Tailscale]
-        backend[(Backend:<br/>tasks, answers,<br/>reports, Waiting on you)]
-        runner[Task runner]
-        cli[Claude Code and Codex CLIs<br/>on your subscriptions]
-    end
-    gh[(GitHub)]
-
-    human <-- chat --> cos
-    human <-- chat --> pb1
-    human <-- chat --> pb2
-    cos <-- coordinates --> pb1
-    cos <-- coordinates --> pb2
-    pb1 -- queue task --> backend
-    pb2 -- queue task --> backend
-    runner -- claim, heartbeat, finish --> backend
-    runner --> cli
-    cli -- commits --> runner
-    runner -- push branch, draft PR --> gh
-    backend -- result to owner --> pb1
-    backend -- result to owner --> pb2
-    backend -. ownerless, waiting on you, fallback .-> cos
-```
-
-### The life of a task
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant B as Project bot
-    participant BE as Backend
-    participant W as Worker runner
-    participant M as Claude Code or Codex
-    participant H as You (through Chief of Staff)
-
-    B->>BE: swarmctl enqueue (brief, owner, model)
-    Note over BE: state = queued
-    W->>BE: claim
-    Note over BE: state = running
-    W->>M: run in its own folder
-    loop every 30 seconds
-        W->>BE: heartbeat (picks up messages, cancel)
-    end
-    M-->>W: AGENT_STATUS = blocked + question
-    W->>BE: finish: waiting
-    BE->>B: notify owner bot directly: question
-    alt question for the bot
-        B->>BE: answer
-    else question only you can answer
-        BE->>H: also on the Waiting on you list
-        H->>BE: answer (recorded by Chief of Staff)
-    end
-    Note over BE: state = queued (same session resumes)
-    W->>BE: claim
-    W->>M: resume the same session with the answer
-    M-->>W: REPORT.md, artifacts, AGENT_STATUS = done
-    W->>BE: upload report, push branch, finish: done
-    BE->>B: notify owner bot directly: done + report link
-```
-
-### Where results go
-
-Results go straight to the bot that owns the task. The Chief of Staff is not a hub; routing everything
-through one bot wastes tokens. It only hears about tasks with no owner, questions that need you, alerts,
-and deliveries that failed.
-
-```mermaid
-flowchart TD
-    ev[Task event: done, failed, cancelled or waiting] --> owner{Owner bot registered<br/>with an inbox?}
-    owner -- yes --> send[Send to the owner bot's own inbox]
-    owner -- "no, or no owner" --> cos[Send to Chief of Staff]
-    send --> ok{Delivered?}
-    ok -- yes --> done[Done. Same event is never sent twice]
-    ok -- "retry 6 times, or a permanent error" --> fb[Fallback: send to Chief of Staff<br/>with delivery_failed_for]
-    ev --> human{Waiting on you?}
-    human -- yes --> cos2[Also send to Chief of Staff<br/>and show on Waiting on you]
-```
+Details are in [secrets](docs/secrets.md).
 
 ## Quick start
 
@@ -130,6 +128,11 @@ flowchart TD
 
 ### Path 2: Grok Bot plus a worker (about half a day)
 
+You will type commands on the server. The CLI (command line interface, a program you run by typing) for
+the swarm is called `swarmctl`. A token is a long random password that a bot or program uses to prove who
+it is. Tailscale is a private network that links your own devices, so nothing has to be open to the
+whole internet.
+
 1. Rent an Ubuntu LTS server (4 vCPU, 8 GB to start). See [docs/worker-setup.md](docs/worker-setup.md).
 2. Copy this repo onto it and run the setup script:
 
@@ -137,20 +140,29 @@ flowchart TD
    sudo bash scripts/setup-worker.sh
    ```
 
-3. Log in to Claude Code, Codex and GitHub as the `agent` user, then start the worker:
+3. Log in to Claude Code and Codex as the `agent` user (the user that runs the AI jobs), and GitHub as
+   the `swarm-runner` user (the user that pushes code; the jobs themselves never get your GitHub login).
+   Then start the worker and run the smoke test (a quick check that everything is in place):
 
    ```bash
    sudo -iu agent claude            # then /login
    sudo -iu agent codex login --device-auth
-   sudo -iu agent gh auth login
+   sudo -u swarm-runner -H gh auth login
+   sudo -u swarm-runner -H gh auth setup-git
    sudo systemctl start swarm-worker
-   sudo swarmctl status
+   sudo bash scripts/smoke-test.sh
    ```
 
-4. Let your bots reach the backend ([docs/backend.md](docs/backend.md)) and register each bot's own inbox
+4. Let your bots reach the worker. The recommended way: put Tailscale on your bot's computer and use
+   Tailscale Serve on the worker, so it is never on the public internet
+   ([docs/worker-setup.md](docs/worker-setup.md)). Then register each bot's own inbox
    ([templates/bot-setup-checklist.md](templates/bot-setup-checklist.md)).
-5. Close public SSH once Tailscale works: `sudo bash scripts/setup-worker.sh --lockdown`.
+5. Close public SSH (remote login from the internet) once Tailscale works:
+   `sudo bash scripts/setup-worker.sh --lockdown`.
 6. Follow the [first week walkthrough](docs/first-week.md) to take one task from start to finish.
+
+**Honest note:** the setup script has not yet been run end to end on a fresh server. Tested on: not yet.
+Run `scripts/smoke-test.sh` after setup and tell us what fails.
 
 ## What is in the box
 
@@ -158,13 +170,14 @@ flowchart TD
 | --- | --- |
 | [docs/](docs/) | How everything works and how to set it up |
 | [templates/](templates/) | Bot instructions, project brief, setup checklist, routine prompts, model routing table, review prompt, task brief |
-| [server/](server/) | Backend, worker runner, `swarmctl` command line, cleanup, systemd service files |
-| [scripts/](scripts/) | Setup script for a fresh server, backup, disk alert, secret scanner |
+| [server/](server/) | The task tracker, the worker, the `swarmctl` command line, cleanup, the `with-secrets` helper, service files |
+| [scripts/](scripts/) | Setup script for a fresh server, smoke test, backup, disk alert, secret scanner, restart when idle |
 | [config/swarm.env.example](config/swarm.env.example) | The one settings file, with placeholders only |
-| [tests/](tests/) | Tests for the backend and worker: `python3 -m unittest discover -s tests` |
+| [tests/](tests/) | Tests: `python3 -m unittest discover -s tests` |
 
-The backend and worker use only Python 3 and its standard library, with SQLite for storage.
-There is no web dashboard on purpose; `swarmctl status` shows what matters on one screen.
+Everything on the server uses only Python 3 and its standard library, with SQLite for storage. There is
+no web dashboard on purpose; `swarmctl status` shows what matters on one screen. Running the task tracker
+on Cloudflare instead of the worker is a design only, not built.
 
 ## Docs
 
@@ -172,13 +185,14 @@ Start with the concepts, then follow your path.
 
 - [Concepts](docs/concepts.md): bots, tasks, states, reports, the Waiting on you list.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
-- [Worker server setup](docs/worker-setup.md): any provider, plus the security baseline.
+- [Worker server setup](docs/worker-setup.md): any provider, Tailscale, and the security baseline.
 - [Sizing and sandboxes](docs/sizing-and-sandboxes.md): how big a server, and when to offload tests.
-- [Backend](docs/backend.md): the on-worker default, the API, and the Cloudflare option.
-- [Results routing](docs/results-routing.md): straight to the owner bot, with fallback and no duplicates.
+- [How it works, technical](docs/how-it-works-technical.md): diagrams for developers.
+- [Backend](docs/backend.md): the task tracker, its API and who can call what.
+- [Results routing](docs/results-routing.md): straight to the owner bot, with a fallback.
 - [Model routing](docs/model-routing.md): which model for which job.
 - [Approvals](docs/approvals.md): a light default you can loosen.
-- [Secrets](docs/secrets.md): where keys live and how bots handle them.
+- [Secrets](docs/secrets.md): the trust model, where keys live, and the `with-secrets` helper.
 - [Usage and cost](docs/usage-and-cost.md): keep bots quiet and spend low.
 - [Optional services](docs/optional-services.md): GitHub, Tailscale, treg, Executor, email inboxes, the
   multi-subscription proxy.

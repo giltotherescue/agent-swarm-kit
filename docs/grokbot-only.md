@@ -46,8 +46,8 @@ If you notice you keep asking a bot for something it cannot finish in one turn, 
 Adding a worker does not replace anything. Your bots, briefs, connectors and routines stay as they are.
 
 1. Rent a server and follow [worker setup](worker-setup.md). It installs the worker and the backend together.
-2. Make your bots able to reach the backend (see [backend](backend.md)).
-3. For each bot, walk through [the per-bot setup checklist](../templates/bot-setup-checklist.md): give it a token, its own results trigger, and a test.
+2. Make your bots able to reach the backend. The recommended way is to install Tailscale (a private network for your own devices) on your bot's computer and use Tailscale Serve on the worker, so the worker is never on the public internet. See [worker setup](worker-setup.md).
+3. For each bot, walk through [the per-bot setup checklist](../templates/bot-setup-checklist.md): give it a token (its own password for the worker), bind it to its project, set up its own results trigger, and test it.
 4. Update each brief: add repos, tests, and the [model routing table](../templates/model-routing.md). Add the backend sections back into the Chief of Staff instructions.
 5. Move the Waiting on you note into the backend. For each open line, the bot that filed it runs `swarmctl waiting add` with a stable `--key`. Then archive the note.
 6. Run the [first week walkthrough](first-week.md) with one small task.

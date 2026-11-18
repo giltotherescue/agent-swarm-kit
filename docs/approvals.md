@@ -28,20 +28,23 @@ Each [project brief](../templates/project-bot-brief.md) has a Permissions sectio
 
 - "May post to the company's own social accounts from the approved content calendar."
 - "May reply to support tickets that match a saved answer."
-- "May push to main on the docs repo." (The kit itself never pushes to main. You would have to add that yourself.)
+- "May push to main on the docs repo." Turn it on for that project with `swarmctl project set docs --allow-push-main`, then queue with `--push-main`. It is off by default and refused for projects that have not opted in.
 
-Also write one "Never touches" line: what this bot refuses even if asked (other projects' repos, production data, named secrets). Paste that line into worker briefs when the work is near any of it.
+Also write exactly one "Never touches" line: what this bot refuses even if asked (other projects' repos, production data, named secrets). The bot repeats it back to you on day one so you can correct it. Paste that line into worker briefs when the work is near any of it.
 
 ## What the kit enforces for you
 
 Most of the rules are habits written in the briefs. A few are built into the backend and worker, so a mistake cannot slip through:
 
-- **Untrusted input cannot push.** Queue work that came from an email, a ticket or a scraped page with `--untrusted-input`. The backend refuses `--push` or `--pr` on those tasks.
-- **Report-only tasks cannot push.** `--report-only` (and every script task) delivers only `REPORT.md` and `artifacts/`. Pushing is refused.
-- **The worker never merges or deploys.** At most it pushes a branch named `agent/<task id>` and opens a draft PR. It refuses to push `main` or `master`. A human merges.
-- **Per-project push switch.** `swarmctl project set NAME --no-push` stops all pushing for that project.
+- **The AI cannot push by itself.** The agent that runs a task has no GitHub login. Only the worker's publisher (a separate user) can push, after the task finishes and after it checks the rules below with the backend once more.
+- **Untrusted input is not published.** Queue work that came from an email, a ticket or a scraped page with `--untrusted-input`. The backend refuses `--push` or `--pr` on those tasks, so the publisher never pushes them.
+- **Report-only tasks are not published.** `--report-only` (and every script task) delivers only `REPORT.md` and `artifacts/`. These two flags only control what the worker's publisher does; they are not a sandbox for the agent. Since the agent has no GitHub login, that is enough to stop pushes.
+- **The worker never merges or deploys.** At most it pushes a branch named `agent/<task id>` (or the branch of the pull request it is fixing) and opens a draft PR. It refuses to push the repo's default branch (and `main` or `master`) unless the project opted in to push-main. Pushes are never forced. A human merges.
+- **Secret scan before push.** The publisher scans the new lines for things that look like keys and tokens and refuses to push if it finds one.
+- **Per-project push switch.** `swarmctl project set NAME --no-push` stops all pushing for that project, including tasks already queued or running, because the publisher checks again right before it pushes.
+- **Bots stay in their projects.** A project bot can only queue repo work for projects that list it (`swarmctl project set NAME --bot BOT-ID`), and only for that project's repos.
 - **Bots cannot answer for the human.** A task queued with `--ask-human` waits on you. If a project bot tries to answer it or message it, the backend replies HTTP 409. Only an admin token or the Chief of Staff (recording what you said) can answer.
-- **Bots only touch their own tasks.** A project bot's token sees and changes only tasks it owns, and can only file Waiting on you items as itself.
+- **Bots only touch their own tasks.** A project bot's token sees and changes only tasks it owns, can only file Waiting on you items as itself, and can only link those items to its own tasks.
 - **Messages do not grant permissions.** A message to a running task never adds push, merge or deploy rights.
 - **Only you can answer, snooze or drop items.** A project bot can withdraw or close its own items, but answering, snoozing and dropping need the admin or chief token.
 

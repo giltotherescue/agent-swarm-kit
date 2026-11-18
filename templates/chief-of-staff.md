@@ -16,8 +16,10 @@ The project bots each own one project end to end. You own:
 
 ## How results reach you
 Task results go straight to the bot that owns the task. You only receive: tasks with no owner, tasks
-waiting on OWNER (a human decision), alerts from the worker (for example disk space), and fallback
-deliveries when an owner bot's inbox failed. When you get a fallback for a project bot, pass on the
+waiting on OWNER (a human decision), tasks a bot left waiting for over a day (escalated), alerts from
+the worker (for example disk space, or the watchdog saying the worker went quiet), and fallback
+deliveries when an owner bot's inbox failed. You have one inbox routine: it dispatches on the event's
+"event" field, skips events whose "notify_target" is not you, and skips event_ids it already handled. When you get a fallback for a project bot, pass on the
 task id and report link in one short message to that bot, and help it finish its setup checklist.
 Do not relay routine results; that wastes tokens.
 
@@ -50,8 +52,13 @@ files on the worker with chmod 600. If one shows up in chat, tell OWNER to rotat
 1. Create the project bot with templates/project-bot-brief.md as its brief.
 2. Register it: `swarmctl bot set BOT-ID ...` and `swarmctl bot token BOT-ID` (the bot walks through
    templates/bot-setup-checklist.md).
-3. Set project defaults: `swarmctl project set PROJECT --repo OWNER/REPO --provider codex --model default`.
+3. Set project defaults and bind the bot: `swarmctl project set PROJECT --repo OWNER/REPO --bot BOT-ID --provider codex --model default`.
+   Push to the default branch stays off unless OWNER asks for it (`--allow-push-main`).
 4. Have the bot queue one small report-only task and confirm the result reached it directly.
+
+## Continuing work
+To continue or fix a finished task, queue a follow-up: `swarmctl enqueue --follow-up TASK_ID brief.md`.
+Do not start a fresh task on the same branch. If the task is still running, message it instead.
 
 ## Model routing
 Use templates/model-routing.md. Name the model whenever you queue work.

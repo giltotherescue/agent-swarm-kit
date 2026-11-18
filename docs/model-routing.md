@@ -13,9 +13,27 @@ Copy [the model routing template](../templates/model-routing.md) into each bot's
 | Daily coding and development | `codex` or `claude` | `default` (Codex) or `sonnet` |
 | Frontend and web design | `claude` | `sonnet` |
 | Cheap research, scraping, bulk lookups | `claude` or `codex` | `haiku` or a small Codex model |
+| Full test suites, builds, data exports | none (script task, `--command`) | no model |
+| Images (ad graphics, illustrations, mockups) | `codex` | `default`, using Codex CLI's built-in image generation |
 | Support queues, stats, coordination | none | the Grok Bot itself, no task |
 
 A good habit: when a strong model writes something important, have the other provider review it. Different models miss different things. See [the review prompt](../templates/review-prompt.md) and `swarmctl review`.
+
+## Full test suites are script tasks
+
+A full test suite needs no model watching it. Run it as a script task: it is cheap (no tokens), reliable (same command every time), and it can run next to model work.
+
+```
+swarmctl enqueue -r you/site --command "npm ci && npm test" --owner website-bot - <<< "Run the full test suite"
+```
+
+Coding agents run only the tests for the files they touched. The full suite is a separate script task, or your CI (continuous integration, for example GitHub Actions).
+
+If a project's tests are heavy (big databases, browsers, long runs), run them in a cloud sandbox from the worker: the script task's command starts the sandbox, runs the suite there and prints the result. Prove it once against CI (same commit, same result) before you trust it. Never edit the project's tests to make them pass in the sandbox; fix the sandbox setup instead. See [sizing and sandboxes](sizing-and-sandboxes.md).
+
+## Images
+
+Image work (ad graphics, illustrations, mockups, edits) can go through Codex CLI's built-in image generation on the worker. It runs on your ChatGPT subscription, so no separate image API key is needed.
 
 ## Model names change
 
@@ -48,7 +66,7 @@ swarmctl project set website --repo you/site --provider claude --model sonnet
 swarmctl project set data-jobs --provider codex --model default --no-push
 ```
 
-`--no-push` stops tasks in that project from pushing branches or opening PRs (pull requests).
+`--no-push` stops tasks in that project from pushing branches or opening PRs (pull requests). `--bot website-bot` lets that bot queue repo work for the project. The older form `swarmctl project website ...` (without `set`) still works.
 
 ## When a provider hits its limit
 

@@ -9,7 +9,7 @@ Examples use a project called `website` with a bot called `website-bot`, and a C
 1. In Grok Bot, create the **Chief of Staff** bot from [../templates/chief-of-staff.md](../templates/chief-of-staff.md).
 2. Create one **project bot** from [../templates/project-bot-brief.md](../templates/project-bot-brief.md). Pick a project with low stakes.
 3. Give each bot its own webhook routine (its inbox) using the task result handler prompt from [../templates/routine-prompts.md](../templates/routine-prompts.md). Note each webhook URL and its key.
-4. On the worker, register both bots. Put each webhook key in a file first, so it never appears in your shell history:
+4. On the worker (as the server admin), register both bots. Put each webhook key in a file first, so it never appears in your shell history. The backend stores the key in its own protected file, never in the database:
 
 ```bash
 sudo swarmctl bot set chief --role chief --notify-url https://WEBHOOK-URL-FOR-CHIEF --notify-auth-file /root/chief.hook
@@ -17,11 +17,17 @@ sudo swarmctl bot set website-bot --notify-url https://WEBHOOK-URL-FOR-WEBSITE-B
 sudo rm /root/chief.hook /root/website.hook
 ```
 
-5. Make a token for each bot. It is written to a file with mode 600:
+5. Make a token for each bot. It is written to a file with mode 600 (only the owner can read it):
 
 ```bash
 sudo swarmctl bot token chief
 sudo swarmctl bot token website-bot
+```
+
+   Then bind the project bot to its project and repo. A project bot can only queue repo work for projects that list it:
+
+```bash
+sudo swarmctl project set website --repo YOUR-ORG/website --bot website-bot
 ```
 
    Put each token in that bot's secret store. Never paste it into chat. See [secrets.md](secrets.md).
@@ -37,7 +43,7 @@ sudo swarmctl bot test chief
 
 ## Day 2: a small report-only task
 
-Ask `website-bot` in chat to research something small, for example "list the five slowest pages and why". The bot queues it (with `swarmctl`, or the same thing as `POST /tasks`):
+Ask `website-bot` in chat to research something small, for example "list the five slowest pages and why". The bot queues it (with `swarmctl`, or the same thing as `POST /tasks`). If the brief needs files, attach them with `--attach`; the worker cannot see the bot's own computer:
 
 ```bash
 swarmctl enqueue --owner website-bot --report-only --key website-slow-pages-1 brief.md
@@ -92,11 +98,11 @@ swarmctl enqueue -r YOUR-ORG/website --branch agent/TASK_ID --command "npm ci &&
 
    The output is in the task's `script.log` artifact. A nonzero exit marks the task failed.
 
-3. If the review found issues, queue a fix on the same branch with `--pr-number 12` (the worker checks out the pull request and pushes to it). When review and tests pass, **you** merge on GitHub. The kit never merges.
+3. If the review found issues, queue a fix as a follow-up of the task that made the pull request: `swarmctl enqueue --follow-up TASK_ID fix-brief.md`. It reuses the same branch and pull request, and the same folder and session if they are still on the worker. When review and tests pass, **you** merge on GitHub. The kit never merges.
 
 ## Day 6: the Waiting on you list
 
-Have `website-bot` file a decision:
+Have `website-bot` file a decision (it can only link items to its own tasks):
 
 ```bash
 swarmctl waiting add --project website --bot website-bot --kind decision \
