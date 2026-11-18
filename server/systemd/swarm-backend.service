@@ -7,16 +7,23 @@ Wants=network-online.target
 Type=simple
 User=swarm
 Group=swarm
+Environment=SWARM_BOT_KEYS_DIR=/etc/agent-swarm/bot-keys
+Environment=SWARM_DB_BACKUP_DIR=/var/lib/agent-swarm/backups
 EnvironmentFile=/etc/agent-swarm/swarm.env
-ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/server/swarm_backend.py
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/current/server/swarm_backend.py
 Restart=always
 RestartSec=5
-# Hardening: the backend can only write its own data folder.
+# Hardening: the backend can only write its own data folder and the bot key folder.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/agent-swarm
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+UMask=0077
+ReadWritePaths=/var/lib/agent-swarm /etc/agent-swarm/bot-keys
 
 [Install]
 WantedBy=multi-user.target

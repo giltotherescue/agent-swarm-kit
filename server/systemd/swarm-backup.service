@@ -4,7 +4,9 @@ Description=agent-swarm-kit nightly database backup
 [Service]
 Type=oneshot
 User=swarm
+Group=swarm
 EnvironmentFile=/etc/agent-swarm/swarm.env
 Environment=HOME=/var/lib/agent-swarm
 Environment=SWARM_DB_BACKUP_DIR=/var/lib/agent-swarm/backups
-ExecStart=/opt/agent-swarm-kit/scripts/backup.sh
+UMask=0077
+ExecStart=/opt/agent-swarm-kit/current/scripts/backup.sh

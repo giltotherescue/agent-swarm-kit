@@ -1,0 +1,8 @@
+# Installed by setup-worker.sh as /etc/systemd/system/user-AGENT_UID.slice.d/50-swarm-limits.conf
+# Caps everything the agent user runs, all tasks together, so a runaway task cannot starve SSH,
+# Tailscale, the backend or the runner. Root owns this file; the agent cannot change it.
+[Slice]
+MemoryHigh=70%
+MemoryMax=80%
+TasksMax=4096
+CPUWeight=50
