@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -199,6 +200,115 @@ class ClaudeInstallTest(unittest.TestCase):
         self.assertIn("TODO:Claude Code was installed but 'claude --version' does not run", out)
 
 
+class AptWaitTest(unittest.TestCase):
+    """Round 3, defect A: wait for first-boot setup and other apt runs, retry on a lock, and never hang."""
+    FAST = ('APT_POLL=0.2\nAPT_PROGRESS=0\nAPT_RETRY_PAUSE=0.1\nAPT_CI_TIMEOUT=0.5\n')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.busy = os.path.join(self.tmp, "busy")
+        self.calls = os.path.join(self.tmp, "apt-calls")
+        stub(self.tmp, "pgrep", "exit 1")   # no other apt process on this machine, as far as the test is concerned
+        # A fake fuser: a lock is held while the "busy" file exists.
+        stub(self.tmp, "fuser", f'[ -e {self.busy} ] && echo " 4242" && exit 0\nexit 1')
+        stub(self.tmp, "cloud-init", "exit 0")   # first-boot setup finished (this machine may have a real one)
+
+    def run_sh(self, body, timeout=60):
+        script = f'APT_LOCKS=("{self.tmp}/lock")\n' + self.FAST + body
+        full = f'set -euo pipefail\nSWARM_SETUP_LIB=1 source "{SETUP}"\nLOG="{self.tmp}/setup.log"\n' + script
+        r = subprocess.run(["bash", "-c", full], capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, PATH=f"{self.tmp}/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
+        return r.returncode, r.stdout + r.stderr
+
+    def apt_stub(self, fail_times, message="E: Could not get lock /var/lib/apt/lists/lock. It is held by process 4242 (apt-get)"):
+        counter = os.path.join(self.tmp, "n")
+        stub(self.tmp, "apt-get", f'echo "$*" >> {self.calls}\nn=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}\n'
+                                  f'if [ $n -le {fail_times} ]; then echo "{message}" >&2; exit 100; fi\nexit 0')
+
+    def apt_calls(self):
+        return read(self.calls).splitlines() if os.path.exists(self.calls) else []
+
+    def test_waits_while_a_lock_is_held_then_goes_on(self):
+        write(self.busy, "")
+        code, out = self.run_sh(f'(sleep 1.5; rm -f {self.busy}) &\nAPT_WAIT_SECONDS=30\nwait_for_apt\necho FREE\n')
+        self.assertEqual(code, 0, out)
+        self.assertIn("Waiting for another package install", out)
+        self.assertIn("4242", out)
+        self.assertIn("FREE", out)
+
+    def test_stuck_lock_fails_clearly_and_does_not_hang(self):
+        write(self.busy, "")
+        self.apt_stub(0)
+        code, out = self.run_sh('APT_WAIT_SECONDS=2\nif apt_run update; then echo RAN; else echo "FAILED rc=$?"; fi\n', timeout=30)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Gave up after", out)
+        self.assertIn("FAILED rc=1", out)
+        self.assertEqual(self.apt_calls(), [])   # never ran apt while the lock was held
+
+    def test_retries_when_apt_hits_a_lock(self):
+        self.apt_stub(2)
+        code, out = self.run_sh('APT_WAIT_SECONDS=5\napt_run update\necho OK\n')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.apt_calls()), 3)
+        self.assertIn("trying again", out)
+        self.assertIn("OK", out)
+        self.assertIn("Could not get lock", read(os.path.join(self.tmp, "setup.log")))
+
+    def test_gives_up_after_the_tries_with_a_clear_message(self):
+        self.apt_stub(99)
+        code, out = self.run_sh('APT_WAIT_SECONDS=5\nAPT_TRIES=3\nif apt_run install -y ufw; then echo RAN; else echo "FAILED rc=$?"; fi\n')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.apt_calls()), 3)
+        self.assertIn("apt-get install failed (exit 100)", out)
+        self.assertIn("FAILED rc=100", out)
+
+    def test_a_real_error_is_not_retried(self):
+        self.apt_stub(99, message="E: Unable to locate package nosuchpackage")
+        code, out = self.run_sh('if apt_run install -y nosuchpackage; then echo RAN; else echo "FAILED rc=$?"; fi\n')
+        self.assertEqual(len(self.apt_calls()), 1)
+        self.assertIn("FAILED rc=100", out)
+
+    def test_waits_for_cloud_init(self):
+        running = os.path.join(self.tmp, "ci-running")
+        write(running, "")
+        stub(self.tmp, "cloud-init", f'while [ -e {running} ]; do sleep 0.1; done\nexit 0')
+        self.apt_stub(0)
+        code, out = self.run_sh(f'(sleep 1.5; rm -f {running}) &\nAPT_WAIT_SECONDS=30\napt_run update\necho OK\n')
+        self.assertEqual(code, 0, out)
+        self.assertIn("first-boot setup (cloud-init)", out)
+        self.assertEqual(len(self.apt_calls()), 1)
+
+    def test_real_open_lock_file_is_seen(self):
+        if not shutil.which("fuser") and not shutil.which("lsof"):
+            self.skipTest("neither fuser nor lsof here (the /proc fallback is used on such servers)")
+        os.remove(os.path.join(self.tmp, "bin", "fuser"))   # use the real fuser (or lsof) on a real open file
+        lock = os.path.join(self.tmp, "lock")
+        holder = subprocess.Popen(["bash", "-c", f'exec 9>"{lock}"; sleep 2'])
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        time.sleep(0.3)
+        code, out = self.run_sh('APT_WAIT_SECONDS=20\nwait_for_apt\necho FREE\n')
+        holder.wait()
+        self.assertEqual(code, 0, out)
+        self.assertIn(str(holder.pid), out)
+        self.assertIn("FREE", out)
+
+    def test_proc_fallback_finds_the_holder(self):
+        lock = os.path.join(self.tmp, "lock")
+        holder = subprocess.Popen(["bash", "-c", f'exec 9>"{lock}"; sleep 5'])
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        time.sleep(0.3)
+        # Hide fuser and lsof by giving a PATH without them.
+        sysbin = os.path.join(self.tmp, "sys")
+        os.makedirs(sysbin)
+        for t in ("bash", "readlink", "sort", "tr", "grep", "cat", "sed", "date", "mktemp", "rm", "dirname"):
+            if shutil.which(t):
+                os.symlink(shutil.which(t), os.path.join(sysbin, t))
+        full = (f'set -euo pipefail\nSWARM_SETUP_LIB=1 source "{SETUP}"\nAPT_LOCKS=("{lock}")\nlock_holders\n')
+        r = subprocess.run(["bash", "-c", full], capture_output=True, text=True, timeout=30, env=dict(os.environ, PATH=sysbin))
+        self.assertEqual(r.stdout.split(), [str(holder.pid)], r.stderr)
+
+
 class ScriptTextTest(unittest.TestCase):
     def test_no_sudo_i_with_a_command_line(self):
         # sudo -i escapes the command line; any "sudo -iu USER bash -c" with $ in it breaks (defect 1).
@@ -212,7 +322,7 @@ class ScriptTextTest(unittest.TestCase):
         # Every apt-get call goes through "${APT[@]}", which carries the lock timeout (defect 7).
         import re
         text = read(SETUP)
-        self.assertIn("APT=(apt-get -o DPkg::Lock::Timeout=300", text)
+        self.assertIn("APT=(apt-get -o DPkg::Lock::Timeout=", text)
         for n, line in enumerate(text.splitlines(), 1):
             if re.search(r"^\s*(logged\s+)?apt-get\b|(\|\||&&|;)\s*(logged\s+)?apt-get\b", line):
                 self.fail(f"setup-worker.sh:{n} calls apt-get without the lock timeout: {line.strip()}")

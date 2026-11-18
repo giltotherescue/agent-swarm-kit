@@ -31,6 +31,8 @@
 #
 # Safe to run again: a second run is an upgrade. It never prints a token. Long installer output goes to
 # /var/log/agent-swarm-setup.log; the screen shows the "==>" steps.
+# Package installs first wait (up to 10 minutes, with a progress line) for first-boot setup (cloud-init) and any
+# other apt or dpkg run to finish, then retry apt up to 4 times if it still hits a lock.
 # Exit codes: 0 done, 1 stopped with an error, 3 finished but something needs your attention (listed at the end).
 set -euo pipefail
 
@@ -58,8 +60,17 @@ FORCE_OS=0
 ONLY=""
 INCOMPLETE=()
 HARDENED="no"
-# Wait up to 5 minutes for the package lock (a new cloud server often runs updates at first boot).
-APT=(apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Use-Pty=0 -qq)
+# apt and the package locks. A brand new cloud server often installs packages at first boot (cloud-init,
+# unattended-upgrades), so every apt call first waits for that (wait_for_apt), and retries if it still hits
+# a lock (apt_run). DPkg::Lock::Timeout only covers the dpkg lock, not the one "apt-get update" takes.
+APT=(apt-get -o DPkg::Lock::Timeout=120 -o Dpkg::Use-Pty=0 -qq)
+APT_LOCKS=(/var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock)
+APT_WAIT_SECONDS="${SWARM_APT_WAIT_SECONDS:-600}"   # how long to wait for first-boot setup and other updates
+APT_TRIES="${SWARM_APT_TRIES:-4}"                  # apt runs per call when it fails on a lock
+APT_RETRY_PAUSE="${SWARM_APT_RETRY_PAUSE:-20}"     # seconds between those runs
+APT_POLL="${SWARM_APT_POLL:-5}"                    # seconds between checks while waiting
+APT_PROGRESS="${SWARM_APT_PROGRESS:-30}"           # seconds between progress lines while waiting
+APT_CI_TIMEOUT="${SWARM_APT_CI_TIMEOUT:-10}"       # how long one "cloud-init status --wait" check may take
 
 say() { printf '\n==> %s\n' "$*"; }
 die() { printf 'setup-worker: %s\n' "$*" >&2; exit 1; }
@@ -77,6 +88,82 @@ logged() {  # logged COMMAND... : run a noisy command with its output in $LOG; o
 as_agent() {  # as_agent 'shell code' : run code as the agent user in a login shell (so ~/.local/bin is on PATH)
   # Not "sudo -i": sudo -i backslash-escapes the command line, so $vars and $(...) inside it break (0.2.0 bug).
   (cd "$AGENT_HOME" && sudo -u "$AGENT_USER" -H bash -lc "$1")
+}
+
+# ---------- apt: wait for first-boot updates, retry on a lock ----------
+
+lock_holders() {  # prints the process ids that have an apt or dpkg lock file open
+  local f pid fd
+  if command -v fuser >/dev/null 2>&1; then
+    fuser "${APT_LOCKS[@]}" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | sort -u
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -t "${APT_LOCKS[@]}" 2>/dev/null | sort -u
+  else   # no fuser or lsof: look through /proc (works as root)
+    for fd in /proc/[0-9]*/fd/*; do
+      f=$(readlink "$fd" 2>/dev/null) || continue
+      for l in "${APT_LOCKS[@]}"; do
+        if [[ "$f" == "$l" ]]; then pid=${fd#/proc/}; echo "${pid%%/*}"; fi
+      done
+    done | sort -u
+  fi
+}
+
+apt_busy() {  # prints why apt is not free now; prints nothing when it is free
+  local pids names
+  if command -v cloud-init >/dev/null 2>&1 && [[ "$(timeout "$APT_CI_TIMEOUT" cloud-init status --wait >/dev/null 2>&1; echo $?)" == 124 ]]; then
+    echo "the server's first-boot setup (cloud-init)"; return 0
+  fi
+  pids=$(lock_holders | tr '\n' ' ')
+  if [[ -n "${pids// }" ]]; then
+    # shellcheck disable=SC2086  # one argument per process id
+    names=$(ps -o comm= -p ${pids// /,} 2>/dev/null | sort -u | tr '\n' ' ')
+    echo "another package install (${names:-process} ${pids% }) holding the apt or dpkg lock"; return 0
+  fi
+  if pgrep -x 'apt-get|apt|dpkg' >/dev/null 2>&1 || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade( |$)' >/dev/null 2>&1; then
+    echo "another apt, dpkg or unattended-upgrade run"; return 0
+  fi
+}
+
+wait_for_apt() {  # waits up to APT_WAIT_SECONDS for apt to be free; returns 1 (with a message) if it never is
+  local start=$SECONDS last=-100000 why
+  while why=$(apt_busy) && [[ -n "$why" ]]; do
+    if (( SECONDS - start >= APT_WAIT_SECONDS )); then
+      echo "    Gave up after $(( SECONDS - start )) seconds: still waiting for $why."
+      return 1
+    fi
+    if (( SECONDS - last >= APT_PROGRESS )); then
+      echo "    Waiting for $why to finish ($(( SECONDS - start ))s so far, up to ${APT_WAIT_SECONDS}s)"
+      last=$SECONDS
+    fi
+    sleep "$APT_POLL"
+  done
+  return 0
+}
+
+apt_run() {  # apt_run ARGS... : apt-get ARGS with output in $LOG; waits for the locks first and retries on a lock error
+  local try rc out
+  out=$(mktemp)
+  for (( try = 1; try <= APT_TRIES; try++ )); do
+    if ! wait_for_apt; then rm -f "$out"; return 1; fi
+    printf '\n### %s: apt-get %s (try %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "$try" >>"$LOG"
+    rc=0
+    "${APT[@]}" "$@" >"$out" 2>&1 </dev/null || rc=$?
+    cat "$out" >>"$LOG"
+    if (( rc == 0 )); then rm -f "$out"; return 0; fi
+    # Retry only when another process had a lock ("update" also retries network errors); anything else is real.
+    if ! grep -qE 'Could not get lock|Unable to lock|Unable to acquire the dpkg frontend lock|is another process using it' "$out" \
+        && [[ "$1" != update ]]; then
+      break
+    fi
+    if (( try < APT_TRIES )); then
+      echo "    apt-get $1 failed (another process had a lock, or a network error); trying again in ${APT_RETRY_PAUSE}s (try $try of $APT_TRIES)"
+      sleep "$APT_RETRY_PAUSE"
+    fi
+  done
+  printf '    apt-get %s failed (exit %s). Last lines of %s:\n' "$1" "$rc" "$LOG"
+  tail -n 15 "$out" | sed 's/^/      /'
+  rm -f "$out"
+  return "$rc"
 }
 
 # ---------- admin account checks (so hardening can never lock you out) ----------
@@ -230,7 +317,7 @@ EOF
 
 ufw_base() {  # firewall: deny incoming, allow outgoing, SSH over Tailscale, Tailscale direct connections
   local p
-  logged "${APT[@]}" install -y ufw || die "could not install ufw"
+  apt_run install -y ufw || die "could not install ufw"
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   ufw delete allow in on tailscale0 >/dev/null 2>&1 || true   # 0.1.0 opened every port to the tailnet
@@ -319,6 +406,7 @@ tailscale_step() {
   say "Tailscale"
   if ! command -v tailscale >/dev/null; then
     local tmp_ts; tmp_ts=$(mktemp)
+    wait_for_apt || true
     if ! curl -fsSL https://tailscale.com/install.sh -o "$tmp_ts" || ! logged sh "$tmp_ts"; then
       rm -f "$tmp_ts"
       todo "Tailscale did not install (see $LOG)"
@@ -431,7 +519,7 @@ parse_args() {
       --force-os) FORCE_OS=1; shift;;
       --harden) ONLY=harden; shift;;
       --lockdown) ONLY=lockdown; shift;;
-      -h|--help) sed -n '2,34p' "$0"; exit 0;;
+      -h|--help) sed -n '2,36p' "$0"; exit 0;;
       *) die "unknown option: $1";;
     esac
   done
@@ -451,8 +539,8 @@ main() {
   [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] || die "--max-wait needs a number of seconds"
   touch "$LOG"; chmod 600 "$LOG"
   export DEBIAN_FRONTEND=noninteractive
-  # Make every apt call wait for the lock, including the ones inside the Node and Tailscale installers.
-  printf 'DPkg::Lock::Timeout "300";\n' > /etc/apt/apt.conf.d/90-agent-swarm-lock-wait
+  # Make the apt calls inside the Node.js and Tailscale installers wait for the dpkg lock too.
+  printf 'DPkg::Lock::Timeout "120";\n' > /etc/apt/apt.conf.d/90-agent-swarm-lock-wait
 
   if [[ "$ONLY" == lockdown ]]; then lockdown; exit 0; fi
   if [[ "$ONLY" == harden ]]; then harden; exit 0; fi
@@ -486,9 +574,10 @@ main() {
   fi
 
   say "System packages and automatic security updates (can take a few minutes)"
-  logged "${APT[@]}" update || die "apt-get update failed (see $LOG)"
-  logged "${APT[@]}" upgrade -y || die "apt-get upgrade failed (see $LOG)"
-  logged "${APT[@]}" install -y ca-certificates curl git jq tmux python3 sqlite3 unattended-upgrades ufw sudo acl \
+  echo "    First, wait for any first-boot setup or other update to finish (up to $(( APT_WAIT_SECONDS / 60 )) minutes)."
+  apt_run update || die "apt-get update failed after waiting and $APT_TRIES tries (see $LOG). If another update is still running, wait for it and run this script again."
+  apt_run upgrade -y || die "apt-get upgrade failed (see $LOG)"
+  apt_run install -y ca-certificates curl git jq tmux python3 sqlite3 unattended-upgrades ufw sudo acl \
     build-essential unzip rsync || die "package install failed (see $LOG)"
   cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
@@ -519,7 +608,7 @@ EOF
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list
-    logged "${APT[@]}" update && logged "${APT[@]}" install -y gh || true
+    apt_run update && apt_run install -y gh || true
   fi
   gh --version >/dev/null 2>&1 || die "GitHub CLI did not install (see $LOG)"
 
@@ -528,9 +617,10 @@ EOF
   if ! node_ok; then
     tmp_ns=$(mktemp)
     curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$tmp_ns"
+    wait_for_apt || true
     logged bash "$tmp_ns" || true
     rm -f "$tmp_ns"
-    logged "${APT[@]}" install -y nodejs || true
+    apt_run install -y nodejs || true
   fi
   node_ok || die "Node.js 18 or newer with npm is required (found: $(node --version 2>/dev/null || echo none); see $LOG)"
 

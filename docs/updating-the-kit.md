@@ -112,9 +112,10 @@ The database stays as the newer version left it. Newer versions only add tables 
 1. **Tasks work again.** In 0.2.0 every task failed while it was being prepared (the inbox and outbox folders lost their shared group). Nothing to do; the fix is in the code.
 2. **Hardening at install time.** If you pass `--admin-user NAME`, or run the script through sudo as your admin user, the script now turns off root and password login over SSH and turns the firewall on, with public SSH still allowed until you run `--lockdown`. If you only have root, it leaves root login on and says so. See [worker-setup.md](worker-setup.md), step 3.
 3. **Lockdown checks for an admin user first** and refuses if only root can log in.
-4. **Old release folders are removed**; only `current` and `previous` stay.
+4. **Old release folders are removed**; only `current` and `previous` stay. Old outbox folders in `/srv/agent-swarm/outbox` are removed too: right after each task when its results are saved, and by the daily cleanup after 7 days.
 5. `swarmctl status` no longer warns about backups on a new install; the setup script makes a first backup.
 6. Long installer output goes to `/var/log/agent-swarm-setup.log`.
+7. **apt waits for first-boot updates** (up to 10 minutes) and retries on a lock, so a first run on a brand new server no longer fails at once.
 
 ## Upgrading from 0.1.0 to 0.2.0
 

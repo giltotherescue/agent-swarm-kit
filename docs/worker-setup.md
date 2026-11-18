@@ -96,7 +96,7 @@ The screen shows one `==>` line per step. The long output of the package, Node.j
 The script is safe to run again; a second run is an upgrade. It never prints a token. It ends with exit code 0 when all is done, 1 when it stopped on an error, and 3 when it finished but lists things you still need to do. What it does, in order:
 
 1. Checks it runs as root on Ubuntu 22.04 or 24.04, and that the `agent` account has no sudo rights.
-2. Installs updates and basic tools, and turns on **automatic security updates**. If another update is running (common on a brand new server), it waits up to 5 minutes for it.
+2. Installs updates and basic tools, and turns on **automatic security updates**. A brand new server often installs updates by itself in its first minutes (cloud-init, the first-boot setup). The script waits for that and for any other apt or dpkg run, up to 10 minutes, printing a progress line every 30 seconds. If apt still finds a lock, it tries again up to 4 times, 20 seconds apart, then stops with a clear message.
 3. Caps the system log at 1 GB and adds a **swap file** (4 GB by default) if the box has none.
 4. Installs the **GitHub CLI** (`gh`) and **Node.js LTS**.
 5. Installs **Tailscale** and joins your tailnet (your private Tailscale network) with Tailscale SSH turned on, unless you chose `--tailscale later` or `--no-tailscale`.

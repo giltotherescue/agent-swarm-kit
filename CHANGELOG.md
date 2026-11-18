@@ -42,8 +42,17 @@ Fixed (numbers are the install-test defects):
    backend records when its database was made and does not warn about a missing backup in the first 36
    hours, and setup makes a first backup. A missing backup after that gives "There is no database backup
    yet".
-7. apt waits up to 5 minutes for the package lock (`-o DPkg::Lock::Timeout=300`, also written to
-   `/etc/apt/apt.conf.d/90-agent-swarm-lock-wait` so the Node.js and Tailscale installers wait too).
+7. apt waits for other package installs instead of failing at once. Before each apt call the script waits,
+   up to 10 minutes with a progress line every 30 seconds, until the server's first-boot setup (cloud-init,
+   checked with `cloud-init status --wait` and a time limit) has finished and no process holds the apt or
+   dpkg locks (`/var/lib/apt/lists/lock`, `/var/lib/dpkg/lock-frontend`, `/var/lib/dpkg/lock`,
+   `/var/cache/apt/archives/lock`, checked with fuser, lsof or /proc). If apt still fails on a lock it runs
+   again, up to 4 times, 20 seconds apart, and then stops with a clear message. `apt-get update` also
+   retries network errors. The dpkg lock wait inside apt (`DPkg::Lock::Timeout=120`, also written to
+   `/etc/apt/apt.conf.d/90-agent-swarm-lock-wait`) still covers the Node.js and Tailscale installers. The
+   first version of this fix only set `DPkg::Lock::Timeout`, which does not cover the lock that
+   `apt-get update` takes, so the 0.2.1 retest failed at once on a new DigitalOcean server while
+   cloud-init was installing droplet-agent.
 8. Quieter output: apt, Node.js, Tailscale, Claude Code and Codex installer output goes to
    `/var/log/agent-swarm-setup.log` (mode 600). The screen keeps the `==>` lines and shows the last log
    lines if a step fails. The "apt does not have a stable CLI interface" warning now goes only to the log.
@@ -52,6 +61,17 @@ Fixed (numbers are the install-test defects):
     works once you join with `sudo tailscale up --ssh`. The default join now gives up after 15 minutes
     instead of waiting forever, and a run with no terminal and no auth key joins later on its own.
     `--no-tailscale` (also `--tailscale off`) still works and the docs say what it costs.
+
+Also (from the 0.2.1 retest):
+
+- Outbox task folders no longer pile up. `agent-exec` has a new narrow action, `cleanup TASK`: it removes
+  only `/srv/agent-swarm/outbox/TASK`, checks the task id, refuses links and any path outside the outbox,
+  and runs as the agent through the same single sudo rule (the rule still allows only `agent-exec`). The
+  runner calls it only after the results were uploaded and the backend acknowledged the finish; otherwise
+  the folder stays. The runner removes its own inbox folder as before. The daily cleanup now also backs up
+  and removes outbox folders of tasks that finished more than `SWARM_KEEP_DAYS` (7) days ago.
+- `agent-exec` task and folder names must match in full: a name with a trailing newline was accepted
+  before.
 
 Also:
 
@@ -62,7 +82,7 @@ Also:
   Tailscale pause and how to skip it, the expected `swarmctl status` warning and smoke-test output on a new
   box, why `sudo -iu agent` is needed for the model CLIs, and a "Setup problems" section in
   troubleshooting.
-- Tests: 78 before, 100 now. New: the inbox and outbox handoff run as two real OS users in a throwaway
+- Tests: 78 before, 124 now. New: the inbox and outbox handoff run as two real OS users in a throwaway
   container (catches defects 2 and 3), the setup script's lockdown refusal on a root-only box,
   `--admin-user`, `--harden`, release pruning, the Tailscale modes, the Claude Code install path, the
   apt lock option, and the backup warning. Tests that need root or two users run in Docker and skip
