@@ -41,7 +41,9 @@ class WorkerTest(unittest.TestCase):
                           SWARM_BACKEND_WORKER_TOKEN_FILE=os.path.join(cls.tmp, "worker"),
                           SWARM_WORKER_TOKEN_FILE=os.path.join(cls.tmp, "worker"),
                           SWARM_WORK_DIR=os.path.join(cls.tmp, "work"), SWARM_RUN_AGENT=agent,
-                          SWARM_TASK_SCOPE="0", SWARM_QUIET="1")
+                          SWARM_TASK_SCOPE="0", SWARM_QUIET="1", SWARM_AGENT_USER="",
+                          SWARM_HANDOFF_DIR=os.path.join(cls.tmp, "handoff"), SWARM_RUNNER_DIR=os.path.join(cls.tmp, "runner"),
+                          SWARM_BOT_KEYS_DIR=os.path.join(cls.tmp, "keys"), SWARM_HEARTBEAT_SECONDS="1")
         import swarm_backend as sb
         cls.srv, cls.api = sb.make_server(os.path.join(cls.tmp, "t.db"), "127.0.0.1:0")
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()

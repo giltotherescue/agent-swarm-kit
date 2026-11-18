@@ -1,0 +1,388 @@
+#!/usr/bin/python3 -I
+"""agent-exec: the only door from the runner (swarm-runner user) into the agent user.
+
+The runner calls it through one sudoers rule:
+    swarm-runner ALL=(agent) NOPASSWD: /usr/local/lib/agent-swarm/agent-exec
+so everything here runs as the agent user, with a clean environment. The runner never runs git
+or reads files inside the agent's folders itself; it exchanges files through two handoff folders:
+    HANDOFF/inbox/TASK    written by the runner, read by the agent (brief, prompt, attachments, messages, bundles)
+    HANDOFF/outbox/TASK   written here, read by the runner (report, status, session ids, artifacts, work bundle)
+
+Usage (all paths are passed by the runner; sudo removes the caller's environment):
+  agent-exec --work DIR --handoff DIR prepare TASK WORKNAME [--branch B] [--origin URL]
+  agent-exec --work DIR --handoff DIR run TASK WORKNAME --timeout SECONDS [--scope] [--require-scope]
+             [--memory 75%] [--cpu 200%] [--agent-env FILE] -- COMMAND ARGS...
+  agent-exec --work DIR --handoff DIR stop TASK [--grace 20]
+  agent-exec --work DIR --handoff DIR stop-all
+  agent-exec --work DIR --handoff DIR collect TASK WORKNAME
+  agent-exec --work DIR --handoff DIR exists WORKNAME
+  agent-exec --work DIR --handoff DIR exec WORKNAME [--agent-env FILE] -- COMMAND ARGS...
+Output is JSON on stdout for prepare and collect. No secrets are ever printed.
+"""
+import json
+import os
+import pwd
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+VERSION = "0.2.0"
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
+BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
+MAX_ARTIFACT = 25 * 1024 * 1024
+MAX_ARTIFACTS = 200
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
+def die(msg, code=2):
+    print(f"agent-exec: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def check_name(v, what):
+    if not NAME_RE.match(v or "") or ".." in v:
+        die(f"bad {what}: {v!r}")
+    return v
+
+
+def clean_env(task=None, timeout=None, agent_env=None):
+    pw = pwd.getpwuid(os.getuid())
+    home = pw.pw_dir
+    env = {"HOME": home, "USER": pw.pw_name, "LOGNAME": pw.pw_name, "SHELL": pw.pw_shell or "/bin/bash",
+           "PATH": f"{home}/.local/bin:{home}/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TERM": "dumb"}
+    run_dir = f"/run/user/{os.getuid()}"
+    if os.path.isdir(run_dir):
+        env["XDG_RUNTIME_DIR"] = run_dir
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={run_dir}/bus"
+    if task:
+        env["SWARM_TASK_ID"] = task
+    if timeout:
+        env["SWARM_TASK_TIMEOUT"] = str(timeout)
+    if agent_env and os.path.isfile(agent_env):
+        # Root-owned extras for agents, for example a proxy base URL. KEY=VALUE lines.
+        for line in open(agent_env):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and not k.startswith("SWARM_"):
+                    env[k] = v.strip().strip('"').strip("'")
+    return env
+
+
+def user_systemd(env):
+    if not shutil.which("systemd-run") or "XDG_RUNTIME_DIR" not in env:
+        return False
+    r = subprocess.run(["systemctl", "--user", "is-system-running"], env=env, capture_output=True, text=True)
+    return r.stdout.strip() in ("running", "degraded")
+
+
+def copy_in(src, dst):
+    """Copy a regular file without following links."""
+    try:
+        fd = os.open(src, os.O_RDONLY | NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as fin:
+        if not os.path.isfile(src) or os.path.islink(src):
+            return False
+        with open(dst, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+    return True
+
+
+def git(wd, *args, check=True):
+    r = subprocess.run(GIT + list(args), cwd=wd, capture_output=True, text=True, env=clean_env())
+    if check and r.returncode != 0:
+        die(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-400:]}", 3)
+    return r
+
+
+class Paths:
+    def __init__(self, work, handoff):
+        self.work = os.path.abspath(work)
+        self.handoff = os.path.abspath(handoff)
+
+    def wd(self, name):
+        return os.path.join(self.work, check_name(name, "folder name"))
+
+    def inbox(self, task):
+        return os.path.join(self.handoff, "inbox", check_name(task, "task id"))
+
+    def outbox(self, task):
+        return os.path.join(self.handoff, "outbox", check_name(task, "task id"))
+
+    def pidfile(self, task):
+        d = os.path.join(self.work, ".swarm-pids")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return os.path.join(d, check_name(task, "task id"))
+
+
+def cmd_prepare(p, task, name, branch, origin):
+    wd, inbox = p.wd(name), p.inbox(task)
+    if branch and not BRANCH_RE.match(branch):
+        die("bad branch")
+    state = "existing" if os.path.isdir(wd) else "fresh"
+    restored = False
+    if state == "fresh":
+        os.makedirs(p.work, exist_ok=True)
+        bundle = os.path.join(inbox, "repo.bundle")
+        if os.path.isfile(bundle):
+            git(p.work, "clone", "--quiet", bundle, wd)
+            if origin:
+                git(wd, "remote", "set-url", "origin", origin)
+            if branch:
+                if git(wd, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}", check=False).returncode == 0:
+                    git(wd, "checkout", "--quiet", "-B", branch, f"refs/remotes/origin/{branch}")
+                else:
+                    git(wd, "checkout", "--quiet", "-b", branch)
+            restore = os.path.join(inbox, "restore.bundle")
+            if os.path.isfile(restore) and branch:
+                # Unpushed work from an earlier run or from the parent task.
+                if git(wd, "fetch", "--quiet", restore, "HEAD", check=False).returncode == 0:
+                    git(wd, "checkout", "--quiet", "-B", branch, "FETCH_HEAD")
+                    restored = True
+        else:
+            os.makedirs(wd)
+    ctx = os.path.join(wd, ".task-context")
+    os.makedirs(os.path.join(ctx, "attachments"), exist_ok=True)
+    os.makedirs(os.path.join(wd, "artifacts"), exist_ok=True)
+    if os.path.isdir(os.path.join(wd, ".git")):
+        exclude = os.path.join(wd, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        have = open(exclude).read() if os.path.exists(exclude) else ""
+        with open(exclude, "a") as fh:
+            for pat in (".task-context/", "AGENT_STATUS", "REPORT.md", "PR_DESCRIPTION.md", "artifacts/"):
+                if pat not in have.split("\n"):
+                    fh.write(pat + "\n")
+    copy_in(os.path.join(inbox, "brief.md"), os.path.join(ctx, "brief.md"))
+    att = os.path.join(inbox, "attachments")
+    if os.path.isdir(att):
+        for f in os.listdir(att):
+            if NAME_RE.match(f):
+                copy_in(os.path.join(att, f), os.path.join(ctx, "attachments", f))
+    msg = os.path.join(ctx, "messages.md")
+    if os.path.lexists(msg):
+        os.remove(msg)
+    os.symlink(os.path.join(inbox, "messages.md"), msg)
+    for stale in ("AGENT_STATUS",):
+        if os.path.lexists(os.path.join(wd, stale)):
+            os.remove(os.path.join(wd, stale))
+    for f in os.listdir(ctx):
+        if f.startswith("session"):
+            os.remove(os.path.join(ctx, f))
+    head = git(wd, "rev-parse", "HEAD", check=False).stdout.strip() if os.path.isdir(os.path.join(wd, ".git")) else None
+    print(json.dumps({"state": state, "restored": restored, "head": head or None, "git": head is not None}))
+
+
+def cmd_run(p, task, name, timeout, scope, require_scope, memory, cpu, agent_env, command):
+    wd = p.wd(name)
+    if not os.path.isdir(wd):
+        die("work folder is missing")
+    env = clean_env(task, timeout, agent_env)
+    if os.path.lexists(os.path.join(wd, "AGENT_STATUS")):
+        os.remove(os.path.join(wd, "AGENT_STATUS"))  # every launch must write a fresh status
+    cmd = ["timeout", "--kill-after=30", str(int(timeout))] + command
+    if scope:
+        if user_systemd(env):
+            cmd = ["systemd-run", "--user", "--scope", "--quiet", f"--unit=swarm-task-{task}-{int(time.time())}",
+                   "--slice=swarm-tasks.slice", "-p", f"MemoryMax={memory}", "-p", f"CPUQuota={cpu}", "-p", "TasksMax=2048"] + cmd
+        elif require_scope:
+            die("per-task limits could not be applied: no systemd user manager for this user. "
+                "Fix: sudo loginctl enable-linger agent (see docs/troubleshooting.md)", 70)
+    proc = subprocess.Popen(cmd, cwd=wd, env=env, start_new_session=True)
+    with open(p.pidfile(task), "w") as fh:
+        fh.write(str(proc.pid))
+    code = proc.wait()
+    return 128 - code if code < 0 else code
+
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def cmd_stop(p, task, grace):
+    env = clean_env()
+    pattern = f"swarm-task-{check_name(task, 'task id')}-*.scope"
+    has_sd = user_systemd(env)
+    pgid = None
+    try:
+        pgid = int(open(p.pidfile(task)).read().strip())
+    except (OSError, ValueError):
+        pass
+    if has_sd:
+        subprocess.run(["systemctl", "--user", "kill", "--signal=SIGTERM", pattern], env=env, capture_output=True)
+    if pgid and group_alive(pgid):
+        os.killpg(pgid, signal.SIGTERM)
+    end = time.time() + grace
+    while time.time() < end and pgid and group_alive(pgid):
+        time.sleep(0.5)
+    if has_sd:
+        subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", pattern], env=env, capture_output=True)
+        subprocess.run(["systemctl", "--user", "stop", pattern], env=env, capture_output=True)
+    if pgid and group_alive(pgid):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def cmd_stop_all(p):
+    env = clean_env()
+    if user_systemd(env):
+        subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", "swarm-task-*.scope"], env=env, capture_output=True)
+        subprocess.run(["systemctl", "--user", "stop", "swarm-task-*.scope"], env=env, capture_output=True)
+    d = os.path.join(p.work, ".swarm-pids")
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            try:
+                pgid = int(open(os.path.join(d, f)).read().strip())
+                if group_alive(pgid):
+                    os.killpg(pgid, signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+
+def safe_name(rel):
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", rel.replace(os.sep, "__"))
+    name = name.lstrip("._-") or "file"
+    return name[:120]
+
+
+def cmd_collect(p, task, name):
+    wd, out = p.wd(name), p.outbox(task)
+    if os.path.lexists(out):
+        if os.path.islink(out) or not os.path.isdir(out):
+            os.remove(out)
+        else:
+            shutil.rmtree(out)
+    os.makedirs(out, mode=0o2750)
+    os.chmod(out, 0o2750)
+    summary = {"files": {}}
+    for src, dst in (("REPORT.md", "REPORT.md"), ("AGENT_STATUS", "AGENT_STATUS"), ("PR_DESCRIPTION.md", "PR_DESCRIPTION.md"),
+                     (".task-context/session-claude", "session-claude"), (".task-context/session-codex", "session-codex"),
+                     (".task-context/session", "session")):
+        path = os.path.join(wd, src)
+        if os.path.lexists(path) and not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= MAX_ARTIFACT:
+            if copy_in(path, os.path.join(out, dst)):
+                summary["files"][dst] = int(os.lstat(path).st_mtime)
+    # Artifacts: regular files only, unique flat names, every omission listed.
+    art, adir = os.path.join(wd, "artifacts"), os.path.join(out, "artifacts")
+    os.makedirs(adir, mode=0o2750)
+    manifest, omitted, used = [], [], set()
+    if os.path.isdir(art) and not os.path.islink(art):
+        for root, dirs, files in os.walk(art, followlinks=False):
+            dirs.sort()
+            for d in list(dirs):
+                if os.path.islink(os.path.join(root, d)):
+                    omitted.append({"path": os.path.relpath(os.path.join(root, d), art), "why": "link to a folder"})
+                    dirs.remove(d)
+            for f in sorted(files):
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, art)
+                st = os.lstat(full)
+                if os.path.islink(full):
+                    omitted.append({"path": rel, "why": "symbolic link"})
+                    continue
+                if not os.path.isfile(full):
+                    omitted.append({"path": rel, "why": "not a regular file"})
+                    continue
+                if st.st_size > MAX_ARTIFACT:
+                    omitted.append({"path": rel, "why": "larger than 25 MB"})
+                    continue
+                if len(manifest) >= MAX_ARTIFACTS:
+                    omitted.append({"path": rel, "why": f"over the {MAX_ARTIFACTS}-file limit"})
+                    continue
+                base, n = safe_name(rel), 2
+                uname = base
+                while uname.lower() in used:
+                    stem, dot, ext = base.rpartition(".")
+                    uname = (f"{stem}-{n}.{ext}" if dot and stem else f"{base}-{n}")[:120]
+                    n += 1
+                used.add(uname.lower())
+                if copy_in(full, os.path.join(adir, uname)):
+                    manifest.append({"name": uname, "path": rel, "size": st.st_size})
+    summary["artifacts"] = manifest
+    summary["omitted"] = omitted
+    # Git: bundle every commit that is not on the remote yet, so nothing is lost and the runner can publish it.
+    if os.path.isdir(os.path.join(wd, ".git")):
+        head = git(wd, "rev-parse", "HEAD", check=False).stdout.strip()
+        branch = git(wd, "rev-parse", "--abbrev-ref", "HEAD", check=False).stdout.strip()
+        dirty = [ln for ln in git(wd, "status", "--porcelain", check=False).stdout.splitlines() if ln.strip()]
+        count = git(wd, "rev-list", "--count", "HEAD", "--not", "--remotes", check=False).stdout.strip() if head else "0"
+        unpushed = int(count) if count.isdigit() else 0
+        bundled = False
+        if unpushed:
+            bundled = git(wd, "bundle", "create", "--quiet", os.path.join(out, "work.bundle"), "HEAD", "--not", "--remotes",
+                          check=False).returncode == 0
+        summary["git"] = {"head": head or None, "branch": branch or None, "unpushed": unpushed, "bundled": bundled,
+                          "uncommitted": len(dirty)}
+    for root, dirs, files in os.walk(out):
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o2750)
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o640)
+    with open(os.path.join(out, "summary.json"), "w") as fh:
+        json.dump(summary, fh)
+    os.chmod(os.path.join(out, "summary.json"), 0o640)
+    print(json.dumps(summary))
+
+
+def main(argv):
+    work = handoff = None
+    while argv and argv[0].startswith("--"):
+        if argv[0] == "--work":
+            work, argv = argv[1], argv[2:]
+        elif argv[0] == "--handoff":
+            handoff, argv = argv[1], argv[2:]
+        elif argv[0] == "--version":
+            print(VERSION)
+            return 0
+        else:
+            die(f"unknown option {argv[0]}")
+    if not argv or not work or not handoff:
+        die("usage: agent-exec --work DIR --handoff DIR COMMAND ... (see the top of this file)")
+    os.umask(0o027)
+    p = Paths(work, handoff)
+    cmd, rest = argv[0], argv[1:]
+    opts, positional, command = {}, [], []
+    if "--" in rest:
+        i = rest.index("--")
+        rest, command = rest[:i], rest[i + 1:]
+    it = iter(rest)
+    for a in it:
+        if a in ("--scope", "--require-scope"):
+            opts[a] = True
+        elif a.startswith("--"):
+            opts[a] = next(it, None)
+        else:
+            positional.append(a)
+    if cmd == "prepare" and len(positional) == 2:
+        cmd_prepare(p, positional[0], positional[1], opts.get("--branch"), opts.get("--origin"))
+    elif cmd == "run" and len(positional) == 2 and command:
+        return cmd_run(p, positional[0], positional[1], int(opts.get("--timeout") or 14400), opts.get("--scope", False),
+                       opts.get("--require-scope", False), opts.get("--memory") or "75%", opts.get("--cpu") or "200%",
+                       opts.get("--agent-env"), command)
+    elif cmd == "stop" and len(positional) == 1:
+        cmd_stop(p, positional[0], float(opts.get("--grace") or 20))
+    elif cmd == "stop-all":
+        cmd_stop_all(p)
+    elif cmd == "collect" and len(positional) == 2:
+        cmd_collect(p, positional[0], positional[1])
+    elif cmd == "exists" and len(positional) == 1:
+        return 0 if os.path.isdir(p.wd(positional[0])) else 1
+    elif cmd == "exec" and len(positional) == 1 and command:
+        wd = p.wd(positional[0]) if positional[0] != "." else p.work
+        return subprocess.run(command, cwd=wd, env=clean_env(agent_env=opts.get("--agent-env"))).returncode
+    else:
+        die(f"bad command line for {cmd!r}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
