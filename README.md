@@ -1,132 +1,101 @@
 # agent-swarm-kit
 
-Set up your own team of AI helpers. You chat with a few Grok Bot bots that plan and keep you organized,
-and (if you want) an always-on computer in the cloud does the long, heavy work for them with Claude Code
-and Codex, on the subscriptions you already pay for.
+**A small team of AI helpers that keeps your projects moving while you get on with your day.** You chat
+with a few Grok Bots that plan, remember and ask you only what matters, and an optional always-on worker
+does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you already pay for.
+
+> **Easiest start:** tell your Grok Bot
+> *"Set me up with this repo: https://github.com/giltotherescue/agent-swarm-kit"*.
+> It follows [SETUP-WITH-GROKBOT.md](SETUP-WITH-GROKBOT.md) and walks you through every step, one
+> plain question at a time.
+
+## How it works, in four pictures
+
+![You talk to your Grok Bots. They hand big jobs to the worker and get the results back.](docs/images/who-does-what.png)
+
+**Who does what.** You talk to your Grok Bots: a Chief of Staff plus one bot per project. They plan,
+draft and keep track. The worker is a rented server that does the long or hard jobs and sends the
+result back to the bot that asked.
+
+![A request goes from you, to a bot that plans it, to the worker that does it, and back to you as a finished result.](docs/images/request-journey.png)
+
+**A request's journey.** You ask your website bot to refresh the pricing page. The bot writes up the
+job, the worker does it with Claude or Codex, and the result goes straight back to that same bot. The
+bot checks it and sends you one short message with a link. If the worker gets stuck on a question, the
+bot answers it, or asks you if only you can decide.
+
+![Bots drop decisions on one Waiting on you list, you decide, and a weekly goals meeting keeps the bots moving.](docs/images/decisions-and-goals.png)
+
+**Where decisions land.** Anything that needs you goes on one "Waiting on you" list, and the Chief of
+Staff sends it to you as one short message each morning. Once a week the Chief of Staff runs a goals
+meeting: what each project got done, and one to three clear goals for next week. Between meetings each
+project bot checks its goals daily and stays quiet unless a goal is at risk.
+
+![Four cards: Connectors, treg, Worker and Executor.](docs/images/which-tool-when.png)
+
+**Which tool when.** Grok Bot connectors for your own accounts. treg for paid data without a
+subscription, and for some of your private tools like Search Console and Google Ads. The worker for all
+coding and anything long. Executor only later, if the worker needs your connected tools too. Short
+version below; the full guide is [docs/which-tool-when.md](docs/which-tool-when.md).
+
+## Set it up with your Grok Bot (recommended)
+
+1. Open a chat with the Grok Bot you want as your Chief of Staff (any bot will do; it can be a new one).
+2. Say: *"Set me up with this repo: https://github.com/giltotherescue/agent-swarm-kit"*. If the repo is
+   private, give the bot read access first, or upload a copy of it.
+3. Answer its questions. For each choice it explains the options in a sentence or two and tells you
+   what it recommends. Saying "use your recommendation" is always fine.
+
+The bot never asks you to paste a password or key into chat (it uses Grok Bot's secret request form),
+and it asks before anything that costs money, like renting a server. Plan on about an hour without a
+worker, or an afternoon with one.
 
 ## What you get
 
 - **A Chief of Staff bot.** One bot you talk to about everything. It keeps track of what needs you and
   sends you one short list of decisions each morning.
-- **A project bot for each project.** A business, a website, an app. Each one owns its project from end
-  to end and knows its goals, people and limits.
-- **A worker that does the heavy lifting (optional).** A worker is a rented server (a computer in the
-  cloud that is always on). It runs long jobs, code changes, research and anything that needs a strong or
-  specific AI model, while you sleep if you like.
+- **A project bot for each project.** A business, a website, an app, your marketing. Each one owns its
+  project from end to end and knows its goals, people and limits.
+- **A weekly goals meeting and a daily work heartbeat.** Clear goals each week, a quiet daily check, and
+  a nudge only when something is stuck.
+- **A project log.** Every project, with or without code, keeps a history of what was done, what you
+  decided, and your feedback, so bots learn what you like.
+- **A worker that does the heavy lifting (optional).** A rented server that runs long jobs, code changes,
+  research and anything that needs a strong or specific AI model, while you sleep if you like.
 - **Results that come back to the right bot.** When a job finishes, the bot that asked for it gets the
-  result directly. No middleman bot reading everything.
+  result directly.
 - **One "Waiting on you" list.** Every decision that needs you lands in one place. You can answer, snooze
   or drop each one. Dropping is fine.
 - **Light rules.** Nothing goes outside, nothing is deleted, and no money is spent without your yes.
   Everything else just gets done.
 
-## Two ways to run it
+## Which tool when (short version)
 
-- **Grok Bot only.** No server. Good for non-technical people. Your bots plan, draft, research and keep
-  you organized. [Start here](docs/grokbot-only.md).
-- **Grok Bot plus a worker.** A small rented server runs long jobs, code changes, and anything that needs
-  a specific or high-end model. Good for developers and heavy users. [Start here](docs/worker-setup.md).
+| Use | For | Examples |
+| --- | --- | --- |
+| **Grok Bot connectors** | Your own accounts, quick reads and drafts | Gmail, Slack, your calendar, analytics |
+| **treg** | Paid data with no subscription, and some private tools it connects to | Keyword and SERP data, contact enrichment, Google Search Console, Google Ads |
+| **The worker** | All coding (any size), jobs over about 15 minutes, design, deep research, bulk scraping, a specific model | A pricing page change, a 40-page competitor study, a second-model review |
+| **The bot itself** | Quick lookups, coordination, messages | "What did we decide about the logo?", replying in Slack |
+| **Executor** | Later, only if the worker needs your connected tools too | A worker task that must read your CRM |
 
-You can start with the first and add a worker later. Nothing has to be redone.
+## Set it up by hand
 
-## How it works, in pictures
+Prefer to do it yourself? Two paths. You can start with the first and add a worker later; nothing has
+to be redone.
 
-### Who does what
-
-```mermaid
-flowchart LR
-    you(["You"])
-    cos["Your Chief of Staff bot: keeps you organized"]
-    pb["Your project bots: one per project"]
-    worker["The worker: does the heavy lifting"]
-    list["Your Waiting on you list"]
-
-    you <-->|"chat"| cos
-    you <-->|"chat"| pb
-    cos <-->|"coordinates"| pb
-    pb -->|"hands off big jobs"| worker
-    worker -->|"results"| pb
-    cos -->|"one morning list"| list
-    list -->|"you decide"| you
-```
-
-Your bots are the managers. They talk with you, plan, and write up jobs. The worker is the doer: it uses
-Claude Code and Codex to do the long or hard work.
-
-### A day in the life of a request
-
-```mermaid
-flowchart TD
-    a["You ask your website bot: refresh the pricing page"]
-    b["The bot writes up the job and hands it to the worker"]
-    c["The worker does the work with Claude or Codex"]
-    d{"Does it need a choice?"}
-    e["The website bot gets the result and checks it"]
-    f["You get one short message with a link to review"]
-
-    a --> b --> c --> d
-    d -->|"no"| e
-    d -->|"yes, the bot answers or asks you"| c
-    e --> f
-```
-
-The result goes back to the same bot that asked. If the worker gets stuck on a question, that bot
-answers it, or asks you if only you can decide. The work then picks up where it stopped.
-
-### Where decisions land
-
-```mermaid
-flowchart LR
-    pb["Your project bots"]
-    job["Jobs on the worker"]
-    cos["Your Chief of Staff bot"]
-    list["Waiting on you list"]
-    you(["You: yes, no, later or drop"])
-
-    pb -->|"a decision for you"| list
-    job -->|"a question only you can answer"| list
-    cos -->|"one message each morning"| you
-    list --> cos
-    you -->|"your answer"| cos
-    cos -->|"passes it back so work continues"| pb
-```
-
-Developers who want the full technical view (states, tokens, routing rules) can read
-[how it works, technical](docs/how-it-works-technical.md).
-
-## Who it is for
-
-- People who already use Grok Bot and want several bots to work as one team.
-- Developers who want agents to make pull requests overnight while they sleep, and wake up to a short list
-  of decisions.
-- Anyone who wants AI help without paying per use: the default runs on the Claude and ChatGPT
-  subscriptions you already have.
-
-## Trust model
-
-This kit is for **one trusted owner** (you) running a **dedicated worker** (a server used only for this).
-The bots are your own bots. It is not a shared service for strangers. Within that:
-
-- One job on the worker cannot read or change another job.
-- A project bot cannot see or act on another bot's jobs.
-- Jobs never hold the worker's long-lived key or your GitHub login. The worker itself pushes code and
-  opens draft pull requests after checking the rules.
-
-Details are in [secrets](docs/secrets.md).
-
-## Quick start
-
-### Path 1: Grok Bot only (no server, about an hour)
+### Path A: Grok Bot only (no server, about an hour)
 
 1. Create a Chief of Staff bot. Paste [templates/chief-of-staff.md](templates/chief-of-staff.md) into its
    instructions.
 2. Create one project bot. Fill in [templates/project-bot-brief.md](templates/project-bot-brief.md) as its
    brief.
-3. Add the morning and nightly routines from [templates/routine-prompts.md](templates/routine-prompts.md).
+3. Add the routines from [templates/routine-prompts.md](templates/routine-prompts.md): the morning
+   decisions, the nightly cleanup, the weekly goals meeting and the daily work heartbeat.
 4. Read [docs/grokbot-only.md](docs/grokbot-only.md) for what works, what does not, and how to add a
    worker later.
 
-### Path 2: Grok Bot plus a worker (about half a day)
+### Path B: Grok Bot plus a worker (about half a day)
 
 You will type commands on the server. The CLI (command line interface, a program you run by typing) for
 the swarm is called `swarmctl`. A token is a long random password that a bot or program uses to prove who
@@ -177,8 +146,21 @@ whole internet.
 2026-11-18: setup, smoke test, admin user, firewall and SSH hardening, lockdown refusal checks, and the
 task and cleanup flow. Not yet tested on a real server: joining Tailscale (so the real lockdown, Tailscale
 Serve and Tailscale SSH), Claude and Codex login, running a model task, GitHub login and repo pushes, and
-bot notify delivery. Version 0.2.0 had bugs that 0.2.1 fixed. Run `scripts/smoke-test.sh` after setup
-and tell us what fails.
+bot notify delivery. Version 0.2.0 had bugs that 0.2.1 fixed. Version 0.3.0 adds the project log, goals meeting and
+docs on top of 0.2.1; its backend changes are covered by the automated tests but have not had their own
+fresh-server run. Run `scripts/smoke-test.sh` after setup and tell us what fails.
+
+## Trust model
+
+This kit is for **one trusted owner** (you) running a **dedicated worker** (a server used only for this).
+The bots are your own bots. It is not a shared service for strangers. Within that:
+
+- One job on the worker cannot read or change another job.
+- A project bot cannot see or act on another bot's jobs, or read another project's log.
+- Jobs never hold the worker's long-lived key or your GitHub login. The worker itself pushes code and
+  opens draft pull requests after checking the rules.
+
+Details are in [secrets](docs/secrets.md).
 
 ## What is in the box
 
@@ -199,11 +181,15 @@ on Cloudflare instead of the worker is a design only, not built.
 
 Start with the concepts, then follow your path.
 
+- [Set it up with your Grok Bot](SETUP-WITH-GROKBOT.md): the guided path, every choice explained.
 - [Concepts](docs/concepts.md): bots, tasks, states, reports, the Waiting on you list.
+- [Which tool when](docs/which-tool-when.md): connectors, treg, the worker or Executor.
+- [Goals meeting and work heartbeat](docs/goals-and-heartbeat.md): how bots keep moving each week.
+- [Project log](docs/project-log.md): a history of work, decisions and feedback for every project.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Worker server setup](docs/worker-setup.md): any provider, Tailscale, and the security baseline.
 - [Sizing and sandboxes](docs/sizing-and-sandboxes.md): how big a server, and when to offload tests.
-- [How it works, technical](docs/how-it-works-technical.md): diagrams for developers.
+- [How it works, technical](docs/how-it-works-technical.md): flow charts and states for developers.
 - [Backend](docs/backend.md): the task tracker, its API and who can call what.
 - [Results routing](docs/results-routing.md): straight to the owner bot, with a fallback.
 - [Model routing](docs/model-routing.md): which model for which job.

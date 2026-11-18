@@ -18,6 +18,8 @@ This path is for people who do not want to run a server, or who want to start sm
 - **Research inside the bot.** Short web research, summaries, comparisons.
 - **Project briefs.** Each bot knows its project, goals, people and limits.
 - **Approvals.** The same light rules apply.
+- **Goals meeting and work heartbeat.** The weekly goals meeting and each bot's daily goal check work the same way; the goals file is a note the Chief of Staff keeps. See [goals and heartbeat](goals-and-heartbeat.md).
+- **A project log.** Each bot keeps its log (work, decisions, your feedback, lessons) as a note in memory. See [project log](project-log.md), section "Without a worker".
 - **Routines.** Scheduled prompts run inside Grok Bot: the morning decision batch, the nightly memory cleanup, and any pass/fail checks you add (for example "the site homepage loads").
 - **A Waiting on you list.** Without a backend, keep it as a pinned note or a memory file the Chief of Staff owns. Each line: project, the ask, the recommended answer, a link, and the date filed. Bots add a line whenever they hand you a decision or deliverable. You answer, snooze, or write "drop". A dropped line means stop work on it, and nobody files it again unless you ask.
 

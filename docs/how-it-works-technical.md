@@ -5,6 +5,71 @@ moves through its states, and how results are routed. The README has the plain p
 API route and who may call it, see [backend.md](backend.md). For secrets and the trust model, see
 [secrets.md](secrets.md).
 
+## The product view, as flow charts
+
+These three charts were in the README up to 0.2.1. The README now uses illustrated pictures of the same
+ideas; the charts stay here for anyone who likes the boxes and arrows.
+
+### Who does what
+
+```mermaid
+flowchart LR
+    you(["You"])
+    cos["Your Chief of Staff bot: keeps you organized"]
+    pb["Your project bots: one per project"]
+    worker["The worker: does the heavy lifting"]
+    list["Your Waiting on you list"]
+
+    you <-->|"chat"| cos
+    you <-->|"chat"| pb
+    cos <-->|"coordinates"| pb
+    pb -->|"hands off big jobs"| worker
+    worker -->|"results"| pb
+    cos -->|"one morning list"| list
+    list -->|"you decide"| you
+```
+
+Your bots are the managers. They talk with you, plan, and write up jobs. The worker is the doer: it uses
+Claude Code and Codex to do the long or hard work.
+
+### A day in the life of a request
+
+```mermaid
+flowchart TD
+    a["You ask your website bot: refresh the pricing page"]
+    b["The bot writes up the job and hands it to the worker"]
+    c["The worker does the work with Claude or Codex"]
+    d{"Does it need a choice?"}
+    e["The website bot gets the result and checks it"]
+    f["You get one short message with a link to review"]
+
+    a --> b --> c --> d
+    d -->|"no"| e
+    d -->|"yes, the bot answers or asks you"| c
+    e --> f
+```
+
+The result goes back to the same bot that asked. If the worker gets stuck on a question, that bot
+answers it, or asks you if only you can decide. The work then picks up where it stopped.
+
+### Where decisions land
+
+```mermaid
+flowchart LR
+    pb["Your project bots"]
+    job["Jobs on the worker"]
+    cos["Your Chief of Staff bot"]
+    list["Waiting on you list"]
+    you(["You: yes, no, later or drop"])
+
+    pb -->|"a decision for you"| list
+    job -->|"a question only you can answer"| list
+    cos -->|"one message each morning"| you
+    list --> cos
+    you -->|"your answer"| cos
+    cos -->|"passes it back so work continues"| pb
+```
+
 ## The parts and who holds what
 
 ```mermaid
@@ -138,6 +203,29 @@ flowchart TD
     where -->|"yes"| resume["Resume parent folder and session"]
     where -->|"no"| fresh["Fresh checkout of pushed branch, or restore parent bundle, plus previous-REPORT.md"]
 ```
+
+## The project log and the weekly loop (0.3.0)
+
+```mermaid
+flowchart LR
+    finish["POST /tasks/ID/finish (done or failed)"] -->|"auto: result"| log[("log_entries")]
+    answer["Waiting on you: answer or drop, or a human-waiting task answered"] -->|"auto: decision"| log
+    bots["Project bots: POST /log (bound projects only)"] -->|"activity, decision, feedback, learning"| log
+    task["Running task: POST /log (its own project)"] --> log
+    log -->|"GET /log, kind=feedback,learning"| bots
+    log -->|"GET /log, last 7 days"| meeting["Weekly goals meeting (Chief of Staff)"]
+    meeting -->|"confirmed goals: decision entries"| log
+    meeting -->|"goals"| bots
+    log -->|"GET /log/export"| md["Markdown digest per project"]
+```
+
+Auto-entries carry a dedupe key (`task:ID:result`, `item:ID:answer:REVISION`, and so on) in a unique
+index per project, so a replayed finish or answer never logs twice. Details and permissions:
+[project-log.md](project-log.md).
+
+The work heartbeat (a daily Grok Bot routine per project bot) is separate from the machine heartbeat
+(`POST /tasks/ID/heartbeat` every 30 seconds, lease of 600 seconds). See
+[goals-and-heartbeat.md](goals-and-heartbeat.md).
 
 ## Lifecycle helpers in the backend
 

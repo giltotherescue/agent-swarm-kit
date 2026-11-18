@@ -18,8 +18,9 @@ to let a CLI pick its own default). Check the current list with `claude` then `/
 | Inbox triage, support queues, stats, scheduling, coordination | the bot itself | none |
 | Quick lookups that take under a few minutes | the bot itself | none |
 
-Send to the worker: anything long (over about 15 minutes), anything in a repo, anything that needs a
-high-end model, and anything a person asked a specific model to do.
+Send to the worker: all coding (any size, even a one-line fix), anything long (over about 15 minutes),
+design, deep research, bulk scraping, anything that needs a high-end model, and anything a person asked
+a specific model to do. More in docs/which-tool-when.md.
 Keep in the bot: short coordination, reading and replying in chat, connector work (email, calendar, CRM).
 
 Overrides for this project: <none, or list them with the reason>

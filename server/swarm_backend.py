@@ -52,7 +52,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -134,6 +134,9 @@ CREATE TABLE IF NOT EXISTS claims(
   created_at INTEGER, expires_at INTEGER, ended_at INTEGER, end_reason TEXT, finish_response TEXT);
 CREATE TABLE IF NOT EXISTS workers(name TEXT PRIMARY KEY, last_seen INTEGER, draining INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS log_entries(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, bot TEXT, kind TEXT NOT NULL,
+  summary TEXT NOT NULL, detail TEXT, links TEXT, task_id TEXT, dedupe_key TEXT, created_at INTEGER);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
@@ -160,7 +163,13 @@ CREATE INDEX IF NOT EXISTS events_task ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS messages_task ON messages(task_id, delivered);
 CREATE INDEX IF NOT EXISTS claims_task ON claims(task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS items_dedupe ON items(bot, dedupe_key) WHERE status IN ('open','snoozed');
+CREATE INDEX IF NOT EXISTS log_project ON log_entries(project, id);
+CREATE UNIQUE INDEX IF NOT EXISTS log_dedupe ON log_entries(project, dedupe_key) WHERE dedupe_key IS NOT NULL;
 """
+
+# Bumped when the schema changes. 3 = project log (0.3.0).
+SCHEMA_VERSION = 3
+LOG_KINDS = ("activity", "decision", "result", "feedback", "learning")
 
 
 class KeyStore:
@@ -220,6 +229,7 @@ class Store:
             db.executescript(SCHEMA_INDEXES)
             # When this database was first opened by a backend that records it (0.2.1 or later).
             db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('created_at', ?)", (str(now()),))
+            db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
             if keys is not None:
                 self.move_keys_out(keys)
 
@@ -814,7 +824,7 @@ class Backend:
         sql = "SELECT * FROM tasks" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY updated_at DESC LIMIT ?"
         return {"tasks": [self.public_task(t) for t in self.s.q(sql, *args, limit)]}
 
-    def answer(self, who, task_id, b, via="answer"):
+    def answer(self, who, task_id, b, via="answer", log=True):
         self.need(who, "admin", "chief", "bot")
         text = clean_text(b.get("answer") or b.get("text"), 20000, "answer")
         if not text:
@@ -827,6 +837,9 @@ class Backend:
             if t["waiting_on"] == "human" and who["role"] == "bot":
                 raise ApiError(409, "this task waits on the human. A bot cannot answer for them. Ask them, then the Chief of Staff records the answer.")
             self.event(task_id, "answer", actor, text, {"via": via})
+            if log and t["waiting_on"] == "human":
+                self.log_decision(t["project"], t["owner"], t["question"], text, task_id,
+                                  f"task:{task_id}:answer:{t['waiting_since'] or t['updated_at']}", actor)
             self.s.run("UPDATE items SET status = 'answered', answer = ?, updated_at = ? WHERE task_id = ? AND status IN ('open','snoozed')",
                        text, now(), task_id)
             extra = {}
@@ -1020,6 +1033,8 @@ class Backend:
             else:
                 t = self.set_state(t, "failed", actor, outcome=clean_text(b.get("outcome"), 40, "outcome") or "failed",
                                    error=clean_text(b.get("error"), 4000, "error"), **common)
+            if t["state"] in ("done", "failed"):
+                self.log_result(t)
             resp = {"task": self.public_task(t)}
             self.s.run("UPDATE claims SET finish_response = ? WHERE claim_id = ?", json.dumps(resp, default=str), who["claim"])
         return resp
@@ -1346,14 +1361,18 @@ class Backend:
             if not ans:
                 raise ApiError(400, "answer is required")
             self.s.run("UPDATE items SET status='answered', answer=?, updated_at=? WHERE id=?", ans, t, item_id)
+            self.log_decision(item["project"], item["bot"], item["ask"], ans, item["task_id"],
+                              f"item:{item_id}:answer:{item['revision']}", who["bot"] or who["role"])
             if linked and linked["state"] == "waiting":
-                self.answer(who, linked["id"], {"answer": ans}, via="waiting-list")
+                self.answer(who, linked["id"], {"answer": ans}, via="waiting-list", log=False)
         elif action == "snooze":
             until = int(b.get("until") or (t + 86400))
             self.s.run("UPDATE items SET status='snoozed', snooze_until=?, updated_at=? WHERE id=?", until, t, item_id)
         elif action == "drop":
-            self.s.run("UPDATE items SET status='dropped', answer=?, updated_at=? WHERE id=?", clean_text(b.get("note"), 2000, "note")
-                       or "Don't need it", t, item_id)
+            note = clean_text(b.get("note"), 2000, "note") or "Don't need it"
+            self.s.run("UPDATE items SET status='dropped', answer=?, updated_at=? WHERE id=?", note, t, item_id)
+            self.log_decision(item["project"], item["bot"], item["ask"], "Dropped: " + note, item["task_id"],
+                              f"item:{item_id}:drop:{item['revision']}", who["bot"] or who["role"])
             if linked and linked["state"] not in TERMINAL:
                 self.cancel(who, linked["id"])
         elif action in ("done", "withdraw"):
@@ -1377,6 +1396,117 @@ class Backend:
             else:
                 self.queue_notice(eid, self.chief(), "owner_not_registered", payload)
         return {"item": self.shape_item(item)}
+
+    # ---------- project log ----------
+    def add_log(self, project, bot, kind, summary, detail=None, links=(), task_id=None, dedupe_key=None):
+        """Append one entry. With a dedupe_key, a repeat of the same key is ignored (auto-entries stay single)."""
+        if not project:
+            return None
+        cur = self.s.run("INSERT OR IGNORE INTO log_entries(project, bot, kind, summary, detail, links, task_id, dedupe_key, created_at)"
+                         " VALUES(?,?,?,?,?,?,?,?,?)", project, bot, kind, summary[:500], (detail or None) and detail[:20000],
+                         json.dumps([str(x)[:2000] for x in links if x][:20]), task_id, dedupe_key, now())
+        return cur.lastrowid if cur.rowcount else None
+
+    def log_result(self, t):
+        title = next((ln.strip() for ln in (t.get("title") or t["prompt"]).splitlines() if ln.strip()), "")[:200]
+        word = "Done" if t["state"] == "done" else "Failed"
+        detail = t["summary"] if t["state"] == "done" else (t["error"] or t["summary"])
+        links = [t["pr_url"], f"{self.public_url}/tasks/{t['id']}/report" if self.public_url else None]
+        self.add_log(t["project"], t["owner"], "result", f"{word}: {title}", detail, links, t["id"], f"task:{t['id']}:result")
+
+    def log_decision(self, project, bot, ask, answer, task_id, key, actor):
+        ask = " ".join((ask or "").split())
+        self.add_log(project, bot, "decision", f"Decided: {ask[:200]}", f"Answer: {answer}\nRecorded by: {actor}",
+                     (), task_id, key)
+
+    def log_projects(self, who):
+        """Projects this caller may read and write in the log. None means all."""
+        if who["role"] in ("admin", "chief"):
+            return None
+        if who["role"] == "task":
+            t = self.s.one("SELECT project FROM tasks WHERE id = ?", who["task"])
+            return [t["project"]] if t and t["project"] else []
+        return [p["name"] for p in self.bound_projects(who["bot"])]
+
+    def post_log(self, who, b):
+        if who["role"] == "task":
+            t = self.own_task(who, who["task"])
+            if not t["project"]:
+                raise ApiError(400, "this task has no project, so it has no project log")
+            if b.get("project") and b["project"] != t["project"]:
+                raise ApiError(403, "a task can only write to its own project's log")
+            project, bot, task_id = t["project"], t["owner"] or "worker", t["id"]
+        else:
+            project = clean_text(b.get("project"), 80, "project")
+            if not project or not ID_RE.match(project):
+                raise ApiError(400, "project is required")
+            allowed = self.log_projects(who)
+            if allowed is not None and project.lower() not in (p.lower() for p in allowed):
+                raise ApiError(403, f"this bot is not bound to project {project}. Bind it: swarmctl project set {project} --bot BOT_ID")
+            bot = who["bot"] or clean_text(b.get("bot"), 80, "bot") or who["role"]
+            task_id = clean_text(b.get("task_id"), 80, "task_id")
+            if task_id and who["role"] == "bot":
+                self.check_item_task(who, who["bot"], task_id)  # a bot may only link its own tasks
+        kind = b.get("kind")
+        if kind not in LOG_KINDS:
+            raise ApiError(400, "kind must be one of: " + ", ".join(LOG_KINDS))
+        summary = clean_text(b.get("summary"), 500, "summary")
+        if not summary:
+            raise ApiError(400, "summary is required")
+        detail = clean_text(b.get("detail"), 20000, "detail")
+        links = b.get("links") or []
+        if not isinstance(links, list) or len(links) > 20:
+            raise ApiError(400, "links must be a list (max 20)")
+        key = clean_text(b.get("dedupe_key"), 200, "dedupe_key")
+        with self.s.tx():
+            eid = self.add_log(project, bot, kind, summary, detail, links, task_id, key)
+            if eid is None:
+                row = self.s.one("SELECT * FROM log_entries WHERE project = ? AND dedupe_key = ?", project, key)
+                return {"entry": self.shape_log(row), "duplicate": True}
+        return {"entry": self.shape_log(self.s.one("SELECT * FROM log_entries WHERE id = ?", eid)), "duplicate": False}
+
+    @staticmethod
+    def shape_log(r):
+        r = dict(r)
+        r["links"] = json.loads(r["links"] or "[]")
+        r.pop("dedupe_key", None)
+        return r
+
+    def list_log(self, who, qs):
+        where, args = [], []
+        allowed = self.log_projects(who)
+        if qs.get("project"):
+            if allowed is not None and qs["project"].lower() not in (p.lower() for p in allowed):
+                raise ApiError(404, "no such project log")
+            where.append("lower(project) = lower(?)"); args.append(qs["project"])
+        elif allowed is not None:
+            if not allowed:
+                return {"entries": []}
+            where.append("lower(project) IN (" + ",".join("lower(?)" for _ in allowed) + ")"); args += allowed
+        if qs.get("kind"):
+            kinds = [k for k in qs["kind"].split(",") if k]
+            if any(k not in LOG_KINDS for k in kinds):
+                raise ApiError(400, "kind must be one of: " + ", ".join(LOG_KINDS))
+            where.append("kind IN (" + ",".join("?" for _ in kinds) + ")"); args += kinds
+        for key, op in (("since", ">="), ("until", "<")):
+            if qs.get(key):
+                try:
+                    where.append(f"created_at {op} ?"); args.append(int(qs[key]))
+                except ValueError:
+                    raise ApiError(400, f"{key} must be a unix time")
+        try:
+            limit = max(1, min(int(qs.get("limit") or 100), 1000))
+        except ValueError:
+            raise ApiError(400, "limit must be a number")
+        sql = "SELECT * FROM log_entries" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC LIMIT ?"
+        rows = self.s.q(sql, *args, limit)
+        return {"entries": [self.shape_log(r) for r in reversed(rows)]}
+
+    def export_log(self, who, qs):
+        if not qs.get("project"):
+            raise ApiError(400, "project is required")
+        entries = self.list_log(who, dict(qs, limit=qs.get("limit") or "1000"))["entries"]
+        return log_markdown(qs["project"], entries, int(qs["since"]) if qs.get("since") else None)
 
     # ---------- status ----------
     def status(self, who):
@@ -1412,6 +1542,33 @@ class Backend:
         else:
             out["notices"] = {}
         return out
+
+
+def log_markdown(project, entries, since=None):
+    """A readable digest of one project's log, grouped by day, newest day last."""
+    def day(ts):
+        return time.strftime("%Y-%m-%d", time.gmtime(ts))
+    head = f"# Project log: {project}\n\n"
+    head += (f"Entries since {day(since)} (UTC). " if since else "All entries (UTC). ")
+    counts = {}
+    for e in entries:
+        counts[e["kind"]] = counts.get(e["kind"], 0) + 1
+    head += ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + ".\n" if counts else "No entries.\n"
+    out, last = [head], None
+    for e in entries:
+        d = day(e["created_at"])
+        if d != last:
+            out.append(f"\n## {d}\n")
+            last = d
+        line = f"- **{e['kind']}** {e['summary']}" + (f" ({e['bot']})" if e.get("bot") else "")
+        if e.get("task_id"):
+            line += f" task `{e['task_id']}`"
+        out.append(line)
+        for ln in (e.get("detail") or "").strip().splitlines()[:12]:
+            out.append("  " + ln if ln.strip() else "")
+        for link in e.get("links") or []:
+            out.append(f"  - {link}")
+    return "\n".join(out).rstrip() + "\n"
 
 
 class FailLimiter:
@@ -1699,6 +1856,22 @@ def r_alert(api, who, m, qs, body, h):
     if not key or not text:
         raise ApiError(400, "key and text are required")
     return {"queued": api.alert(key, text, who["role"])}
+
+
+@route("POST", r"/log", ("admin", "chief", "bot", "task"),
+       "Add a project log entry. Bot: projects it is bound to. Task token: its own task's project")
+def r_log_add(api, who, m, qs, body, h):
+    return api.post_log(who, body)
+
+
+@route("GET", r"/log", ("admin", "chief", "bot"), "Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only")
+def r_log_list(api, who, m, qs, body, h):
+    return api.list_log(who, qs)
+
+
+@route("GET", r"/log/export", ("admin", "chief", "bot"), "One project's log as a Markdown digest. Bot: its bound projects only")
+def r_log_export(api, who, m, qs, body, h):
+    return ("text/markdown; charset=utf-8", api.export_log(who, qs).encode())
 
 
 @route("GET", r"/notices", ("admin", "chief"), "The last 100 deliveries with state and last error")

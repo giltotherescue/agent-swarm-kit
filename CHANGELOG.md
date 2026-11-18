@@ -4,6 +4,47 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.3.0 (2026-11-18)
+
+Easier to start and easier to keep going. The README is friendlier, your Grok Bot can now set the whole
+kit up for you, bots get weekly goals and a daily check, and every project keeps a log. The backend
+change (the project log) is covered by automated tests; 0.3.0 has not had its own fresh-server install
+run yet (0.2.1 has, see docs/worker-setup.md "Tested on").
+Upgrade steps: docs/updating-the-kit.md ("Upgrading from 0.2.1 to 0.3.0").
+
+Added:
+- `SETUP-WITH-GROKBOT.md`: tell your Grok Bot "set me up with this repo" and it walks you through
+  everything, one question at a time. Every choice (worker or not, where and how big, model logins,
+  backend, project bots, connectors, treg, Executor, approvals, goals meeting time) is explained in plain
+  words with a recommended default. It never asks for secrets in chat and confirms anything that costs
+  money.
+- Project log: one append-only history per project in the backend (new `log_entries` table, created
+  automatically on upgrade). Kinds: activity, decision, result, feedback, learning. `swarmctl log
+  add|list|export`, and `POST /log`, `GET /log`, `GET /log/export` (Markdown digest). Finished and
+  failed tasks add a `result` entry by themselves; answering or dropping a Waiting on you item, or
+  answering a task's question for the human, adds a `decision` entry. Project bots read and write only
+  projects they are bound to; a running task writes only to its own project; the worker token has no
+  access. Repeated requests never log twice. Docs: docs/project-log.md.
+- Weekly goals meeting (Chief of Staff) and daily work heartbeat (each project bot): prompts 6 to 8 in
+  templates/routine-prompts.md, a goals file template (templates/goals.md), and
+  docs/goals-and-heartbeat.md, which also explains how this differs from the worker's 30 second machine
+  heartbeat.
+- docs/which-tool-when.md: Grok Bot connectors, treg (paid data, plus private tools like Search Console
+  and Google Ads), the worker (all coding of any size, long jobs, design, deep research, bulk scraping,
+  specific models), Executor (later), with examples and when a connector beats treg for the same
+  account.
+- Four illustrated pictures in docs/images/ for the README.
+
+Changed:
+- README: two-sentence opening, the four pictures, "Set it up with your Grok Bot" as the main path, a
+  short "which tool when" table, and manual setup as the second path.
+- All Mermaid flow charts moved out of the README into docs/how-it-works-technical.md, plus a new chart
+  for the project log and the weekly loop.
+- Chief of Staff and project bot templates: goals meeting, work heartbeat, project log and the feedback
+  loop (bots read recent feedback and learnings before drafting), setup choices, and "all coding goes to
+  the worker". The model routing template says the same.
+- Backend, worker, `agent-exec` and `swarmctl` report version 0.3.0.
+
 ## 0.2.1 (2026-11-18)
 
 Fix release from the first install test of 0.2.0 on a fresh Ubuntu 24.04 server. That test found that

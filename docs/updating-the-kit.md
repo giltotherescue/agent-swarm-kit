@@ -105,6 +105,19 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading from 0.2.1 to 0.3.0
+
+0.3.0 adds the project log, the goals meeting and work heartbeat, and new docs. Re-run the setup script
+as in "Pulling an update". What changes for you:
+
+- The backend adds the `log_entries` table by itself the first time it starts. Nothing to run by hand,
+  and nothing in your tasks, bots or Waiting on you list changes.
+- Bind each project bot to its projects if you have not yet, including projects with no repo:
+  `sudo swarmctl project set marketing --bot marketing-bot`. A bot can only use the log of projects it is
+  bound to.
+- Add the new routines to your bots (prompts 6, 7 and 8 in templates/routine-prompts.md), and paste the
+  new "Goals right now", "Project log" and "Setup choices" parts of the templates into your bots' briefs.
+
 ## Upgrading from 0.2.0 to 0.2.1
 
 0.2.1 is a fix release from the first install test on a fresh server. Re-run the setup script as in "Pulling an update". What changes for you:

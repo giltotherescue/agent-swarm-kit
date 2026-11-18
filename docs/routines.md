@@ -36,10 +36,20 @@ If you make a folder by hand on the worker, put it in `/home/agent/work/scratch/
 | Nightly memory cleanup | Every bot | Daily, night | Keeps memory short, which keeps every run cheaper |
 | Fallback and alerts handler | Chief of Staff | Its own webhook | Ownerless results, failed deliveries, waiting-on-human questions, escalated waits, watchdog and disk alerts |
 | Weekly kit improvement note | Chief of Staff, optional | Weekly | Turns patterns in failures into concrete suggestions |
+| Weekly goals meeting | Chief of Staff | Weekly, a fixed slot | Scores last week, sets 1 to 3 checkable goals per project. See [goals-and-heartbeat.md](goals-and-heartbeat.md) |
+| Daily work heartbeat | Every project bot | Daily | Checks its goals are moving; silent when on track, one Waiting on you item when a goal is at risk |
 
 ### Morning decision batch
 
 The Waiting on you list (`GET /waiting?status=due`) holds every open decision and every task waiting on the human. The Chief of Staff reads it once a day and sends one numbered message. You reply in one line, for example "1 yes, 2 drop, 3 snooze". "Drop" means "don't need it": the bot stops work on that ask and must not file it again. Dropping is guilt-free. That is the point of the list.
+
+### Weekly goals meeting and daily work heartbeat
+
+The goals meeting gives every project one to three goals a week, each with a "Done means" line you
+confirmed. The work heartbeat is each project bot checking those goals once a day. It is not the
+worker's machine heartbeat (a check-in every 30 seconds while a task runs, with the task put back in the
+queue after 10 minutes of silence). Both are explained in [goals-and-heartbeat.md](goals-and-heartbeat.md).
+The project log ([project-log.md](project-log.md)) is what they both read.
 
 ### Nightly memory cleanup
 

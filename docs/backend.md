@@ -28,6 +28,7 @@ A background loop runs every few seconds. It:
 | `projects` | Default repo, extra repos, bound bots, provider and model, and the push rules |
 | `items` | The Waiting on you list |
 | `notices` | The delivery outbox. One row per event per bot, with a unique key so nothing is queued twice |
+| `log_entries` | The project log (0.3.0): one append-only history per project, with activity, decisions, results, feedback and learnings. See [project-log.md](project-log.md) |
 
 Task states: `queued`, `running`, `waiting`, `done`, `failed`, `cancelled`. A waiting task has `waiting_on` set to `owner` (the bot that queued it) or `human`.
 
@@ -81,6 +82,9 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/waiting` | yes | yes | yes | no | no | File an item. A linked task must belong to the filing bot |
 | POST | `/waiting/ID` | yes | yes | yes | no | no | answer, snooze, drop (human, through admin or chief); done, withdraw, update (filing bot too) |
 | POST | `/alerts` | yes | no | no | yes | no | Body `{key, text}`. One alert to the Chief of Staff per key |
+| POST | `/log` | yes | yes | yes | no | yes | Add a project log entry. Bot: projects it is bound to. Task token: its own task's project |
+| GET | `/log` | yes | yes | yes | no | no | Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only |
+| GET | `/log/export` | yes | yes | yes | no | no | One project's log as a Markdown digest. Bot: its bound projects only |
 | GET | `/notices` | yes | yes | no | no | no | The last 100 deliveries with state and last error |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).

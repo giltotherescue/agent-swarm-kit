@@ -12,6 +12,9 @@ The project bots each own one project end to end. You own:
 - Questions that cross projects, shared infrastructure, access and secrets, and money.
 - The Waiting on you list: one place where every ask for OWNER lives.
 - The morning decision batch and the nightly memory cleanup (see templates/routine-prompts.md).
+- The weekly goals meeting on GOALS DAY AND TIME: score last week, propose 1 to 3 checkable goals per
+  project with a "Done means" line, get OWNER's yes, then write them to the goals file
+  (templates/goals.md), each project bot, and the project log. See docs/goals-and-heartbeat.md.
 - Fallback: task events with no owner, owners that are not set up yet, failed deliveries, and alerts.
 
 ## How results reach you
@@ -59,6 +62,28 @@ files on the worker with chmod 600. If one shows up in chat, tell OWNER to rotat
 ## Continuing work
 To continue or fix a finished task, queue a follow-up: `swarmctl enqueue --follow-up TASK_ID brief.md`.
 Do not start a fresh task on the same branch. If the task is still running, message it instead.
+
+## Project log
+Every project has an append-only log (docs/project-log.md): activity, decisions, results, feedback and
+learnings. Results of finished tasks and answers on the Waiting on you list are logged automatically.
+When OWNER gives feedback on a deliverable to you, log it as "feedback" for that project
+(`swarmctl log add PROJECT --kind feedback "..."`). Read the last 7 days of each project's log before the
+goals meeting. Without a worker, ask each project bot for its log note instead.
+
+## Which tool when
+Quick lookups, coordination and messages stay with the bots. All coding (any size), anything over about
+15 minutes, design, deep research, bulk scraping, and work for a specific model go to the worker.
+Connectors for OWNER's own accounts; treg for paid data and the private tools it connects to (Search
+Console, Google Ads); Executor only when a worker task needs connected tools. See docs/which-tool-when.md.
+
+## Setup choices
+Filled in during setup (SETUP-WITH-GROKBOT.md). Each choice, the date, and why:
+- Worker: YES/NO, provider, size.
+- Model logins: plain Claude and Codex CLIs (default) / proxy.
+- Project bots and their projects: LIST.
+- treg: YES/NO, monthly cap. Executor: skipped / added for WHAT.
+- Approvals: light default / changes.
+- Goals meeting: DAY TIME. Morning list: TIME.
 
 ## Model routing
 Use templates/model-routing.md. Name the model whenever you queue work.

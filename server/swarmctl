@@ -22,6 +22,9 @@ Examples:
   swarmctl project set website --repo you/site --bot website-bot
   swarmctl bot set website-bot --notify-url https://example.com/hooks/website --notify-auth-file ~/.config/swarm/website.hook
   swarmctl bot test website-bot
+  swarmctl log add marketing --kind feedback "Too formal. Write like we talk to customers."
+  swarmctl log list marketing --kind feedback,learning --days 30
+  swarmctl log export marketing --days 7 --out marketing-log.md
   sudo swarmctl drain | undrain | restart-when-idle    (on the worker)
 """
 import argparse
@@ -37,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DRAIN_FILE = os.environ.get("SWARM_DRAIN_FILE", "/var/lib/swarm-runner/drain")
 STATE_FILE = os.environ.get("SWARM_STATE_FILE", "/var/lib/swarm-runner/runner-state.json")
@@ -183,6 +186,48 @@ def cmd_waiting(a):
     if a.action == "snooze":
         body["until"] = int(time.time() + 86400 * (a.days or 1))
     show(call("POST", f"/waiting/{a.id}", body))
+
+
+def log_query(a):
+    q = {"project": a.project or "", "kind": a.kind or "", "limit": a.limit or ""}
+    if a.days:
+        q["since"] = int(time.time() - 86400 * a.days)
+    return urllib.parse.urlencode({k: v for k, v in q.items() if v != ""})
+
+
+def cmd_log(a):
+    if a.action == "add":
+        if not a.project or not a.summary:
+            sys.exit("swarmctl: log add needs a project and a summary: swarmctl log add PROJECT --kind KIND \"SUMMARY\"")
+        detail = read_prompt(a.detail) if a.detail else None
+        body = {"project": a.project, "kind": a.kind or "activity", "summary": a.summary, "detail": detail,
+                "links": a.link or [], "task_id": a.task_id, "dedupe_key": a.key}
+        return show(call("POST", "/log", body))
+    if a.action == "list":
+        r = call("GET", "/log?" + log_query(a))
+        if a.json:
+            return show(r)
+        for e in r["entries"]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(e["created_at"]))
+            print(f"{when}  {e['project']:14} {e['kind']:9} {(e['bot'] or '-'):16} {e['summary'][:90]}")
+        return
+    # export: one project to a file (or stdout), or every project you can read into a folder
+    if a.project:
+        text = call("GET", "/log/export?" + log_query(a), raw=True).decode()
+        if a.out:
+            with open(a.out, "w") as fh:
+                fh.write(text)
+            return print(a.out)
+        return sys.stdout.write(text)
+    if not a.dir:
+        sys.exit("swarmctl: log export needs a PROJECT, or --dir DIR for every project")
+    os.makedirs(a.dir, exist_ok=True)
+    for p in call("GET", "/projects")["projects"]:
+        a.project = p["name"]
+        out = os.path.join(a.dir, f"{p['name']}-log.md")
+        with open(out, "w") as fh:
+            fh.write(call("GET", "/log/export?" + log_query(a), raw=True).decode())
+        print(out)
 
 
 def write_secret_file(out, value):
@@ -404,6 +449,16 @@ def main():
     pj.add_argument("--no-push-main", action="store_true")
     pj.set_defaults(fn=cmd_project)
 
+    lg = sub.add_parser("log", help="the project log: add, list, export (a history for every project, repo or not)")
+    lg.add_argument("action", choices=["add", "list", "export"]); lg.add_argument("project", nargs="?")
+    lg.add_argument("summary", nargs="?", help="log add: one line saying what happened")
+    lg.add_argument("--kind", help="activity, decision, result, feedback or learning (list: comma list to filter)")
+    lg.add_argument("--detail", help="log add: file with more detail, or - for stdin")
+    lg.add_argument("--link", action="append"); lg.add_argument("--task-id"); lg.add_argument("--key", help="log add: same key is kept once")
+    lg.add_argument("--days", type=float, help="only the last N days"); lg.add_argument("--limit")
+    lg.add_argument("--out", help="export: write to this file"); lg.add_argument("--dir", help="export: one file per project in this folder")
+    lg.add_argument("--json", action="store_true"); lg.set_defaults(fn=cmd_log)
+
     nt = sub.add_parser("notices", help="recent deliveries to bot inboxes (admin or chief)")
     nt.set_defaults(fn=lambda a: show(call("GET", "/notices")))
 
@@ -419,7 +474,12 @@ def main():
         d.add_argument("--also", action="append", help="also restart this systemd unit while idle, for example a proxy")
         d.set_defaults(fn=cmd_drain)
 
-    a = p.parse_args(argv)
+    a, extra = p.parse_known_args(argv)
+    # "log add PROJECT --kind KIND SUMMARY": argparse leaves a summary written after the options unparsed.
+    if extra and a.cmd == "log" and a.summary is None and len(extra) == 1 and not extra[0].startswith("-"):
+        a.summary, extra = extra[0], []
+    if extra:
+        p.error("unrecognized arguments: " + " ".join(extra))
     if getattr(a, "action", None) not in (None, "list", "add") and a.cmd in ("waiting",) and not a.id:
         sys.exit("swarmctl: this action needs an item id")
     if a.cmd == "bot" and a.action != "list" and not a.id:
