@@ -156,6 +156,11 @@ class ClaudeInstallTest(unittest.TestCase):
         for t in self.TOOLS:
             if shutil.which(t):
                 os.symlink(shutil.which(t), os.path.join(self.sys, t))
+        # chown of the temp .profile needs root unless it names the caller's own user and group. Record it instead,
+        # so these tests pass for any user (install test 4, defect 5: they failed for users other than agent).
+        os.remove(os.path.join(self.sys, "chown"))
+        write(os.path.join(self.sys, "chown"), f'#!/bin/sh\necho "$@" >> "{self.tmp}/chown.calls"\n')
+        os.chmod(os.path.join(self.sys, "chown"), 0o755)
         self.home = os.path.join(self.tmp, "home")
         os.makedirs(self.home)
         write(os.path.join(self.home, ".profile"), "# test profile\n")
@@ -163,7 +168,9 @@ class ClaudeInstallTest(unittest.TestCase):
 
     def run_install(self):
         # Our stand-in for sudo checks the exact form "-u USER -H bash -lc CODE" and runs CODE as this user.
-        script = (f'AGENT_HOME="{self.home}"\nWITH_CODEX=0\n'
+        # AGENT_USER is the user running the tests, so the installer's chown of the temp .profile works for any
+        # user, not only for "agent" or root (install test 4, defect 5).
+        script = (f'AGENT_HOME="{self.home}"\nAGENT_USER="$(id -un)"\nWITH_CODEX=0\n'
                   'sudo() { [[ "$1" == -u && "$3" == -H && "$4" == bash && "$5" == -lc ]] || { echo "bad sudo: $*"; return 99; }\n'
                   f'  HOME="{self.home}" bash -lc "$6"; }}\n'
                   'install_model_clis\nprintf "TODO:%s\\n" "${INCOMPLETE[@]}"\n')
@@ -181,6 +188,8 @@ class ClaudeInstallTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.home, ".local", "bin", "claude")), out)
         self.assertNotIn("TODO:Claude", out)
         self.assertIn('.local/bin', read(os.path.join(self.home, ".profile")))
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(read(os.path.join(self.tmp, "chown.calls")).split()[0], f"{user}:{user}")
 
     def test_failed_installer_is_reported_as_a_failed_install(self):
         stub(self.tmp, "curl", "echo 'curl: (22) The requested URL returned error: 503' >&2; exit 22")
@@ -369,6 +378,12 @@ class SetupAsRootTest(unittest.TestCase):
             self.skipTest(why)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         out = r.stdout + r.stderr
+        if r.returncode == 2 and "not a fresh root-only box" in out:
+            # Destructive mode on a box that already has an admin: the checks cannot mean anything there, and the
+            # script changed nothing (install test 4, caveat B).
+            if os.environ.get("SWARM_REQUIRE_USER_TESTS") == "1":
+                self.fail(out)
+            self.skipTest(out.strip().splitlines()[0])
         self.assertEqual(r.returncode, 0, out)
         self.assertIn("SETUP ROOT CHECK OK", out)
 

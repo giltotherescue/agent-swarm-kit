@@ -697,7 +697,7 @@ class Backend:
         if branch and not BRANCH_RE.match(branch):
             raise ApiError(400, "bad branch name")
         kind = clean_text(b.get("kind"), 20, "kind") or ("script" if command else "code" if repo and not report_only else "research")
-        timeout, chain, max_cycles = self.run_limits(b, kind)
+        timeout, chain, max_cycles = self.run_limits(b, kind, command)
         idem = clean_text(b.get("idempotency_key"), 200, "idempotency_key")
         pr_number = b.get("pr_number")
         if pr_number is not None and not str(pr_number).isdigit():
@@ -779,7 +779,7 @@ class Backend:
         return out
 
     @staticmethod
-    def run_limits(b, kind):
+    def run_limits(b, kind, command=None):
         """Per-task timeout (bounded by the admin maximum) and chain settings. See docs/long-running-jobs.md."""
         tmax = env_int("SWARM_TASK_TIMEOUT_MAX", 86400)
         timeout = None
@@ -796,18 +796,24 @@ class Backend:
         elif kind == "long-running":
             timeout = tmax
         chain = 1 if b.get("chain") else 0
+        if chain and command:
+            raise ApiError(400, "a script task (command) cannot be a chain: a script never writes a checkpoint, so it would "
+                                "run once and stop. Use a model task for a chain, or a script with --timeout-minutes.")
         if chain and kind == "long-running":
             raise ApiError(400, "a task is either a chain or long-running, not both. Chains are the default; see docs/long-running-jobs.md")
         max_cycles = None
         if chain:
             cap = env_int("SWARM_MAX_CYCLES", 200)
+            raw = b.get("max_cycles")
             try:
-                max_cycles = int(b.get("max_cycles") or 20)
+                # 0 is refused, not read as "use the default": a chain always has a real limit.
+                max_cycles = 20 if raw is None or raw == "" else int(raw)
             except (TypeError, ValueError):
                 raise ApiError(400, "max_cycles must be a number")
             if not 1 <= max_cycles <= cap:
-                raise ApiError(400, f"max_cycles must be between 1 and {cap}")
-        elif b.get("max_cycles"):
+                raise ApiError(400, f"max_cycles must be between 1 and {cap}. There is no unlimited chain; "
+                                    "a cycle that leaves no checkpoint ends the chain early.")
+        elif b.get("max_cycles") not in (None, ""):
             raise ApiError(400, "max_cycles needs chain")
         return timeout, chain, max_cycles
 
@@ -851,7 +857,7 @@ class Backend:
         if parent.get("repo") and not parent.get("report_only"):
             inherit["branch"] = parent.get("pushed_branch") or parent.get("branch") or f"agent/{parent['id']}"
         body = dict(inherit)
-        body.update({k: v for k, v in b.items() if v not in (None, False, "") and k != "follow_up"})
+        body.update({k: v for k, v in b.items() if v is not None and v is not False and v != "" and k != "follow_up"})
         body["parent_id"] = parent["id"]
         body["_workspace_host"] = parent.get("workspace_host")
         held = self.s.one("SELECT id FROM tasks WHERE parent_id = ? AND follow_up = 1 AND state NOT IN ('done','failed','cancelled')"
@@ -1780,7 +1786,8 @@ class Backend:
         return {k: v for k, v in r.items() if v is not None or k in ("bot", "detail", "task_id")}
 
     def list_log(self, who, qs):
-        where, args = [], []
+        # Expired throwaway items are hidden everywhere at once, before the daily cleanup deletes them.
+        where, args = ["NOT (kind = 'item' AND expires_at IS NOT NULL AND expires_at <= ?)"], [now()]
         allowed = self.log_projects(who)
         if qs.get("project"):
             if allowed is not None and qs["project"].lower() not in (p.lower() for p in allowed):

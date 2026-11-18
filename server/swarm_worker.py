@@ -475,12 +475,15 @@ class Runner(threading.Thread):
         The runner owns the inbox folder and removes it itself. The agent owns the outbox folder, so the runner
         asks agent-exec to remove it (one narrow action through the same sudo rule). If the results were not
         uploaded and acknowledged, the outbox stays; the daily cleanup backs it up and removes it after
-        SWARM_KEEP_DAYS.
+        SWARM_KEEP_DAYS. The exception is a claim the backend ended (cancelled, reaped or expired): it will never
+        accept these results, and the agent's own folder still holds the work, so the outbox goes at once.
         """
         shutil.rmtree(self.inbox, ignore_errors=True)
         if not os.path.lexists(self.outbox):
             return
-        if not self.finished or (self.collected and not self.uploaded):
+        if getattr(self, "lost", False):
+            log("task", self.task["id"], "claim ended: removing the outbox, the backend will not take these results")
+        elif not self.finished or (self.collected and not self.uploaded):
             log("task", self.task["id"], "outbox kept: results not confirmed saved; the daily cleanup handles it")
             return
         try:

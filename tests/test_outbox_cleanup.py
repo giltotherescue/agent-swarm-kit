@@ -132,6 +132,7 @@ class RunnerCleanupTest(unittest.TestCase):
         write(os.path.join(r.inbox, "brief.md"))
         write(os.path.join(r.outbox, "REPORT.md"))
         r.finished, r.collected, r.uploaded = finished, collected, uploaded
+        r.lost = False
         r.calls = []
         r.agent = lambda *a, **k: r.calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
         return r
@@ -153,6 +154,13 @@ class RunnerCleanupTest(unittest.TestCase):
         r = self.runner(finished=False, collected=True, uploaded=True)
         r.cleanup_handoff()
         self.assertEqual(r.calls, [])
+
+    def test_cancelled_run_removes_the_outbox_at_once(self):
+        # Install test 4, defect 4: a cancelled run never finishes, but the backend will not take its results.
+        r = self.runner(finished=False, collected=True, uploaded=False)
+        r.lost = True
+        r.cleanup_handoff()
+        self.assertEqual(r.calls, [("cleanup", "t1")])
 
     def test_a_failed_cleanup_does_not_raise(self):
         r = self.runner(finished=True, collected=True, uploaded=True)

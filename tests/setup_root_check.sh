@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Root-only checks for scripts/setup-worker.sh: lockdown refusal on a root-only box, --admin-user, --harden.
 # Run ONLY in a throwaway Ubuntu container or VM (test_setup_script.py starts it in Docker): it makes users,
-# writes /etc/ssh and replaces tailscale, ufw, sshd, systemctl and apt-get with stubs.
+# writes /etc/ssh and replaces tailscale, ufw, sshd, systemctl and apt-get with stubs. It puts all of that back
+# when it exits, pass or fail, and refuses (exit 2, nothing changed) on a box that already has a usable admin.
 # Usage: bash setup_root_check.sh KIT_DIR     Prints "SETUP ROOT CHECK OK" at the end, exit 1 on a failed check.
 set -uo pipefail
 KIT="${1:?kit dir}"
@@ -9,8 +10,36 @@ SETUP="$KIT/scripts/setup-worker.sh"
 [[ $EUID -eq 0 ]] || { echo "must run as root in a throwaway container" >&2; exit 2; }
 grep -q '^ID=ubuntu' /etc/os-release || { echo "needs an Ubuntu image" >&2; exit 2; }
 
-STUB=/usr/local/sbin CALLS=/tmp/stub-calls
+STUB="${SWARM_ROOT_CHECK_STUB_DIR:-/usr/local/sbin}" CALLS=/tmp/stub-calls
 fail() { echo "SETUP ROOT CHECK FAILED: $*"; echo "--- last output:"; cat /tmp/out 2>/dev/null; exit 1; }
+
+# These checks need a root-only box: they expect lockdown to find no admin, and they make "alice" the admin.
+# On a box that already has a sudo user they would fail for the wrong reason (install test 4, caveat B).
+# "Usable admin" is decided by the setup script's own check, so a stock sudo user with no keys does not count.
+if admin=$(SWARM_SETUP_LIB=1 SUDO_USER="" bash -c 'source "$1"; find_admin && echo "$ADMIN_USER"' _ "$SETUP"); then
+  echo "this box already has a usable admin account ($admin), so it is not a fresh root-only box." >&2
+  echo "Run these checks in Docker (the test does that) or on a brand new throwaway server." >&2
+  exit 2
+fi
+
+# Everything below that changes the box is put back on exit, pass or fail: the stubs that shadow the real
+# ufw, sshd, systemctl, tailscale and apt-get, root's authorized_keys, sshd_config, and the test user.
+SAVE=$(mktemp -d /tmp/setup-root-check.XXXXXX)
+SAVED_FILES=("$STUB/ufw" "$STUB/systemctl" "$STUB/apt-get" "$STUB/tailscale" "$STUB/sshd"
+             /etc/ssh/sshd_config /etc/ssh/sshd_config.d/00-swarm-hardening.conf /root/.ssh/authorized_keys)
+for f in "${SAVED_FILES[@]}"; do
+  if [[ -e "$f" || -L "$f" ]]; then mkdir -p "$SAVE$(dirname "$f")"; cp -a "$f" "$SAVE$f"; fi
+done
+ALICE_EXISTED=0; id alice >/dev/null 2>&1 && ALICE_EXISTED=1
+restore() {
+  for f in "${SAVED_FILES[@]}"; do
+    rm -f "$f"
+    if [[ -e "$SAVE$f" || -L "$SAVE$f" ]]; then cp -a "$SAVE$f" "$f"; fi
+  done
+  (( ALICE_EXISTED )) || userdel -r alice >/dev/null 2>&1 || true
+  rm -rf "$SAVE" /tmp/ts-joined "$CALLS" /tmp/out
+}
+trap restore EXIT
 
 # Stubs. Each logs its arguments so we can see what would have changed.
 for c in ufw systemctl apt-get; do
@@ -118,5 +147,4 @@ rc=$(echo no | run --harden)
 [[ -e /etc/ssh/sshd_config.d/00-swarm-hardening.conf ]] && fail "root login was turned off without proof the admin can log in"
 echo "ok"
 
-userdel -r alice >/dev/null 2>&1
 echo "SETUP ROOT CHECK OK"

@@ -1,8 +1,13 @@
 """Long-running jobs (0.3.0): per-task timeout with an admin maximum, the long-running kind, and chains."""
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from helpers import ADMIN, Backend
+
+SWARMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server", "swarmctl")
 
 
 class LongRunningTest(unittest.TestCase):
@@ -48,6 +53,33 @@ class LongRunningTest(unittest.TestCase):
         st, _ = self.b.call("POST", "/tasks", {"prompt": "both", "kind": "long-running", "chain": True}, tok=self.bot)
         self.assertEqual(st, 400)
         self.assertEqual(self.b.call("POST", "/tasks", {"prompt": "cycles without chain", "max_cycles": 3}, tok=self.bot)[0], 400)
+        self.b.req("POST", f"/tasks/{t['id']}/cancel", tok=self.bot)
+
+    def test_max_cycles_zero_is_refused_not_read_as_the_default(self):
+        # Install test 4, defect 1: 0 used to become 20 silently, in the backend and in swarmctl.
+        for body in ({"prompt": "zero cycles", "chain": True, "max_cycles": 0},
+                     {"prompt": "zero cycles as text", "chain": True, "max_cycles": "0"},
+                     {"prompt": "zero without chain", "max_cycles": 0}):
+            st, err = self.b.call("POST", "/tasks", body, tok=self.bot)
+            self.assertEqual(st, 400, (body, err))
+        self.assertIn("between 1 and", self.b.call("POST", "/tasks", {"prompt": "z", "chain": True, "max_cycles": 0}, tok=self.bot)[1]["error"])
+        tmp = tempfile.mkdtemp()
+        tokf = os.path.join(tmp, "tok")
+        with open(tokf, "w") as fh:
+            fh.write(self.bot)
+        r = subprocess.run([sys.executable, SWARMCTL, "enqueue", "--chain", "--max-cycles", "0", "-"], input="zero via swarmctl",
+                           env=dict(os.environ, SWARM_URL=self.b.base, SWARM_TOKEN_FILE=tokf, HOME=tmp),
+                           capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("max_cycles must be between 1", r.stderr)
+
+    def test_a_script_task_cannot_be_a_chain(self):
+        # Install test 4, defect 3: a script never writes a checkpoint, so --chain --command ran once and stopped.
+        st, err = self.b.call("POST", "/tasks", {"prompt": "run checks", "command": "make test", "chain": True}, tok=self.bot)
+        self.assertEqual(st, 400, err)
+        self.assertIn("cannot be a chain", err["error"])
+        t = self.b.req("POST", "/tasks", {"prompt": "slow checks", "command": "make test", "timeout_minutes": 30}, tok=self.bot)["task"]
+        self.assertEqual(t["timeout"], 1800)
         self.b.req("POST", f"/tasks/{t['id']}/cancel", tok=self.bot)
 
     def test_chain_queues_each_cycle_with_its_checkpoint_and_stops_at_the_limit(self):

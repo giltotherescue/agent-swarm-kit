@@ -250,8 +250,13 @@ class ProjectLogTest(unittest.TestCase):
         e = self.b.req("POST", "/log", {"project": "site", "kind": "item", "status": "draft", "summary": "Test banner",
                                         "expires_days": 1}, tok=self.site)["entry"]
         self.assertIn(e["ref"], str(self.b.req("GET", "/log/items?project=site", tok=self.site)))
+        self.assertTrue(self.entries("site", ref=e["ref"]))
         self.b.api.s.run("UPDATE log_entries SET expires_at = ? WHERE ref = ?", int(time.time()) - 5, e["ref"])
         self.assertNotIn(e["ref"], str(self.b.req("GET", "/log/items?project=site", tok=self.site)))
+        # Install test 4, defect 2: hidden from every view at once, not only after the daily cleanup.
+        self.assertEqual(self.entries("site", ref=e["ref"]), [])
+        self.assertNotIn("Test banner", str(self.b.req("GET", "/log?project=site&kind=item", tok=self.site)))
+        self.assertNotIn("Test banner", self.b.call("GET", "/log/export?project=site", tok=self.site)[1].decode())
         self.b.api.s.run("DELETE FROM meta WHERE key = 'retention_at'")
         self.b.api.retention()
         self.assertEqual(self.entries("site", ref=e["ref"]), [])

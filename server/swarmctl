@@ -120,7 +120,7 @@ def cmd_enqueue(a):
     for path in local_path_warnings(body["prompt"], a.attach)[:5]:
         print(f"WARNING: the brief mentions {path}, a path on your own computer. The worker cannot see it. "
               "Attach the file with --attach instead.", file=sys.stderr)
-    r = call("POST", "/tasks", {k: v for k, v in body.items() if v not in (None, False)})
+    r = call("POST", "/tasks", {k: v for k, v in body.items() if v is not None and v is not False})
     t = r["task"]
     if r.get("answered_parent"):
         print(f"{t['id']} {t['state']}: task was waiting, so your follow-up was sent as its answer and it resumes")
@@ -213,7 +213,7 @@ def cmd_log(a):
                 "links": a.link or [], "task_id": a.task_id, "dedupe_key": a.key, "by": a.by, "status": a.status, "ref": a.ref,
                 "answer": a.answer, "source": a.source, "after": a.after, "learning": a.learning, "proposal": a.proposal,
                 "expires_days": a.expires_days, "new_version": a.new_version, "version": a.version}
-        return show(call("POST", "/log", {k: v for k, v in body.items() if v not in (None, False)}))
+        return show(call("POST", "/log", {k: v for k, v in body.items() if v is not None and v is not False}))
     if a.action in ("items", "rules", "brief"):
         if not a.project:
             sys.exit(f"swarmctl: log {a.action} needs a project")
