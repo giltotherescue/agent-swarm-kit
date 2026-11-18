@@ -78,7 +78,7 @@ class ProjectLogTest(unittest.TestCase):
         self.assertFalse([r for r in sb.ROUTES if r["pattern"].startswith("/log") and r["method"] != "GET" and r["pattern"] != "/log"])
 
     def test_filters(self):
-        self.b.req("POST", "/log", {"project": "site", "kind": "feedback", "summary": "Hero image feels stock"}, tok=self.site)
+        self.b.req("POST", "/log", {"project": "site", "kind": "feedback", "summary": "Hero image feels stock", "by": "Gil"}, tok=self.site)
         self.b.req("POST", "/log", {"project": "site", "kind": "learning", "summary": "Gil prefers real photos"}, tok=self.site)
         self.b.req("POST", "/log", {"project": "site", "kind": "activity", "summary": "Fixed a typo"}, tok=self.site)
         got = self.entries("site", tok=self.site, kind="feedback,learning")
@@ -160,15 +160,142 @@ class ProjectLogTest(unittest.TestCase):
         self.b.req("POST", f"/tasks/{c2['id']}/answer", {"answer": "No"}, tok=self.site)
         self.assertFalse([x for x in self.entries("site", kind="decision") if x["task_id"] == c2["id"]])
 
+    # ---- typed records (items, verdicts, feedback, learnings, rules) ----
+    def test_ad_goes_draft_review_changes_approved_then_a_learning(self):
+        def post(body, tok=None, expect=200):
+            return self.b.req("POST", "/log", dict(body, project="marketing"), tok=tok or self.mkt, expect=expect)
+        ad = post({"kind": "item", "status": "draft", "summary": "Spring sale ad, Facebook"})["entry"]
+        ref = ad["ref"]
+        self.assertEqual((ad["version"], ad["status"]), (1, "draft"))
+        self.assertTrue(ref.startswith("item-"))
+        post({"kind": "item", "ref": ref, "status": "needs-review"})
+        # A verdict needs to say who gave it.
+        self.assertEqual(self.b.call("POST", "/log", {"project": "marketing", "kind": "item", "ref": ref, "status": "changes"},
+                                     tok=self.mkt)[0], 400)
+        post({"kind": "item", "ref": ref, "status": "changes", "by": "Sam", "version": 1})
+        fb = post({"kind": "feedback", "ref": ref, "by": "Sam", "summary": "Too salesy. Lead with the customer's problem."})
+        self.assertEqual(fb["entry"]["version"], 1)
+        # Feedback becomes a pending learning.
+        self.assertEqual((fb["learning"]["kind"], fb["learning"]["status"]), ("learning", "pending"))
+        # Re-drafting after a verdict starts version 2: the old verdict no longer counts.
+        v2 = post({"kind": "item", "ref": ref, "status": "needs-review", "summary": "Spring sale ad, Facebook (v2)"})["entry"]
+        self.assertEqual((v2["version"], v2["status"]), (2, "needs-review"))
+        st, err = self.b.call("POST", "/log", {"project": "marketing", "kind": "item", "ref": ref, "status": "approved",
+                                               "by": "Sam", "version": 1}, tok=self.mkt)
+        self.assertEqual(st, 409, err)
+        post({"kind": "item", "ref": ref, "status": "approved", "by": "Sam", "version": 2})
+        items = self.b.req("GET", "/log/items?project=marketing", tok=self.mkt)["items"]
+        cur = [i for i in items if i["ref"] == ref][0]
+        self.assertEqual((cur["version"], cur["status"]), (2, "approved"))
+        # The learning goes into the rules doc only through a reviewed rule change.
+        lrn = fb["learning"]["ref"]
+        self.assertEqual(self.b.call("POST", "/log", {"project": "marketing", "kind": "learning", "status": "standing",
+                                                      "summary": "x"}, tok=self.mkt)[0], 400)
+        prop = post({"kind": "rule", "after": "Lead with the customer's problem, not the discount.", "learning": lrn})["entry"]
+        self.assertEqual(prop["status"], "proposed")
+        review = {"kind": "rule", "status": "approved", "proposal": prop["id"], "by": "Sam"}
+        self.assertEqual(self.b.call("POST", "/log", dict(review, project="marketing"), tok=self.mkt)[0], 403)
+        self.assertEqual(self.b.call("POST", "/log", dict(review, project="marketing", by=None), tok=self.chief)[0], 400)
+        post(review, tok=self.chief)
+        self.assertEqual(self.b.call("POST", "/log", dict(review, project="marketing"), tok=self.chief)[0], 409)  # reviewed once
+        rules = self.b.req("GET", "/log/rules?project=marketing", tok=self.mkt)
+        self.assertEqual([r["after"] for r in rules["rules"]], ["Lead with the customer's problem, not the discount."])
+        self.assertEqual(rules["changelog"][-1]["by"], "Sam")
+        standing = self.entries("marketing", kind="learning", ref=lrn)
+        self.assertEqual([e["status"] for e in standing], ["pending", "standing"])
+        # A change stores before and after.
+        rule = rules["rules"][0]["ref"]
+        ch = post({"kind": "rule", "ref": rule, "after": "Lead with the problem. Mention the discount once, at the end."})["entry"]
+        self.assertEqual(ch["before"], "Lead with the customer's problem, not the discount.")
+        post({"kind": "rule", "status": "approved", "proposal": ch["id"], "by": "Sam"}, tok=self.chief)
+        brief = self.b.call("GET", "/log/brief?project=marketing", tok=self.mkt)[1].decode()
+        self.assertIn("1. Lead with the problem. Mention the discount once, at the end.", brief)
+        self.assertIn("Too salesy", brief)
+        doc = self.b.call("GET", "/log/rules?project=marketing&format=md", tok=self.mkt)[1].decode()
+        self.assertIn("## Changelog", doc)
+        self.assertIn("Lead with the customer's problem, not the discount. -> Lead with the problem.", doc)
+        self.assertEqual(self.b.call("GET", "/log/brief?project=marketing", tok=self.site)[0], 404)
+
+    def test_bad_records_are_refused(self):
+        bad = [{"kind": "feedback", "summary": "no author"},
+               {"kind": "decision", "summary": "Budget", "answer": "500"},
+               {"kind": "decision", "summary": "Budget", "by": "Sam"},
+               {"kind": "item", "status": "great", "summary": "x"},
+               {"kind": "item", "status": "approved", "summary": "a new item cannot start approved"},
+               {"kind": "activity", "status": "draft", "summary": "x"},
+               {"kind": "learning", "status": "maybe", "summary": "x"},
+               {"kind": "rule", "summary": "a new rule with no text"},
+               {"kind": "activity", "summary": "x", "bot": "nobody-bot"}]
+        for body in bad:
+            st, err = self.b.call("POST", "/log", dict(body, project="marketing"))
+            self.assertEqual(st, 400, (body, err))
+        self.assertEqual(self.b.call("POST", "/log", {"project": "marketing", "kind": "feedback", "ref": "item-99999",
+                                                      "by": "Sam", "summary": "x"})[0], 404)
+        d = self.b.req("POST", "/log", {"project": "marketing", "kind": "decision", "summary": "Monthly ad budget", "by": "Sam",
+                                        "answer": "$500", "source": "weekly goals meeting"})["entry"]
+        self.assertEqual((d["by"], d["answer"], d["source"]), ("Sam", "$500", "weekly goals meeting"))
+
+    def test_rules_doc_is_capped(self):
+        os.environ["SWARM_RULES_CAP"] = "2"
+        try:
+            for n in range(3):
+                p = self.b.req("POST", "/log", {"project": "capped", "kind": "rule", "after": f"Rule number {n}"})["entry"]
+                review = {"project": "capped", "kind": "rule", "status": "approved", "proposal": p["id"], "by": "Sam"}
+                self.assertEqual(self.b.call("POST", "/log", review)[0], 200 if n < 2 else 409)
+        finally:
+            os.environ.pop("SWARM_RULES_CAP")
+
+    def test_throwaway_items_expire(self):
+        e = self.b.req("POST", "/log", {"project": "site", "kind": "item", "status": "draft", "summary": "Test banner",
+                                        "expires_days": 1}, tok=self.site)["entry"]
+        self.assertIn(e["ref"], str(self.b.req("GET", "/log/items?project=site", tok=self.site)))
+        self.b.api.s.run("UPDATE log_entries SET expires_at = ? WHERE ref = ?", int(time.time()) - 5, e["ref"])
+        self.assertNotIn(e["ref"], str(self.b.req("GET", "/log/items?project=site", tok=self.site)))
+        self.b.api.s.run("DELETE FROM meta WHERE key = 'retention_at'")
+        self.b.api.retention()
+        self.assertEqual(self.entries("site", ref=e["ref"]), [])
+
+    def test_waiting_list_shows_counts_and_age(self):
+        old = self.b.req("POST", "/waiting", {"project": "site", "kind": "decision", "ask": "Redo the logo?",
+                                              "dedupe_key": "logo-redo"}, tok=self.site)["item"]
+        self.b.api.s.run("UPDATE items SET created_at = ? WHERE id = ?", int(time.time()) - 20 * 86400, old["id"])
+        r = self.b.req("GET", "/waiting")
+        self.assertGreaterEqual(r["counts"]["open"], 1)
+        self.assertGreaterEqual(r["counts"]["oldest_days"], 20)
+        self.assertGreaterEqual(r["counts"]["stale"], 1)
+        md = self.b.call("GET", "/log/export?project=site")[1].decode()
+        self.assertIn("Consider dropping", md)
+        self.assertIn("Redo the logo?", md)
+
+    def test_weekly_export_writes_files_and_commits_to_git(self):
+        out = tempfile.mkdtemp()
+        os.environ["SWARM_LOG_EXPORT_DIR"] = out
+        try:
+            self.b.req("PUT", "/projects/newsletter", {"log_git": True})
+            self.b.req("POST", "/log", {"project": "newsletter", "kind": "activity", "summary": "Sent issue 12"})
+            self.b.api.s.run("DELETE FROM meta WHERE key = 'log_export_week'")
+            self.b.api.weekly_export()
+        finally:
+            os.environ.pop("SWARM_LOG_EXPORT_DIR")
+        files = sorted(os.listdir(os.path.join(out, "newsletter")))
+        self.assertIn("rules.md", files)
+        week = [f for f in files if f.endswith(".md") and f != "rules.md"][0]
+        self.assertIn("Sent issue 12", open(os.path.join(out, "newsletter", week)).read())
+        git_log = subprocess.run(["git", "log", "--oneline"], cwd=os.path.join(out, "newsletter"), capture_output=True, text=True)
+        self.assertIn("Project log export", git_log.stdout)
+        self.assertFalse(os.path.isdir(os.path.join(out, "site", ".git")))  # only projects that asked for git
+
+
     # ---- export ----
     def test_markdown_export(self):
-        self.b.req("POST", "/log", {"project": "marketing", "kind": "feedback", "summary": "Too formal for our readers",
+        self.b.req("POST", "/log", {"project": "marketing", "kind": "feedback", "summary": "Too formal for our readers", "by": "Sam",
                                     "detail": "Write like we talk to customers.\nShorter paragraphs."}, tok=self.chief)
         md = self.b.call("GET", "/log/export?project=marketing", tok=self.mkt)[1].decode()
         self.assertTrue(md.startswith("# Project log: marketing"))
-        self.assertIn("- **feedback** Too formal for our readers (chief)", md)
+        self.assertIn("- **feedback** Too formal for our readers (by Sam, via chief)", md)
         self.assertIn("  Shorter paragraphs.", md)
-        self.assertRegex(md, r"\n## \d{4}-\d{2}-\d{2}\n")
+        self.assertRegex(md, r"\n### \d{4}-\d{2}-\d{2}\n")
+        self.assertIn("## Waiting on you", md)
         self.assertEqual(self.b.call("GET", "/log/export")[0], 400)
         empty = sb.log_markdown("quiet", [])
         self.assertIn("No entries.", empty)
@@ -194,7 +321,7 @@ class ProjectLogTest(unittest.TestCase):
         self.assertIn("Emails sent Tuesday", open(out).read())
         r = ctl("log", "export", "--dir", os.path.join(tmp, "all"))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(os.listdir(os.path.join(tmp, "all")), ["marketing-log.md"])
+        self.assertEqual(sorted(os.listdir(os.path.join(tmp, "all"))), ["marketing-log.md", "marketing-rules.md"])
         r = ctl("log", "add", "site", "--kind", "activity", "not mine")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("403", r.stderr)

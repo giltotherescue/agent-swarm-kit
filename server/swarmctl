@@ -22,8 +22,11 @@ Examples:
   swarmctl project set website --repo you/site --bot website-bot
   swarmctl bot set website-bot --notify-url https://example.com/hooks/website --notify-auth-file ~/.config/swarm/website.hook
   swarmctl bot test website-bot
-  swarmctl log add marketing --kind feedback "Too formal. Write like we talk to customers."
+  swarmctl log add marketing --kind feedback --by Sam "Too formal. Write like we talk to customers."
+  swarmctl log add marketing --kind item --status needs-review "Spring sale ad, Facebook"
+  swarmctl log brief marketing          read before drafting: standing rules plus 14 days of feedback
   swarmctl log list marketing --kind feedback,learning --days 30
+  swarmctl enqueue --chain --max-cycles 30 --owner app-bot -r you/app --pr polish.md   (see docs/long-running-jobs.md)
   swarmctl log export marketing --days 7 --out marketing-log.md
   sudo swarmctl drain | undrain | restart-when-idle    (on the worker)
 """
@@ -110,7 +113,7 @@ def cmd_enqueue(a):
             "open_pr": a.pr, "pr_number": a.pr_number, "branch": a.branch, "ask_human": a.ask_human,
             "untrusted_input": a.untrusted_input, "command": a.command, "idempotency_key": a.key,
             "title": a.title, "allow_duplicate": a.allow_duplicate, "parent_id": a.parent, "follow_up": a.follow_up,
-            "push_main": a.push_main}
+            "push_main": a.push_main, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
     if a.attach:
         body["attachments"] = [{"name": os.path.basename(p), "content_base64": base64.b64encode(open(p, "rb").read()).decode()}
                                for p in a.attach]
@@ -146,6 +149,8 @@ def cmd_list(a):
     for t in r["tasks"]:
         title = (t.get("title") or (t["prompt"].strip().splitlines() or [""])[0])[:60]
         held = f" [held behind {t['held_behind']}]" if t.get("held_behind") and t["state"] == "queued" else ""
+        if t.get("chain"):
+            held += f" [chain {t['chain_root']} cycle {t['cycle']}/{t['max_cycles']}]"
         print(f"{t['id']:30} {t['state']:9} {str(t.get('owner') or '-'):18} {title}{held}")
 
 
@@ -173,8 +178,12 @@ def cmd_waiting(a):
         r = call("GET", "/waiting?" + urllib.parse.urlencode({"status": a.status or "due"}))
         if a.json:
             return show(r)
+        c = r.get("counts") or {}
+        print(f"{c.get('open', 0)} open, {c.get('snoozed', 0)} snoozed, oldest {c.get('oldest_days', 0)} days")
+        if c.get("stale"):
+            print(f"{c['stale']} open for {c['stale_days']} days or more: answer them, or drop the ones that no longer matter")
         for i in r["items"]:
-            print(f"{i['id']:24} {i['project'] or '-':14} {i['bot'] or '-':16} {i['kind']:18} {(i['ask'] or '')[:70]}")
+            print(f"{i['id']:24} {i['project'] or '-':14} {i['bot'] or '-':16} {str(i.get('age_days', 0)) + 'd':5} {(i['ask'] or '')[:70]}")
             if i.get("recommendation"):
                 print(f"{'':24} recommend: {i['recommendation'][:90]}")
         return
@@ -189,7 +198,7 @@ def cmd_waiting(a):
 
 
 def log_query(a):
-    q = {"project": a.project or "", "kind": a.kind or "", "limit": a.limit or ""}
+    q = {"project": a.project or "", "kind": a.kind or "", "limit": a.limit or "", "ref": a.ref or "", "status": a.status or ""}
     if a.days:
         q["since"] = int(time.time() - 86400 * a.days)
     return urllib.parse.urlencode({k: v for k, v in q.items() if v != ""})
@@ -201,15 +210,34 @@ def cmd_log(a):
             sys.exit("swarmctl: log add needs a project and a summary: swarmctl log add PROJECT --kind KIND \"SUMMARY\"")
         detail = read_prompt(a.detail) if a.detail else None
         body = {"project": a.project, "kind": a.kind or "activity", "summary": a.summary, "detail": detail,
-                "links": a.link or [], "task_id": a.task_id, "dedupe_key": a.key}
-        return show(call("POST", "/log", body))
+                "links": a.link or [], "task_id": a.task_id, "dedupe_key": a.key, "by": a.by, "status": a.status, "ref": a.ref,
+                "answer": a.answer, "source": a.source, "after": a.after, "learning": a.learning, "proposal": a.proposal,
+                "expires_days": a.expires_days, "new_version": a.new_version, "version": a.version}
+        return show(call("POST", "/log", {k: v for k, v in body.items() if v not in (None, False)}))
+    if a.action in ("items", "rules", "brief"):
+        if not a.project:
+            sys.exit(f"swarmctl: log {a.action} needs a project")
+        q = urllib.parse.urlencode({"project": a.project, "status": a.status or ""})
+        if a.action == "brief":
+            return sys.stdout.write(call("GET", "/log/brief?" + q, raw=True).decode())
+        if a.action == "rules":
+            return show(call("GET", "/log/rules?" + q)) if a.json else sys.stdout.write(
+                call("GET", "/log/rules?format=md&" + q, raw=True).decode())
+        r = call("GET", "/log/items?" + q)
+        if a.json:
+            return show(r)
+        for i in r["items"]:
+            print(f"{i['ref']:12} v{i['version']:<3} {i['status']:13} {i['summary'][:80]}")
+        return
     if a.action == "list":
         r = call("GET", "/log?" + log_query(a))
         if a.json:
             return show(r)
         for e in r["entries"]:
             when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(e["created_at"]))
-            print(f"{when}  {e['project']:14} {e['kind']:9} {(e['bot'] or '-'):16} {e['summary'][:90]}")
+            rec = " ".join(str(x) for x in (e.get("ref"), e.get("version") and f"v{e['version']}", e.get("status")) if x)
+            print(f"{when}  #{e['id']:<5} {e['project']:14} {e['kind']:9} {(e.get('by') or e['bot'] or '-'):16} "
+                  f"{(rec + ': ') if rec else ''}{e['summary'][:90]}")
         return
     # export: one project to a file (or stdout), or every project you can read into a folder
     if a.project:
@@ -227,7 +255,21 @@ def cmd_log(a):
         out = os.path.join(a.dir, f"{p['name']}-log.md")
         with open(out, "w") as fh:
             fh.write(call("GET", "/log/export?" + log_query(a), raw=True).decode())
+        with open(os.path.join(a.dir, f"{p['name']}-rules.md"), "w") as fh:
+            fh.write(call("GET", "/log/rules?format=md&project=" + urllib.parse.quote(p["name"]), raw=True).decode())
         print(out)
+    if a.git:
+        git_commit(a.dir, "Project log export " + time.strftime("%Y-%m-%d", time.gmtime()))
+
+
+def git_commit(folder, message):
+    """Commit the export folder to a local git repo so every export shows as a diff (git log -p)."""
+    if not os.path.isdir(os.path.join(folder, ".git")):
+        subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=folder, check=True)
+    r = subprocess.run(["git", "-c", "user.name=swarmctl", "-c", "user.email=swarmctl@localhost", "commit", "-q", "-m", message],
+                       cwd=folder, capture_output=True, text=True)
+    print("committed" if r.returncode == 0 else "nothing new to commit", "in", folder)
 
 
 def write_secret_file(out, value):
@@ -314,6 +356,10 @@ def cmd_project(a):
         body["allow_push_main"] = True
     if a.no_push_main:
         body["allow_push_main"] = False
+    if a.log_git:
+        body["log_git"] = True
+    if a.no_log_git:
+        body["log_git"] = False
     show(call("PUT", f"/projects/{a.name}", body))
 
 
@@ -394,6 +440,9 @@ def main():
     e.add_argument("--allow-duplicate", action="store_true")
     e.add_argument("--follow-up", metavar="TASK_ID", help="continue earlier work: same repo, branch, flags and folder")
     e.add_argument("--parent", help="link to a related task (just a label; use --follow-up to continue work)")
+    e.add_argument("--timeout-minutes", type=float, help="this task's time limit (up to the admin maximum, SWARM_TASK_TIMEOUT_MAX)")
+    e.add_argument("--chain", action="store_true", help="run in short cycles; each cycle queues the next with its checkpoint")
+    e.add_argument("--max-cycles", type=int, help="chain: stop after this many cycles (default 20)")
     e.set_defaults(fn=cmd_enqueue)
 
     r = sub.add_parser("review", help="queue a second-model review of a PR (report only)")
@@ -446,13 +495,26 @@ def main():
     pj.add_argument("--remove-bot", action="append"); pj.add_argument("--provider", choices=["claude", "codex"]); pj.add_argument("--model")
     pj.add_argument("--no-push", action="store_true"); pj.add_argument("--allow-push", action="store_true")
     pj.add_argument("--allow-push-main", action="store_true", help="let tasks use --push-main (off by default)")
+    pj.add_argument("--log-git", action="store_true", help="commit this project's weekly log export to a local git repo")
+    pj.add_argument("--no-log-git", action="store_true")
     pj.add_argument("--no-push-main", action="store_true")
     pj.set_defaults(fn=cmd_project)
 
     lg = sub.add_parser("log", help="the project log: add, list, export (a history for every project, repo or not)")
-    lg.add_argument("action", choices=["add", "list", "export"]); lg.add_argument("project", nargs="?")
+    lg.add_argument("action", choices=["add", "list", "export", "items", "rules", "brief"]); lg.add_argument("project", nargs="?")
     lg.add_argument("summary", nargs="?", help="log add: one line saying what happened")
-    lg.add_argument("--kind", help="activity, decision, result, feedback or learning (list: comma list to filter)")
+    lg.add_argument("--kind", help="activity, decision, result, item, feedback, learning or rule (list: comma list to filter)")
+    lg.add_argument("--by", help="who decided, gave feedback or gave a verdict (required for those)")
+    lg.add_argument("--status", help="item: draft, needs-review, approved, changes, rejected. rule: proposed, approved, rejected")
+    lg.add_argument("--ref", help="the record this is about, for example item-12 or rule-30")
+    lg.add_argument("--answer", help="decision: what was decided"); lg.add_argument("--source", help="where it came from, for example chat")
+    lg.add_argument("--after", help="rule change: the new rule text (leave out with --ref to remove a rule)")
+    lg.add_argument("--learning", help="rule change: the learning it comes from, for example learning-14")
+    lg.add_argument("--proposal", type=int, help="rule review: the id of the proposed change")
+    lg.add_argument("--expires-days", type=float, help="new item: a throwaway item that disappears after this many days")
+    lg.add_argument("--new-version", action="store_true", help="item: this is a new version (older verdicts stop counting)")
+    lg.add_argument("--version", type=int, help="item verdict: the version you reviewed (refused if it is out of date)")
+    lg.add_argument("--git", action="store_true", help="export --dir: commit the folder to a local git repo to keep diffs")
     lg.add_argument("--detail", help="log add: file with more detail, or - for stdin")
     lg.add_argument("--link", action="append"); lg.add_argument("--task-id"); lg.add_argument("--key", help="log add: same key is kept once")
     lg.add_argument("--days", type=float, help="only the last N days"); lg.add_argument("--limit")

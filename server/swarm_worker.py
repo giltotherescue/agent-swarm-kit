@@ -286,7 +286,26 @@ def build_prompt(task, mode="start", note=None):
         text = task["prompt"] + ("\n\n" + history if history else "") + "\n\n" + text
     if note:
         text = note + "\n\n" + text
-    return text + RULES.format(publish=publish)
+    return text + long_job_note(task) + RULES.format(publish=publish)
+
+
+def long_job_note(task):
+    """Extra rules for chain cycles and long-running tasks. See docs/long-running-jobs.md."""
+    hours = round((task.get("timeout") or TIMEOUT) / 3600, 1)
+    if task.get("chain"):
+        n, most = task.get("cycle") or 1, task.get("max_cycles") or 1
+        prev = ("The previous cycle's checkpoint is in .task-context/attachments/checkpoint.md. Read it first and continue from it.\n"
+                if n > 1 else "")
+        return (f"\n\n---\nThis is cycle {n} of at most {most} in a chain. Each cycle is a short, fresh run (time limit {hours} hours).\n"
+                f"{prev}Do one useful round of work, then stop. Before you finish, write CHECKPOINT.md in this folder with everything "
+                "the next cycle needs: what you did, what you found, what to do next. The next cycle starts without this conversation.\n"
+                "Then write REPORT.md and AGENT_STATUS done as usual. The worker queues the next cycle with your checkpoint.\n"
+                "To end the chain because the job is finished, do not write CHECKPOINT.md.\n")
+    if task.get("kind") == "long-running":
+        return (f"\n\n---\nThis is a long-running task with a time limit of {hours} hours. Work in cycles. After every cycle, "
+                "rewrite CHECKPOINT.md in this folder with what is done and what comes next. If CHECKPOINT.md already exists when "
+                "you start, read it first and continue from it: the run may have been restarted.\n")
+    return ""
 
 
 class Runner(threading.Thread):
@@ -310,6 +329,7 @@ class Runner(threading.Thread):
         self.default_branch = None
         self.warnings = []
         self.prompt_n = 0
+        self.timeout = int(self.task.get("timeout") or TIMEOUT)
         self.collected = False   # agent-exec collect ran, so the outbox may hold results
         self.uploaded = False    # every result in the outbox reached the backend
         self.finished = False    # the backend acknowledged the finish
@@ -369,7 +389,7 @@ class Runner(threading.Thread):
     def launch(self, command):
         if self.lost:
             raise ClaimLost("claim ended")
-        args = ["run", self.task["id"], self.workname, "--timeout", str(TIMEOUT), "--agent-env", AGENT_ENV_FILE,
+        args = ["run", self.task["id"], self.workname, "--timeout", str(self.timeout), "--agent-env", AGENT_ENV_FILE,
                 "--memory", os.environ.get("SWARM_TASK_MEMORY_MAX", "75%"), "--cpu", os.environ.get("SWARM_TASK_CPU_QUOTA", "200%")]
         if os.environ.get("SWARM_TASK_SCOPE", "1") == "1":
             args.append("--scope")
@@ -497,9 +517,10 @@ class Runner(threading.Thread):
         if t.get("follow_up") and parent.get("workdir") and parent.get("session_provider") in (None, t["provider"]) \
                 and self.agent("exists", parent["workdir"], check=False).returncode == 0:
             self.workname = parent["workdir"]
-            session = parent.get("session_id")
-            model = parent.get("session_model") or model
-            resume_wanted = True
+            if not t.get("chain"):  # a chain cycle reuses the folder but starts a fresh session; the checkpoint carries state
+                session = parent.get("session_id")
+                model = parent.get("session_model") or model
+                resume_wanted = True
         elif t.get("workdir"):
             self.workname = t["workdir"]
             if t.get("session_id"):
@@ -541,6 +562,7 @@ class Runner(threading.Thread):
             self.ensure_clone()
             self.branch = self.decide_branch()
         prep = json.loads(self.agent("prepare", t["id"], self.workname, *(["--branch", self.branch] if self.branch else []),
+                                     *(["--drop-checkpoint"] if t.get("chain") else []),
                                      *(["--origin", f"https://github.com/{t['repo']}.git"] if t.get("repo") else [])).stdout or "{}")
         if restore_needed and not prep.get("restored"):
             self.warnings.append("could not restore the unpushed work bundle; started from the pushed branch")
@@ -632,7 +654,7 @@ class Runner(threading.Thread):
         report = safe_read(self.outbox, "REPORT.md", 200000) if fresh("REPORT.md") else None
         extra["summary"] = report_summary(report)
         if code in (124, 137):
-            return "failed", dict(extra, outcome="timeout", error=f"the run hit its time limit ({TIMEOUT} seconds) and was stopped")
+            return "failed", dict(extra, outcome="timeout", error=f"the run hit its time limit ({self.timeout} seconds) and was stopped")
         if word == "blocked":
             return "waiting", dict(extra, question=detail or "The agent stopped with a question but did not write it down.")
         if word in ("done", "next"):
@@ -648,6 +670,10 @@ class Runner(threading.Thread):
                 return "failed", dict(extra, outcome="publish_failed", error=pub["publish_error"])
             if word == "next":
                 return "next", dict(extra, next_step=detail)
+            if self.task.get("chain") and fresh("CHECKPOINT.md"):
+                cp = safe_read(self.outbox, "CHECKPOINT.md", 200_000)
+                if cp and cp.strip():
+                    extra["checkpoint"] = cp.decode(errors="replace")
             return "done", extra
         return "failed", dict(extra, outcome="no_status", error=f"agent exited {code} without a valid AGENT_STATUS")
 
@@ -730,7 +756,7 @@ class Runner(threading.Thread):
         if code == 0:
             return "done", dict(extra, summary=f"Script exited 0: {t['command']}"[:500])
         if timed_out:
-            return "failed", dict(extra, outcome="timeout", error=f"script hit the time limit ({TIMEOUT} seconds)")
+            return "failed", dict(extra, outcome="timeout", error=f"script hit the time limit ({self.timeout} seconds)")
         return "failed", dict(extra, outcome="script_failed", error=f"exit code {code}")
 
     def finish(self, status, extra):

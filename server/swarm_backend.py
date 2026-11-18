@@ -146,9 +146,13 @@ MIGRATE_COLUMNS = {
               ("workdir", "TEXT"), ("workspace_host", "TEXT"), ("session_model", "TEXT"),
               ("unpushed", "INTEGER DEFAULT 0"), ("human_snooze_until", "INTEGER"),
               ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER"),
-              ("start_fresh", "INTEGER DEFAULT 0")],
+              ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
+              ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
-    "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0")],
+    "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
+    "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
+                    ("answer", "TEXT"), ("before_text", "TEXT"), ("after_text", "TEXT"), ("expires_at", "INTEGER"),
+                    ("about", "INTEGER")],
     "notices": [("event", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
 }
 
@@ -165,11 +169,19 @@ CREATE INDEX IF NOT EXISTS claims_task ON claims(task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS items_dedupe ON items(bot, dedupe_key) WHERE status IN ('open','snoozed');
 CREATE INDEX IF NOT EXISTS log_project ON log_entries(project, id);
 CREATE UNIQUE INDEX IF NOT EXISTS log_dedupe ON log_entries(project, dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS log_ref ON log_entries(project, ref, id);
+CREATE INDEX IF NOT EXISTS tasks_chain ON tasks(chain_root);
 """
 
-# Bumped when the schema changes. 3 = project log (0.3.0).
-SCHEMA_VERSION = 3
-LOG_KINDS = ("activity", "decision", "result", "feedback", "learning")
+# Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
+SCHEMA_VERSION = 4
+LOG_KINDS = ("activity", "decision", "result", "item", "feedback", "learning", "rule")
+ITEM_STATUSES = ("draft", "needs-review", "approved", "changes", "rejected")
+VERDICTS = ("approved", "changes", "rejected")
+LEARNING_STATUSES = ("pending", "standing")
+RULE_STATUSES = ("proposed", "approved", "rejected")
+DIGEST_DAYS = 14
+STALE_DAYS = 14  # Waiting-on-you items this old are suggested for dropping in the weekly review
 
 
 class KeyStore:
@@ -628,6 +640,7 @@ class Backend:
     # ---------- tasks ----------
     def create_task(self, who, b):
         self.need(who, "admin", "chief", "bot")
+        b = {k: v for k, v in b.items() if not str(k).startswith("_")}  # internal fields are never taken from a request
         follow = clean_text(b.get("follow_up"), 80, "follow_up")
         if follow:
             return self.follow_up(who, follow, b)
@@ -684,6 +697,7 @@ class Backend:
         if branch and not BRANCH_RE.match(branch):
             raise ApiError(400, "bad branch name")
         kind = clean_text(b.get("kind"), 20, "kind") or ("script" if command else "code" if repo and not report_only else "research")
+        timeout, chain, max_cycles = self.run_limits(b, kind)
         idem = clean_text(b.get("idempotency_key"), 200, "idempotency_key")
         pr_number = b.get("pr_number")
         if pr_number is not None and not str(pr_number).isdigit():
@@ -715,8 +729,8 @@ class Backend:
         canon = {"prompt": prompt, "repo": repo, "command": command, "provider": provider, "model": model,
                  "branch": branch, "pr_number": pr_number, "report_only": report_only, "push": push, "open_pr": open_pr,
                  "push_main": push_main, "ask_human": bool(b.get("ask_human")), "untrusted": untrusted, "kind": kind,
-                 "project": project, "parent_id": parent_id, "follow_up": follow_up,
-                 "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
+                 "project": project, "parent_id": parent_id, "follow_up": follow_up, "timeout": timeout, "chain": chain,
+                 "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
         scope = (owner or "").lower()
         t = now()
@@ -743,13 +757,15 @@ class Backend:
                 self.s.run(
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
-                    " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
+                    " timeout, chain, chain_root, cycle, max_cycles)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
-                    1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"))
+                    1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
+                    timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0, max_cycles)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -761,6 +777,56 @@ class Backend:
         if held_behind:
             out["held_behind"] = held_behind
         return out
+
+    @staticmethod
+    def run_limits(b, kind):
+        """Per-task timeout (bounded by the admin maximum) and chain settings. See docs/long-running-jobs.md."""
+        tmax = env_int("SWARM_TASK_TIMEOUT_MAX", 86400)
+        timeout = None
+        if b.get("timeout_minutes") not in (None, ""):
+            try:
+                timeout = int(float(b["timeout_minutes"]) * 60)
+            except (TypeError, ValueError):
+                raise ApiError(400, "timeout_minutes must be a number")
+            if timeout < 60:
+                raise ApiError(400, "timeout_minutes must be at least 1")
+            if timeout > tmax:
+                raise ApiError(400, f"timeout_minutes is above the admin maximum of {tmax // 60} minutes. "
+                                    "The owner can raise SWARM_TASK_TIMEOUT_MAX on the worker.")
+        elif kind == "long-running":
+            timeout = tmax
+        chain = 1 if b.get("chain") else 0
+        if chain and kind == "long-running":
+            raise ApiError(400, "a task is either a chain or long-running, not both. Chains are the default; see docs/long-running-jobs.md")
+        max_cycles = None
+        if chain:
+            cap = env_int("SWARM_MAX_CYCLES", 200)
+            try:
+                max_cycles = int(b.get("max_cycles") or 20)
+            except (TypeError, ValueError):
+                raise ApiError(400, "max_cycles must be a number")
+            if not 1 <= max_cycles <= cap:
+                raise ApiError(400, f"max_cycles must be between 1 and {cap}")
+        elif b.get("max_cycles"):
+            raise ApiError(400, "max_cycles needs chain")
+        return timeout, chain, max_cycles
+
+    def next_cycle(self, t, checkpoint):
+        """Queue a chain's next cycle as a follow-up with the checkpoint attached. Returns (task id or None, note)."""
+        if t["cycle"] >= (t["max_cycles"] or 1):
+            return None, f"Chain stopped: it reached its limit of {t['max_cycles']} cycles. The last checkpoint is saved on {t['id']}."
+        owner = self.bot(t["owner"]) if t["owner"] else None
+        who = {"role": "bot", "bot": owner["id"]} if owner and owner["role"] != "chief" else {"role": "admin", "bot": None}
+        n = t["cycle"] + 1
+        body = {"prompt": t["prompt"], "title": t["title"], "chain": True, "max_cycles": t["max_cycles"],
+                "timeout_minutes": t["timeout"] / 60 if t["timeout"] else None, "_cycle": n, "_chain_root": t["chain_root"],
+                "idempotency_key": f"{t['chain_root']}:cycle:{n}",
+                "attachments": [{"name": "checkpoint.md", "content_base64": base64.b64encode(checkpoint.encode()).decode()}]}
+        try:
+            r = self.follow_up(who, t["id"], body)
+        except ApiError as e:
+            return None, f"Chain stopped: cycle {n} could not be queued ({e.message})."
+        return r["task"]["id"], f"Next: cycle {n} queued as {r['task']['id']}."
 
     def follow_up(self, who, parent_id, b):
         """--follow-up: continue earlier work. See docs/concepts.md for the rules."""
@@ -839,7 +905,7 @@ class Backend:
             self.event(task_id, "answer", actor, text, {"via": via})
             if log and t["waiting_on"] == "human":
                 self.log_decision(t["project"], t["owner"], t["question"], text, task_id,
-                                  f"task:{task_id}:answer:{t['waiting_since'] or t['updated_at']}", actor)
+                                  f"task:{task_id}:answer:{t['waiting_since'] or t['updated_at']}", actor, via)
             self.s.run("UPDATE items SET status = 'answered', answer = ?, updated_at = ? WHERE task_id = ? AND status IN ('open','snoozed')",
                        text, now(), task_id)
             extra = {}
@@ -875,6 +941,29 @@ class Backend:
         self.need(who, "admin", "chief", "bot")
         with self.s.tx():
             t = self.get_task(who, task_id)
+            if t["chain_root"]:
+                return self.cancel_chain(who, t, note)
+            return self.cancel_one(who, t, note)
+
+    def cancel_chain(self, who, t, note=None):
+        """Cancelling any task of a chain, even a finished cycle, cancels every cycle still queued, waiting or running."""
+        live = self.s.q("SELECT * FROM tasks WHERE chain_root = ? AND state NOT IN ('done','failed','cancelled') ORDER BY created_at",
+                        t["chain_root"])
+        outs = [self.cancel_one(who, x, note) for x in live]
+        if live:
+            actor = who["bot"] or who["role"]
+            text = f"Chain {t['chain_root']} cancelled at cycle {max(x['cycle'] for x in live)} by {actor}."
+            self.event(t["chain_root"], "chain", actor, text)
+            self.add_log(t["project"], t["owner"], "activity", text, note, (), live[-1]["id"], f"chain:{t['chain_root']}:cancelled")
+        out = {"task": self.public_task(self.s.one("SELECT * FROM tasks WHERE id = ?", t["id"])),
+               "chain_cancelled": [x["id"] for x in live]}
+        if any(o.get("note") for o in outs):
+            out["note"] = next(o["note"] for o in outs if o.get("note"))
+        return out
+
+    def cancel_one(self, who, t, note=None):
+        task_id = t["id"]
+        with self.s.tx():
             if t["state"] in TERMINAL:
                 return {"task": self.public_task(t)}
             was_running = t["state"] == "running"
@@ -931,7 +1020,7 @@ class Backend:
                        " claim_id = ?, claimed_at = ?, cancel_requested = 0 WHERE id = ?",
                        attempts, worker, now() + LEASE_SECONDS, now(), claim_id, now(), t["id"])
             self.s.run("INSERT INTO claims(claim_id, task_id, token_hash, worker, created_at, expires_at) VALUES(?,?,?,?,?,?)",
-                       claim_id, t["id"], token_hash(tok), worker, now(), now() + self.token_max_age)
+                       claim_id, t["id"], token_hash(tok), worker, now(), now() + max(self.token_max_age, (t["timeout"] or 0) + 3600))
             self.event(t["id"], "state", worker, "running", {"attempt": attempts, "claim_id": claim_id})
             t = self.s.one("SELECT * FROM tasks WHERE id = ?", t["id"])
         out = {k: v for k, v in t.items() if k != "prompt_hash"}
@@ -1016,8 +1105,11 @@ class Backend:
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
                 self.event(task_id, "warning", actor, clean_text(str(w), 2000, "warning"))
+            checkpoint = clean_text(b.get("checkpoint"), 200_000, "checkpoint") if t["chain"] and status == "done" else None
             if status == "done":
-                t = self.set_state(t, "done", actor, outcome="done", error=None, **common)
+                # A chain cycle that hands on a checkpoint is not news; only the chain's end notifies the owner.
+                quiet = bool(checkpoint) and t["cycle"] < (t["max_cycles"] or 0)
+                t = self.set_state(t, "done", actor, notify=not quiet, outcome="done", error=None, **common)
             elif status == "waiting":
                 q = clean_text(b.get("question"), 8000, "question") or "The worker needs an answer (no question text was given)."
                 on = "human" if t["ask_human"] or b.get("waiting_on") == "human" else "owner"
@@ -1033,8 +1125,22 @@ class Backend:
             else:
                 t = self.set_state(t, "failed", actor, outcome=clean_text(b.get("outcome"), 40, "outcome") or "failed",
                                    error=clean_text(b.get("error"), 4000, "error"), **common)
+            chain_note = None
+            if t["chain"] and t["state"] in ("done", "failed"):
+                if checkpoint:
+                    self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
+                               t["id"], "artifact", "checkpoint.md", checkpoint.encode(), len(checkpoint.encode()), now())
+                if t["state"] == "failed":
+                    chain_note = f"Chain stopped: cycle {t['cycle']} failed. See docs/long-running-jobs.md to restart it."
+                elif not checkpoint:
+                    chain_note = f"Chain finished: cycle {t['cycle']} left no checkpoint."
+                else:
+                    nxt, chain_note = self.next_cycle(t, checkpoint)
+                    if not nxt and quiet:
+                        self.notify_task(t)
+                self.event(t["id"], "chain", "backend", chain_note)
             if t["state"] in ("done", "failed"):
-                self.log_result(t)
+                self.log_result(t, chain_note)
             resp = {"task": self.public_task(t)}
             self.s.run("UPDATE claims SET finish_response = ? WHERE claim_id = ?", json.dumps(resp, default=str), who["claim"])
         return resp
@@ -1128,8 +1234,10 @@ class Backend:
                                "watchdog", event="watchdog")
             elif flag and last >= now() - WORKER_SILENT_SECONDS:
                 self.s.run("DELETE FROM meta WHERE key = 'worker_silent_since'")
-            limit = env_int("SWARM_TASK_TIMEOUT", 14400) + 1800
-            for t in self.s.q("SELECT id, claim_id, claimed_at FROM tasks WHERE state = 'running' AND claimed_at < ?", now() - limit):
+            default = env_int("SWARM_TASK_TIMEOUT", 14400)
+            for t in self.s.q("SELECT id, claim_id, claimed_at, timeout FROM tasks WHERE state = 'running'"):
+                if (t["claimed_at"] or now()) >= now() - (t["timeout"] or default) - 1800:
+                    continue
                 self.alert(f"overdue:{t['id']}:{t['claim_id']}", f"Task {t['id']} has been running for "
                                                                f"{(now() - t['claimed_at']) // 60} minutes, past its time limit.",
                            "watchdog", event="watchdog")
@@ -1145,6 +1253,8 @@ class Backend:
                            " (SELECT id FROM tasks WHERE state IN ('done','failed','cancelled') AND finished_at < ?)", now() - days * 86400)
             self.s.run("DELETE FROM notices WHERE state = 'sent' AND sent_at < ?", now() - 30 * 86400)
             self.s.run("DELETE FROM claims WHERE ended_at IS NOT NULL AND ended_at < ?", now() - 30 * 86400)
+            # Throwaway items are the one thing that leaves the log: every entry of an expired item goes.
+            self.s.run("DELETE FROM log_entries WHERE kind = 'item' AND expires_at IS NOT NULL AND expires_at < ?", now())
             self.s.run("INSERT OR REPLACE INTO meta(key, value) VALUES('retention_at', ?)", str(now()))
 
     # ---------- bots and projects ----------
@@ -1213,7 +1323,7 @@ class Backend:
         if not ID_RE.match(name):
             raise ApiError(400, "bad project name")
         with self.s.tx():
-            cur = self.project(name) or {"allow_push": 1, "allow_push_main": 0, "bots": [], "repos": []}
+            cur = self.project(name) or {"allow_push": 1, "allow_push_main": 0, "log_git": 0, "bots": [], "repos": []}
             vals = {}
             for k in ("default_repo", "default_provider", "default_model"):
                 v = clean_text(b[k], 200, k) if k in b else cur.get(k)
@@ -1237,9 +1347,10 @@ class Backend:
                     repos.append(r)
             allow = 1 if b.get("allow_push", cur.get("allow_push")) else 0
             allow_main = 1 if b.get("allow_push_main", cur.get("allow_push_main")) else 0
+            log_git = 1 if b.get("log_git", cur.get("log_git")) else 0
             self.s.run("INSERT OR REPLACE INTO projects(name, default_repo, default_provider, default_model, allow_push, updated_at,"
-                       " bots, repos, allow_push_main) VALUES(?,?,?,?,?,?,?,?,?)", name, vals["default_repo"], vals["default_provider"],
-                       vals["default_model"], allow, now(), json.dumps(bots), json.dumps(repos), allow_main)
+                       " bots, repos, allow_push_main, log_git) VALUES(?,?,?,?,?,?,?,?,?,?)", name, vals["default_repo"],
+                       vals["default_provider"], vals["default_model"], allow, now(), json.dumps(bots), json.dumps(repos), allow_main, log_git)
         return {"project": self.project(name)}
 
     def list_projects(self, who):
@@ -1331,7 +1442,13 @@ class Backend:
                 items = [i for i in items if (i.get(f) or "").lower() == qs[f].lower()]
         if who["role"] == "bot":
             items = [i for i in items if (i.get("bot") or "").lower() == who["bot"].lower()]
-        return {"items": items}
+        for i in items:
+            i["age_days"] = max(0, (now() - (i.get("created_at") or now())) // 86400)
+        open_items = [i for i in items if i.get("status") == "open"]
+        counts = {"open": len(open_items), "snoozed": sum(1 for i in items if i.get("status") == "snoozed"),
+                  "oldest_days": max((i["age_days"] for i in open_items), default=0),
+                  "stale": sum(1 for i in open_items if i["age_days"] >= STALE_DAYS), "stale_days": STALE_DAYS}
+        return {"items": items, "counts": counts}
 
     def update_item(self, who, item_id, b):
         action = b.get("action")
@@ -1398,26 +1515,44 @@ class Backend:
         return {"item": self.shape_item(item)}
 
     # ---------- project log ----------
-    def add_log(self, project, bot, kind, summary, detail=None, links=(), task_id=None, dedupe_key=None):
+    # One append-only, typed log per project. Records that change over time (items, learnings, rules) are a run
+    # of entries sharing a stable `ref`; the newest entry is the current state. Nothing is edited in place.
+    REC_COLS = ("ref", "status", "version", "author", "source", "answer", "before_text", "after_text", "expires_at", "about")
+
+    def add_log(self, project, bot, kind, summary, detail=None, links=(), task_id=None, dedupe_key=None, **rec):
         """Append one entry. With a dedupe_key, a repeat of the same key is ignored (auto-entries stay single)."""
         if not project:
             return None
-        cur = self.s.run("INSERT OR IGNORE INTO log_entries(project, bot, kind, summary, detail, links, task_id, dedupe_key, created_at)"
-                         " VALUES(?,?,?,?,?,?,?,?,?)", project, bot, kind, summary[:500], (detail or None) and detail[:20000],
-                         json.dumps([str(x)[:2000] for x in links if x][:20]), task_id, dedupe_key, now())
+        cols = ["project", "bot", "kind", "summary", "detail", "links", "task_id", "dedupe_key", "created_at"]
+        vals = [project, bot, kind, summary[:500], (detail or None) and detail[:20000],
+                json.dumps([str(x)[:2000] for x in links if x][:20]), task_id, dedupe_key, now()]
+        for k in self.REC_COLS:
+            if rec.get(k) is not None:
+                cols.append(k)
+                vals.append(rec[k])
+        cur = self.s.run(f"INSERT OR IGNORE INTO log_entries({', '.join(cols)}) VALUES({','.join('?' * len(cols))})", *vals)
         return cur.lastrowid if cur.rowcount else None
 
-    def log_result(self, t):
+    def next_log_id(self):
+        """The id the next entry gets (call inside a transaction). Used to give a new record a stable ref."""
+        r = self.s.one("SELECT seq FROM sqlite_sequence WHERE name = 'log_entries'")
+        return (r["seq"] if r else 0) + 1
+
+    def log_result(self, t, chain_note=None):
         title = next((ln.strip() for ln in (t.get("title") or t["prompt"]).splitlines() if ln.strip()), "")[:200]
         word = "Done" if t["state"] == "done" else "Failed"
+        if t.get("chain"):
+            word = f"Cycle {t['cycle']} {word.lower()}"
         detail = t["summary"] if t["state"] == "done" else (t["error"] or t["summary"])
+        if chain_note:
+            detail = ((detail or "") + "\n" + chain_note).strip()
         links = [t["pr_url"], f"{self.public_url}/tasks/{t['id']}/report" if self.public_url else None]
         self.add_log(t["project"], t["owner"], "result", f"{word}: {title}", detail, links, t["id"], f"task:{t['id']}:result")
 
-    def log_decision(self, project, bot, ask, answer, task_id, key, actor):
+    def log_decision(self, project, bot, ask, answer, task_id, key, actor, source="waiting-list"):
         ask = " ".join((ask or "").split())
         self.add_log(project, bot, "decision", f"Decided: {ask[:200]}", f"Answer: {answer}\nRecorded by: {actor}",
-                     (), task_id, key)
+                     (), task_id, key, author=actor, answer=(answer or "")[:4000], source=source)
 
     def log_projects(self, who):
         """Projects this caller may read and write in the log. None means all."""
@@ -1427,6 +1562,152 @@ class Backend:
             t = self.s.one("SELECT project FROM tasks WHERE id = ?", who["task"])
             return [t["project"]] if t and t["project"] else []
         return [p["name"] for p in self.bound_projects(who["bot"])]
+
+    def check_log_project(self, who, project):
+        allowed = self.log_projects(who)
+        if allowed is not None and project.lower() not in (p.lower() for p in allowed):
+            raise ApiError(404, "no such project log")
+
+    def latest(self, project, kind, ref, status=None):
+        sql, args = "SELECT * FROM log_entries WHERE lower(project) = lower(?) AND kind = ? AND ref = ?", [project, kind, ref]
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        return self.s.one(sql + " ORDER BY id DESC LIMIT 1", *args)
+
+    def rule_text(self, project, ref):
+        r = self.latest(project, "rule", ref, "approved")
+        return r["after_text"] if r else None
+
+    def standing_rules(self, project):
+        rows = self.s.q("SELECT * FROM log_entries WHERE id IN (SELECT MAX(id) FROM log_entries WHERE lower(project) = lower(?)"
+                        " AND kind = 'rule' AND status = 'approved' GROUP BY ref)", project)
+        return sorted((r for r in rows if r["after_text"]), key=lambda r: int(r["ref"].rsplit("-", 1)[-1]))
+
+    def pending_rules(self, project):
+        return self.s.q("SELECT * FROM log_entries p WHERE lower(p.project) = lower(?) AND p.kind = 'rule' AND p.status = 'proposed'"
+                        " AND NOT EXISTS (SELECT 1 FROM log_entries r WHERE r.kind = 'rule' AND r.about = p.id) ORDER BY p.id", project)
+
+    def current_items(self, project):
+        rows = self.s.q("SELECT * FROM log_entries WHERE id IN (SELECT MAX(id) FROM log_entries WHERE lower(project) = lower(?)"
+                        " AND kind = 'item' GROUP BY ref) ORDER BY id", project)
+        return [r for r in rows if not r["expires_at"] or r["expires_at"] > now()]
+
+    def log_record(self, who, project, kind, b, summary, by, status, ref, nid):
+        """Check one typed record and return (columns, summary). Raises ApiError on a bad record."""
+        rec = {"author": by}
+        source = clean_text(b.get("source"), 200, "source")
+        if kind in ("activity", "result"):
+            if status or ref:
+                raise ApiError(400, f"{kind} entries take no status or ref")
+        elif kind == "decision":
+            if status or ref:
+                raise ApiError(400, "decision entries take no status or ref")
+            if not by:
+                raise ApiError(400, "a decision needs by: who decided")
+            answer = clean_text(b.get("answer"), 4000, "answer")
+            if not answer:
+                raise ApiError(400, "a decision needs answer: what was decided")
+            rec.update(answer=answer, source=source or "chat")
+        elif kind == "feedback":
+            if status:
+                raise ApiError(400, "feedback takes no status")
+            if not by:
+                raise ApiError(400, "feedback needs by: who gave it")
+            if ref:
+                item = self.latest(project, "item", ref)
+                if not item:
+                    raise ApiError(404, f"no item {ref} in project {project}")
+                rec.update(ref=ref, version=item["version"])
+            rec["source"] = source or "chat"
+        elif kind == "learning":
+            if ref or status == "standing":
+                raise ApiError(400, "a learning becomes standing only when a rule change based on it is approved. "
+                                    "Propose one: kind rule, after RULE TEXT, learning REF")
+            if status not in (None, "pending"):
+                raise ApiError(400, "status must be pending (learnings start pending)")
+            rec.update(ref=f"learning-{nid}", status="pending", source=source)
+        elif kind == "item":
+            if status not in ITEM_STATUSES:
+                raise ApiError(400, "status must be one of: " + ", ".join(ITEM_STATUSES))
+            if not ref:
+                if status not in ("draft", "needs-review"):
+                    raise ApiError(400, "a new item starts as draft or needs-review")
+                if not summary:
+                    raise ApiError(400, "summary is required (what the deliverable is)")
+                rec.update(ref=f"item-{nid}", version=1, status=status, source=source)
+                if b.get("expires_days") is not None:
+                    try:
+                        days = float(b["expires_days"])
+                    except (TypeError, ValueError):
+                        raise ApiError(400, "expires_days must be a number")
+                    if not 0 < days <= 365:
+                        raise ApiError(400, "expires_days must be between 0 and 365")
+                    rec["expires_at"] = now() + int(days * 86400)
+            else:
+                cur = self.latest(project, "item", ref)
+                if not cur:
+                    raise ApiError(404, f"no item {ref} in project {project}")
+                version = cur["version"]
+                if status in VERDICTS:
+                    if not by:
+                        raise ApiError(400, "a verdict needs by: who gave it")
+                    asked = b.get("version")
+                    if asked is not None and str(asked) != str(version):
+                        raise ApiError(409, f"version {asked} is out of date: {ref} is at version {version}. "
+                                            "Its older verdicts no longer count. Review the new version.", {"version": version})
+                elif b.get("new_version") or cur["status"] in VERDICTS:
+                    version += 1  # a new draft: verdicts on older versions no longer count
+                rec.update(ref=ref, status=status, version=version, expires_at=cur["expires_at"], source=source)
+                summary = summary or f"{cur['summary']}"
+        elif kind == "rule":
+            status = status or "proposed"
+            if status not in RULE_STATUSES:
+                raise ApiError(400, "status must be one of: " + ", ".join(RULE_STATUSES))
+            if status == "proposed":
+                after = clean_text(b.get("after"), 1000, "after") or None
+                if ref:
+                    before = self.rule_text(project, ref)
+                    if before is None:
+                        raise ApiError(404, f"no standing rule {ref} in project {project}")
+                else:
+                    if not after:
+                        raise ApiError(400, "a new rule needs after: the rule text")
+                    before, ref = None, f"rule-{nid}"
+                if after == before:
+                    raise ApiError(400, "after is the same as the current rule")
+                learning = clean_text(b.get("learning"), 80, "learning")
+                if learning and not self.latest(project, "learning", learning):
+                    raise ApiError(404, f"no learning {learning} in project {project}")
+                rec.update(ref=ref, status=status, before_text=before, after_text=after, source=learning)
+                summary = summary or ("Add rule" if before is None else "Remove rule" if after is None else "Change rule") + \
+                    f": {after or before}"
+            else:
+                if who["role"] not in ("admin", "chief"):
+                    raise ApiError(403, "rule changes need review: only the owner (admin token or Chief of Staff) can approve or reject")
+                if not by:
+                    raise ApiError(400, "a review needs by: who approved or rejected")
+                try:
+                    pid = int(b.get("proposal"))
+                except (TypeError, ValueError):
+                    raise ApiError(400, "proposal must be the id of a proposed rule change")
+                p = self.s.one("SELECT * FROM log_entries WHERE id = ? AND lower(project) = lower(?) AND kind = 'rule' AND status = 'proposed'",
+                               pid, project)
+                if not p:
+                    raise ApiError(404, f"no proposed rule change {pid} in project {project}")
+                if self.s.one("SELECT 1 FROM log_entries WHERE kind = 'rule' AND about = ?", pid):
+                    raise ApiError(409, f"rule change {pid} was already reviewed")
+                if status == "approved":
+                    if self.rule_text(project, p["ref"]) != p["before_text"]:
+                        raise ApiError(409, f"{p['ref']} changed after this proposal. Propose the change again.")
+                    cap = env_int("SWARM_RULES_CAP", 25)
+                    if p["before_text"] is None and len(self.standing_rules(project)) >= cap:
+                        raise ApiError(409, f"the rules doc for {project} is full ({cap} rules). Merge or remove a rule first, "
+                                            "so the doc stays short enough to read before every draft.")
+                rec.update(ref=p["ref"], status=status, before_text=p["before_text"], after_text=p["after_text"], about=pid,
+                           source=p["source"])
+                summary = summary or f"{status.capitalize()}: {p['summary']}"
+        return rec, summary
 
     def post_log(self, who, b):
         if who["role"] == "task":
@@ -1443,7 +1724,13 @@ class Backend:
             allowed = self.log_projects(who)
             if allowed is not None and project.lower() not in (p.lower() for p in allowed):
                 raise ApiError(403, f"this bot is not bound to project {project}. Bind it: swarmctl project set {project} --bot BOT_ID")
-            bot = who["bot"] or clean_text(b.get("bot"), 80, "bot") or who["role"]
+            named = clean_text(b.get("bot"), 80, "bot")
+            if who["bot"]:
+                bot = who["bot"]
+            elif named and not self.bot(named):
+                raise ApiError(400, f"unknown bot {named}. Register it first: swarmctl bot set {named} --role project")
+            else:
+                bot = named or who["role"]
             task_id = clean_text(b.get("task_id"), 80, "task_id")
             if task_id and who["role"] == "bot":
                 self.check_item_task(who, who["bot"], task_id)  # a bot may only link its own tasks
@@ -1451,26 +1738,46 @@ class Backend:
         if kind not in LOG_KINDS:
             raise ApiError(400, "kind must be one of: " + ", ".join(LOG_KINDS))
         summary = clean_text(b.get("summary"), 500, "summary")
-        if not summary:
-            raise ApiError(400, "summary is required")
         detail = clean_text(b.get("detail"), 20000, "detail")
         links = b.get("links") or []
         if not isinstance(links, list) or len(links) > 20:
             raise ApiError(400, "links must be a list (max 20)")
         key = clean_text(b.get("dedupe_key"), 200, "dedupe_key")
+        by = clean_text(b.get("by"), 80, "by")
+        status = clean_text(b.get("status"), 20, "status")
+        ref = clean_text(b.get("ref"), 80, "ref")
+        extra = {}
         with self.s.tx():
-            eid = self.add_log(project, bot, kind, summary, detail, links, task_id, key)
-            if eid is None:
+            if key:
                 row = self.s.one("SELECT * FROM log_entries WHERE project = ? AND dedupe_key = ?", project, key)
-                return {"entry": self.shape_log(row), "duplicate": True}
-        return {"entry": self.shape_log(self.s.one("SELECT * FROM log_entries WHERE id = ?", eid)), "duplicate": False}
+                if row:
+                    return {"entry": self.shape_log(row), "duplicate": True}
+            nid = self.next_log_id()
+            rec, summary = self.log_record(who, project, kind, b, summary, by, status, ref, nid)
+            if not summary:
+                raise ApiError(400, "summary is required")
+            eid = self.add_log(project, bot, kind, summary, detail, links, task_id, key, **rec)
+            if kind == "feedback":
+                # Every piece of feedback becomes a pending learning. The owner turns the lasting ones into rules.
+                lid = self.add_log(project, bot, "learning", summary, None, (), task_id, None, ref=f"learning-{self.next_log_id()}",
+                                   status="pending", author=by, source=f"feedback {eid}", about=eid)
+                extra["learning"] = self.shape_log(self.s.one("SELECT * FROM log_entries WHERE id = ?", lid))
+            if kind == "rule" and rec["status"] == "approved" and rec.get("source"):
+                lrn = self.latest(project, "learning", rec["source"])
+                if lrn and lrn["status"] != "standing":
+                    self.add_log(project, bot, "learning", lrn["summary"], None, (), None, None, ref=lrn["ref"], status="standing",
+                                 author=by, source=f"rule {rec['ref']}", about=eid)
+        return dict({"entry": self.shape_log(self.s.one("SELECT * FROM log_entries WHERE id = ?", eid)), "duplicate": False}, **extra)
 
     @staticmethod
     def shape_log(r):
         r = dict(r)
         r["links"] = json.loads(r["links"] or "[]")
         r.pop("dedupe_key", None)
-        return r
+        r["by"] = r.pop("author", None)
+        r["before"] = r.pop("before_text", None)
+        r["after"] = r.pop("after_text", None)
+        return {k: v for k, v in r.items() if v is not None or k in ("bot", "detail", "task_id")}
 
     def list_log(self, who, qs):
         where, args = [], []
@@ -1488,6 +1795,9 @@ class Backend:
             if any(k not in LOG_KINDS for k in kinds):
                 raise ApiError(400, "kind must be one of: " + ", ".join(LOG_KINDS))
             where.append("kind IN (" + ",".join("?" for _ in kinds) + ")"); args += kinds
+        for f in ("ref", "status"):
+            if qs.get(f):
+                where.append(f"{f} = ?"); args.append(qs[f])
         for key, op in (("since", ">="), ("until", "<")):
             if qs.get(key):
                 try:
@@ -1502,11 +1812,88 @@ class Backend:
         rows = self.s.q(sql, *args, limit)
         return {"entries": [self.shape_log(r) for r in reversed(rows)]}
 
-    def export_log(self, who, qs):
-        if not qs.get("project"):
+    def log_items(self, who, qs):
+        project = self.need_project(who, qs)
+        items = [self.shape_log(r) for r in self.current_items(project)]
+        if qs.get("status"):
+            items = [i for i in items if i["status"] in qs["status"].split(",")]
+        return {"items": items}
+
+    def log_rules(self, who, qs):
+        project = self.need_project(who, qs)
+        changes = self.s.q("SELECT * FROM log_entries WHERE lower(project) = lower(?) AND kind = 'rule' AND status != 'proposed'"
+                           " ORDER BY id", project)
+        return {"project": project, "cap": env_int("SWARM_RULES_CAP", 25),
+                "rules": [self.shape_log(r) for r in self.standing_rules(project)],
+                "pending": [self.shape_log(r) for r in self.pending_rules(project)],
+                "changelog": [self.shape_log(r) for r in changes]}
+
+    def need_project(self, who, qs):
+        project = qs.get("project")
+        if not project:
             raise ApiError(400, "project is required")
+        self.check_log_project(who, project)
+        return project
+
+    def log_brief(self, who, qs):
+        """What a bot reads before drafting: the standing rules and the last 14 days of feedback."""
+        project = self.need_project(who, qs)
+        r = self.log_rules(who, qs)
+        out = [rules_markdown(r), f"\n## Feedback from the last {DIGEST_DAYS} days\n"]
+        fb = self.s.q("SELECT * FROM log_entries WHERE lower(project) = lower(?) AND kind = 'feedback' AND created_at >= ? ORDER BY id",
+                      project, now() - DIGEST_DAYS * 86400)
+        out += [f"- {day(e['created_at'])} {e['author']}: {e['summary']}" + (f" (on {e['ref']} v{e['version']})" if e["ref"] else "")
+                for e in fb] or ["None."]
+        changes = [i for i in self.current_items(project) if i["status"] == "changes"]
+        if changes:
+            out.append("\n## Items waiting for your changes\n")
+            out += [f"- {i['ref']} v{i['version']}: {i['summary']}" for i in changes]
+        return "\n".join(out).rstrip() + "\n"
+
+    def export_log(self, who, qs):
+        project = self.need_project(who, qs)
         entries = self.list_log(who, dict(qs, limit=qs.get("limit") or "1000"))["entries"]
-        return log_markdown(qs["project"], entries, int(qs["since"]) if qs.get("since") else None)
+        since = int(qs["since"]) if qs.get("since") else None
+        head = [f"# Project log: {project}\n", f"Exported {day(now())} (UTC)."]
+        items = self.current_items(project)
+        if items:
+            head.append("\n## Items\n")
+            head += [f"- {i['ref']} v{i['version']} **{i['status']}**: {i['summary']}" +
+                     (f" (throwaway, expires {day(i['expires_at'])})" if i["expires_at"] else "") for i in items]
+        rules = self.log_rules({"role": "admin", "bot": None}, {"project": project})
+        head.append(f"\n## Rules\n\n{len(rules['rules'])} standing rules (cap {rules['cap']}), "
+                    f"{len(rules['pending'])} rule change(s) waiting for review. Full rules doc: swarmctl log rules {project}")
+        for p in rules["pending"]:
+            head.append(f"- waiting for review: change {p['id']}: {p['summary']}")
+        w = self.list_items(who, {"status": "due", "project": project})
+        c = w["counts"]
+        head.append(f"\n## Waiting on you\n\n{c['open']} open, {c['snoozed']} snoozed, oldest {c['oldest_days']} days.")
+        stale = [i for i in w["items"] if i["age_days"] >= STALE_DAYS]
+        if stale:
+            head.append(f"Open for {STALE_DAYS} days or more. Consider dropping these if they no longer matter:")
+            head += [f"- {i['id']} ({i['age_days']} days): {(i['ask'] or '')[:120]}" for i in stale]
+        return "\n".join(head) + "\n\n" + log_markdown(project, entries, since, title="## Log")
+
+    def weekly_export(self):
+        """Once per ISO week, write every project's last 7 days to SWARM_LOG_EXPORT_DIR. Commits to git where asked."""
+        root = os.environ.get("SWARM_LOG_EXPORT_DIR")
+        if not root:
+            return
+        week = time.strftime("%G-W%V", time.gmtime())
+        last = self.s.one("SELECT value FROM meta WHERE key = 'log_export_week'")
+        if last and last["value"] == week:
+            return
+        admin = {"role": "admin", "bot": None}
+        for p in self.s.q("SELECT name, log_git FROM projects ORDER BY name"):
+            d = os.path.join(os.path.expanduser(root), p["name"])
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f"{week}.md"), "w") as fh:
+                fh.write(self.export_log(admin, {"project": p["name"], "since": str(now() - 7 * 86400)}))
+            with open(os.path.join(d, "rules.md"), "w") as fh:
+                fh.write(rules_markdown(self.log_rules(admin, {"project": p["name"]})))
+            if p["log_git"]:
+                git_commit(d, f"Project log export {week}")
+        self.s.run("INSERT OR REPLACE INTO meta(key, value) VALUES('log_export_week', ?)", week)
 
     # ---------- status ----------
     def status(self, who):
@@ -1544,11 +1931,31 @@ class Backend:
         return out
 
 
-def log_markdown(project, entries, since=None):
+def day(ts):
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def log_line(e):
+    """One entry as a Markdown list line: kind, record state, summary, who."""
+    tag = e["kind"]
+    if e.get("ref"):
+        tag += f" {e['ref']}" + (f" v{e['version']}" if e.get("version") else "")
+    if e.get("status"):
+        tag += f" {e['status']}"
+    line = f"- **{tag}** {e['summary']}"
+    if e.get("by"):
+        line += f" (by {e['by']}" + (f", via {e['bot']})" if e.get("bot") and e["bot"] != e["by"] else ")")
+    elif e.get("bot"):
+        line += f" ({e['bot']})"
+    if e.get("task_id"):
+        line += f" task `{e['task_id']}`"
+    return line
+
+
+def log_markdown(project, entries, since=None, title=None):
     """A readable digest of one project's log, grouped by day, newest day last."""
-    def day(ts):
-        return time.strftime("%Y-%m-%d", time.gmtime(ts))
-    head = f"# Project log: {project}\n\n"
+    sub = "###" if title else "##"
+    head = (title or f"# Project log: {project}") + "\n\n"
     head += (f"Entries since {day(since)} (UTC). " if since else "All entries (UTC). ")
     counts = {}
     for e in entries:
@@ -1558,17 +1965,48 @@ def log_markdown(project, entries, since=None):
     for e in entries:
         d = day(e["created_at"])
         if d != last:
-            out.append(f"\n## {d}\n")
+            out.append(f"\n{sub} {d}\n")
             last = d
-        line = f"- **{e['kind']}** {e['summary']}" + (f" ({e['bot']})" if e.get("bot") else "")
-        if e.get("task_id"):
-            line += f" task `{e['task_id']}`"
-        out.append(line)
+        out.append(log_line(e))
+        if e.get("answer"):
+            out.append(f"  Answer: {e['answer']}" + (f" (source: {e['source']})" if e.get("source") else ""))
+        if e["kind"] == "rule" and (e.get("before") or e.get("after")):
+            out.append(f"  Before: {e.get('before') or '(none)'}")
+            out.append(f"  After: {e.get('after') or '(removed)'}")
         for ln in (e.get("detail") or "").strip().splitlines()[:12]:
             out.append("  " + ln if ln.strip() else "")
         for link in e.get("links") or []:
             out.append(f"  - {link}")
     return "\n".join(out).rstrip() + "\n"
+
+
+def rules_markdown(r):
+    """The short rules doc for one project, with its changelog. r is the shape log_rules returns."""
+    out = [f"# Rules: {r['project']}\n",
+           f"{len(r['rules'])} of at most {r['cap']} rules. Read these before drafting. They change only through an approved rule change.\n"]
+    out += [f"{n}. {x['after']} ({x['ref']}, since {day(x['created_at'])})" for n, x in enumerate(r["rules"], 1)] or ["No rules yet."]
+    if r["pending"]:
+        out.append("\n## Waiting for review\n")
+        out += [f"- change {p['id']} ({p['ref']}): {p.get('before') or '(new rule)'} -> {p.get('after') or '(remove)'}"
+                for p in r["pending"]]
+    if r["changelog"]:
+        out.append("\n## Changelog\n")
+        out += [f"- {day(c['created_at'])} {c['status']} by {c.get('by') or '-'}: {c['ref']}: "
+                f"{c.get('before') or '(new rule)'} -> {c.get('after') or '(removed)'}" for c in r["changelog"]]
+    return "\n".join(out) + "\n"
+
+
+def git_commit(folder, message):
+    """Commit a project's export folder to its own local git repo, so each week shows as a diff."""
+    import subprocess
+    try:
+        if not os.path.isdir(os.path.join(folder, ".git")):
+            subprocess.run(["git", "init", "-q"], cwd=folder, check=True, capture_output=True, timeout=60)
+        subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True, timeout=60)
+        subprocess.run(["git", "-c", "user.name=swarm-backend", "-c", "user.email=swarm-backend@localhost", "commit", "-q",
+                        "-m", message], cwd=folder, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("log export: git commit failed:", repr(e), file=sys.stderr, flush=True)
 
 
 class FailLimiter:
@@ -1657,7 +2095,8 @@ def deliver_once(backend, poster=None):
 
 def background(backend, stop):
     while not stop.wait(5):
-        for job in (backend.reap, lambda: deliver_once(backend), backend.escalate, backend.watchdog, backend.retention):
+        for job in (backend.reap, lambda: deliver_once(backend), backend.escalate, backend.watchdog, backend.retention,
+                    backend.weekly_export):
             try:
                 job()
             except Exception as e:  # keep the loop alive
@@ -1872,6 +2311,23 @@ def r_log_list(api, who, m, qs, body, h):
 @route("GET", r"/log/export", ("admin", "chief", "bot"), "One project's log as a Markdown digest. Bot: its bound projects only")
 def r_log_export(api, who, m, qs, body, h):
     return ("text/markdown; charset=utf-8", api.export_log(who, qs).encode())
+
+
+@route("GET", r"/log/items", ("admin", "chief", "bot"), "Current state of each item (deliverable) in a project. Bot: bound projects only")
+def r_log_items(api, who, m, qs, body, h):
+    return api.log_items(who, qs)
+
+
+@route("GET", r"/log/rules", ("admin", "chief", "bot"), "A project's standing rules, rule changes waiting for review, and the changelog "
+       "(`format=md` for the rules doc)")
+def r_log_rules(api, who, m, qs, body, h):
+    r = api.log_rules(who, qs)
+    return ("text/markdown; charset=utf-8", rules_markdown(r).encode()) if qs.get("format") == "md" else r
+
+
+@route("GET", r"/log/brief", ("admin", "chief", "bot"), "Read before drafting: standing rules plus the last 14 days of feedback, as Markdown")
+def r_log_brief(api, who, m, qs, body, h):
+    return ("text/markdown; charset=utf-8", api.log_brief(who, qs).encode())
 
 
 @route("GET", r"/notices", ("admin", "chief"), "The last 100 deliveries with state and last error")

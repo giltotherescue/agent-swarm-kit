@@ -9,7 +9,7 @@ or reads files inside the agent's folders itself; it exchanges files through two
     HANDOFF/outbox/TASK   written here, read by the runner (report, status, session ids, artifacts, work bundle)
 
 Usage (all paths are passed by the runner; sudo removes the caller's environment):
-  agent-exec --work DIR --handoff DIR prepare TASK WORKNAME [--branch B] [--origin URL]
+  agent-exec --work DIR --handoff DIR prepare TASK WORKNAME [--branch B] [--origin URL] [--drop-checkpoint]
   agent-exec --work DIR --handoff DIR run TASK WORKNAME --timeout SECONDS [--scope] [--require-scope]
              [--memory 75%] [--cpu 200%] [--agent-env FILE] -- COMMAND ARGS...
   agent-exec --work DIR --handoff DIR stop TASK [--grace 20]
@@ -139,7 +139,7 @@ class Paths:
         return os.path.join(d, check_name(task, "task id"))
 
 
-def cmd_prepare(p, task, name, branch, origin):
+def cmd_prepare(p, task, name, branch, origin, drop_checkpoint=False):
     wd, inbox = p.wd(name), p.inbox(task)
     if branch and not BRANCH_RE.match(branch):
         die("bad branch")
@@ -173,7 +173,7 @@ def cmd_prepare(p, task, name, branch, origin):
         os.makedirs(os.path.dirname(exclude), exist_ok=True)
         have = open(exclude).read() if os.path.exists(exclude) else ""
         with open(exclude, "a") as fh:
-            for pat in (".task-context/", "AGENT_STATUS", "REPORT.md", "PR_DESCRIPTION.md", "artifacts/"):
+            for pat in (".task-context/", "AGENT_STATUS", "REPORT.md", "PR_DESCRIPTION.md", "CHECKPOINT.md", "artifacts/"):
                 if pat not in have.split("\n"):
                     fh.write(pat + "\n")
     copy_in(os.path.join(inbox, "brief.md"), os.path.join(ctx, "brief.md"))
@@ -186,7 +186,8 @@ def cmd_prepare(p, task, name, branch, origin):
     if os.path.lexists(msg):
         os.remove(msg)
     os.symlink(os.path.join(inbox, "messages.md"), msg)
-    for stale in ("AGENT_STATUS",):
+    # A chain cycle gets the last checkpoint as an attachment, so an old CHECKPOINT.md in a reused folder is dropped.
+    for stale in ("AGENT_STATUS",) + (("CHECKPOINT.md",) if drop_checkpoint else ()):
         if os.path.lexists(os.path.join(wd, stale)):
             os.remove(os.path.join(wd, stale))
     for f in os.listdir(ctx):
@@ -281,6 +282,7 @@ def cmd_collect(p, task, name):
     make_handoff_dir(out)
     summary = {"files": {}}
     for src, dst in (("REPORT.md", "REPORT.md"), ("AGENT_STATUS", "AGENT_STATUS"), ("PR_DESCRIPTION.md", "PR_DESCRIPTION.md"),
+                     ("CHECKPOINT.md", "CHECKPOINT.md"),
                      (".task-context/session-claude", "session-claude"), (".task-context/session-codex", "session-codex"),
                      (".task-context/session", "session")):
         path = os.path.join(wd, src)
@@ -407,14 +409,14 @@ def main(argv):
         rest, command = rest[:i], rest[i + 1:]
     it = iter(rest)
     for a in it:
-        if a in ("--scope", "--require-scope"):
+        if a in ("--scope", "--require-scope", "--drop-checkpoint"):
             opts[a] = True
         elif a.startswith("--"):
             opts[a] = next(it, None)
         else:
             positional.append(a)
     if cmd == "prepare" and len(positional) == 2:
-        cmd_prepare(p, positional[0], positional[1], opts.get("--branch"), opts.get("--origin"))
+        cmd_prepare(p, positional[0], positional[1], opts.get("--branch"), opts.get("--origin"), opts.get("--drop-checkpoint", False))
     elif cmd == "run" and len(positional) == 2 and command:
         return cmd_run(p, positional[0], positional[1], int(opts.get("--timeout") or 14400), opts.get("--scope", False),
                        opts.get("--require-scope", False), opts.get("--memory") or "75%", opts.get("--cpu") or "200%",

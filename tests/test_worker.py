@@ -30,6 +30,23 @@ else
 fi
 """
 
+CHAIN_AGENT = r"""#!/usr/bin/env bash
+# fake run-agent for chain cycles: checks the time limit, the fresh session and the handed-on checkpoint
+cd "$3"
+mkdir -p artifacts .task-context
+echo "timeout=$SWARM_TASK_TIMEOUT session=${5:-none}" >> CALLS
+note="first cycle"
+if grep -q "cycle 1 of at most 2" "$4"; then
+  echo "found bug A" > CHECKPOINT.md
+elif grep -q "cycle 2 of at most 2" "$4"; then
+  [[ ! -e CHECKPOINT.md ]] || { echo "stale checkpoint left in the folder"; exit 3; }
+  grep -q "found bug A" .task-context/attachments/checkpoint.md && note="checkpoint ok"
+fi
+echo "sess-chain" > .task-context/session
+printf '## Summary\nStatus: done\n\n%s\n' "$note" > REPORT.md
+echo done > AGENT_STATUS
+"""
+
 
 class WorkerTest(unittest.TestCase):
     @classmethod
@@ -98,6 +115,24 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(t["state"], "done", t)
         self.assertIn("Painted it Use green", self.admin("GET", f"/tasks/{tid}/report"))
         self.assertEqual(t["artifacts"], ["chart.txt"])
+
+    def test_chain_cycles_hand_on_a_checkpoint_with_a_fresh_session(self):
+        chain_agent = os.path.join(self.tmp, "chain-agent")
+        with open(chain_agent, "w") as fh:
+            fh.write(CHAIN_AGENT)
+        os.chmod(chain_agent, 0o755)
+        self.w.RUN_AGENT = chain_agent
+        root = self.admin("POST", "/tasks", {"prompt": "Polish the app", "chain": True, "max_cycles": 2,
+                                             "timeout_minutes": 90})["task"]["id"]
+        t1 = self.run_one()
+        self.assertEqual((t1["id"], t1["state"]), (root, "done"), t1)
+        self.assertEqual(self.admin("GET", f"/tasks/{root}/artifacts/checkpoint.md").strip(), "found bug A")
+        t2 = self.run_one()
+        self.assertEqual((t2["state"], t2["cycle"], t2["parent_id"]), ("done", 2, root), t2)
+        calls = open(os.path.join(self.w.WORK, root, "CALLS")).read().splitlines()
+        self.assertEqual(calls, ["timeout=5400 session=none", "timeout=5400 session=none"])
+        self.assertIn("checkpoint ok", self.admin("GET", f"/tasks/{t2['id']}/report"))
+        self.assertIsNone(self.w.api("POST", "/worker/claim", {"worker": "test"})["task"])  # cycle 2 was the last
 
     def test_script_task(self):
         tid = self.admin("POST", "/tasks", {"prompt": "run checks", "command": "echo hello-from-script; exit 3"})["task"]["id"]

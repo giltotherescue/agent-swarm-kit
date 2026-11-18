@@ -85,6 +85,9 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/log` | yes | yes | yes | no | yes | Add a project log entry. Bot: projects it is bound to. Task token: its own task's project |
 | GET | `/log` | yes | yes | yes | no | no | Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only |
 | GET | `/log/export` | yes | yes | yes | no | no | One project's log as a Markdown digest. Bot: its bound projects only |
+| GET | `/log/items` | yes | yes | yes | no | no | Current state of each item (deliverable) in a project. Bot: bound projects only |
+| GET | `/log/rules` | yes | yes | yes | no | no | A project's standing rules, rule changes waiting for review, and the changelog (`format=md` for the rules doc) |
+| GET | `/log/brief` | yes | yes | yes | no | no | Read before drafting: standing rules plus the last 14 days of feedback, as Markdown |
 | GET | `/notices` | yes | yes | no | no | no | The last 100 deliveries with state and last error |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).
