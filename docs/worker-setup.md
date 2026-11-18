@@ -18,7 +18,7 @@ It is not built for several people who do not trust each other sharing one worke
 
 ## 1. Pick a provider and a size
 
-Any provider that gives you an Ubuntu LTS (Long Term Support) virtual machine works. A few that people use:
+Any provider that gives you an Ubuntu LTS (Long Term Support) virtual machine works. A spare computer at home with Ubuntu 24.04 also works (macOS is not supported); the README compares the two in [Where to run the worker](../README.md#where-to-run-the-worker), with prices. A few cloud providers that people use:
 
 - Hetzner (good price for the power)
 - DigitalOcean

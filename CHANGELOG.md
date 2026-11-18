@@ -37,6 +37,11 @@ Changed:
 - docs/project-log.md says the first weekly export on a new install comes the following week, and how to
   export right away.
 - Backend, worker, `agent-exec` and `swarmctl` report version 0.3.1.
+- README has a new "What you need" section near the top, linked from a new contents line: a table of
+  every tool and service the kit uses (Essential or Nice to have, and why), and "Where to run the
+  worker" comparing cloud servers (with prices checked 2026-11-18, plus boat, and Google Cloud and AWS EC2
+  as advanced options) and a computer at home. It says
+  plainly that macOS is not supported. docs/worker-setup.md points to it.
 
 ## 0.3.0 (2026-11-18)
 

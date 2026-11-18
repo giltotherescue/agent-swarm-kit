@@ -9,6 +9,19 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 > It follows [SETUP-WITH-GROKBOT.md](SETUP-WITH-GROKBOT.md) and walks you through every step, one
 > plain question at a time.
 
+**Contents:** [How it works](#how-it-works-in-four-pictures) ·
+[**What you need**](#what-you-need) ·
+[Where to run the worker](#where-to-run-the-worker) ·
+[Set it up with your Grok Bot](#set-it-up-with-your-grok-bot-recommended) ·
+[What you get](#what-you-get) ·
+[Which tool when](#which-tool-when-short-version) ·
+[Set it up by hand](#set-it-up-by-hand) ·
+[Trust model](#trust-model) ·
+[What is in the box](#what-is-in-the-box) ·
+[Docs](#docs) ·
+[The rules](#the-rules-in-one-breath) ·
+[Version](#version)
+
 ## How it works, in four pictures
 
 ![You talk to your Grok Bots. They hand big jobs to the worker and get the results back.](docs/images/who-does-what.png)
@@ -37,6 +50,70 @@ project bot checks its goals daily and stays quiet unless a goal is at risk.
 subscription, and for some of your private tools like Search Console and Google Ads. The worker for all
 coding and anything long. Executor only later, if the worker needs your connected tools too. Short
 version below; the full guide is [docs/which-tool-when.md](docs/which-tool-when.md).
+
+## What you need
+
+New to all of this? This is every tool and service the kit uses, in plain words. You can start with
+just a Grok Bot and add the rest later.
+
+**Key:** ✅ Essential · 🖥️ Essential once you add a worker · ➕ Nice to have
+
+| Tool | What it is | Why the kit uses it | Need it? |
+| --- | --- | --- | --- |
+| [Grok Bot](https://docs.x.ai/grok-bot/overview) | xAI's always-on AI helpers that you chat with | Your Chief of Staff and project bots live here | ✅ Essential |
+| A worker computer | A computer that stays on all day (see [where to run it](#where-to-run-the-worker)) | Runs the long, heavy jobs and all coding | ➕ Nice to have (skip it at first) |
+| [Ubuntu 24.04](https://ubuntu.com/download/server) | A free operating system for servers | The setup script only runs on Ubuntu (22.04 or 24.04) | 🖥️ Essential |
+| [Claude subscription](https://claude.com/pricing) and [Claude Code](https://claude.com/product/claude-code) | Anthropic's AI, and its tool that writes code | The worker's main AI for coding and research | 🖥️ Essential |
+| [ChatGPT subscription](https://chatgpt.com/pricing) and [Codex](https://chatgpt.com/codex) | OpenAI's AI, and its tool that writes code | Backup when Claude hits its limit, and second opinions | ➕ Nice to have |
+| Codex image generation | Picture making built into Codex | Ad graphics and mockups on your ChatGPT plan, no image API key ([how](docs/model-routing.md#images)) | ➕ Nice to have |
+| [Tailscale](https://tailscale.com) | A private network for your own devices | You and your bots reach the worker without opening it to the internet | 🖥️ Essential |
+| [GitHub](https://github.com) | Where code lives online | The worker saves code changes there as draft pull requests for you to review | 🖥️ Essential if you have code |
+| [treg](https://treg.to) | Pay per call access to paid data | SEO and contact data without a monthly plan; also reaches your Google Search Console and Google Ads | ➕ Nice to have |
+| [Executor](https://executor.sh) | Keeps logins for your own tools in one place (cloud or self-hosted) | Lets a worker job use your connected tools too | ➕ Nice to have (most people skip it) |
+| An email inbox per bot | A separate email address for one bot | Sign-ups and codes stay out of your own inbox | ➕ Nice to have |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | A helper that spreads AI requests over several subscriptions | For heavy users who hit one plan's limits ([read the cautions first](docs/optional-services.md#cliproxyapi-advanced)) | ➕ Nice to have (advanced) |
+| [Vercel](https://vercel.com) (or a similar web host) | A service that hosts websites | Puts your website online. It hosts websites, not the worker | ➕ Nice to have (only for websites) |
+
+More on each one: [optional services](docs/optional-services.md) and [which tool when](docs/which-tool-when.md).
+
+### Where to run the worker
+
+The worker can be a rented cloud server or a computer in your home. Both work the same once set up.
+
+| | ☁️ Cloud server | 🏠 Computer at home |
+| --- | --- | --- |
+| **Always on** | Yes, built for it | Yes, if you turn off sleep (and, on a laptop, sleep when the lid closes) |
+| **Power and internet cuts** | Not your problem | A cut stops the worker. Set it to turn back on after a power cut (a BIOS setting) |
+| **Power bill** | Included in the price | Small for a mini PC, a bit more for an old laptop |
+| **Reaching it from anywhere** | Tailscale | Tailscale, so there is nothing to set up on your router |
+| **Setup** | Click to create, about an hour | Install Ubuntu first, then the same steps |
+| **Cost** | Monthly fee (below) | Free if you already own it, or a one-time purchase |
+| **Best for** | Most people | You have a spare computer, or want no monthly bill |
+
+**Operating system:** the kit is tested on Ubuntu 24.04. **macOS is not supported today**: the setup
+script stops on anything other than Ubuntu. So for a home worker, put Ubuntu 24.04 on an old laptop or
+a mini PC. A Mac mini can't run the kit directly (running Ubuntu in a virtual machine on it is untested).
+
+**Cloud servers.** Any provider with Ubuntu works. Start with 4 CPUs and 8 GB of memory
+([sizing](docs/sizing-and-sandboxes.md)). Prices are from each provider's own pricing page, checked on
+2026-11-18; they change, so check before you buy.
+
+| Provider | A plan that fits | Price per month |
+| --- | --- | --- |
+| [DigitalOcean](https://www.digitalocean.com/pricing/droplets) | Basic Droplet, 4 CPUs, 8 GB, 160 GB disk | $48 |
+| [Hetzner](https://www.hetzner.com/cloud/regular-performance) | CPX32 (Europe) or CPX31 (USA), 4 CPUs, 8 GB, 160 GB disk | €30.49 to €35.99 in Europe, €62.99 in the USA, plus VAT |
+| [Akamai (Linode)](https://www.akamai.com/cloud/pricing/cpu) | Linode 8 GB shared, 4 CPUs, 160 GB disk | $48 |
+| [AWS Lightsail](https://aws.amazon.com/lightsail/pricing/) | 8 GB with 2 CPUs (160 GB disk), or 8 GB with 4 CPUs (320 GB disk) | $44, or $84 for 4 CPUs |
+| [boat](https://boat.dev) | Ubuntu VMs made for AI agents; "default" size, 4 CPUs, 8 GB, 51 GB disk. Turn off auto-stop (paid plan only). Europe only. Not tested with the kit yet | $0.036 an hour, so about $26 if never stopped ($20 minimum) |
+| ⚙️ Advanced: [Google Cloud Compute Engine](https://cloud.google.com/products/compute) or [AWS EC2](https://aws.amazon.com/ec2/) | Powerful, but harder to set up and their bills have many parts. Try a simpler host above first | Depends on many options ([Google](https://cloud.google.com/compute/vm-instance-pricing), [AWS](https://aws.amazon.com/ec2/pricing/)) |
+
+**A computer at home.** Any of these works once Ubuntu 24.04 is on it:
+
+| Computer | Good | Watch out for |
+| --- | --- | --- |
+| An old laptop you no longer use | Free, and its battery rides out short power cuts | Turn off sleep on lid close; older ones can be slow or loud |
+| A new mini PC, like a [Beelink](https://www.bee-link.com) or an Intel NUC | Small, quiet, low power | Pick one with at least 8 GB of memory and 256 GB of disk |
+| A [Mac mini](https://www.apple.com/mac-mini/) | Small, quiet, low power | macOS is not supported (see above); not a good pick today |
 
 ## Set it up with your Grok Bot (recommended)
 
@@ -103,7 +180,8 @@ the swarm is called `swarmctl`. A token is a long random password that a bot or 
 it is. Tailscale is a private network that links your own devices, so nothing has to be open to the
 whole internet.
 
-1. Rent an Ubuntu LTS server (4 vCPU, 8 GB to start). See [docs/worker-setup.md](docs/worker-setup.md).
+1. Rent an Ubuntu LTS server (4 vCPU, 8 GB to start), or put Ubuntu 24.04 on a spare computer at home
+   ([where to run the worker](#where-to-run-the-worker)). See [docs/worker-setup.md](docs/worker-setup.md).
 2. Get the kit onto the server. If you have no copy there, download a release file, or pack your own
    copy with `git archive` and send it with `scp` (secure copy). For a private repo, use a read-only key,
    never your own GitHub login. All three ways are in
