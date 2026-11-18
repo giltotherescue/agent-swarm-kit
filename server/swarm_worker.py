@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
@@ -151,6 +151,23 @@ def healthy():
     except OSError:
         return True
     return load < float(os.environ.get("SWARM_MAX_LOAD_PER_CPU", "1.5")) and free_mb > int(os.environ.get("SWARM_MIN_FREE_MEM_MB", "1500"))
+
+
+def make_handoff_dir(path):
+    """Make a task folder inside a shared handoff folder (inbox or outbox) and check its group.
+
+    The handoff folders are setgid (mode 2750) so that new entries get the other user's group. Never chmod a
+    folder made here: on Linux, chmod by a user who is not in the folder's group clears the setgid bit, and
+    then every file below it gets the wrong group and the other side cannot read it (fixed in 0.2.1).
+    The worker's umask (0027) already gives mode 750, and the setgid bit and group come from the parent.
+    """
+    os.makedirs(path, mode=0o750)
+    parent = os.stat(os.path.dirname(path))
+    st = os.stat(path)
+    if parent.st_mode & 0o2000 and (st.st_gid != parent.st_gid or not st.st_mode & 0o2000):
+        raise RuntimeError(f"{path} did not get the group and setgid bit of its parent folder; "
+                           "check the modes of the handoff folders (setup-worker.sh sets them)")
+    return path
 
 
 def safe_read(dirpath, name, limit=None):
@@ -430,21 +447,26 @@ class Runner(threading.Thread):
                 mark_running(t["id"], False)
                 self.slots.release()
 
-    def execute(self):
+    def fill_inbox(self):
+        """Write the brief, an empty messages file and the attachments into the task's inbox folder."""
         t = self.task
         if os.path.lexists(self.inbox):
             shutil.rmtree(self.inbox, ignore_errors=True)
-        os.makedirs(self.inbox, mode=0o2750)
-        os.chmod(self.inbox, 0o2750)
+        make_handoff_dir(self.inbox)
         self.write_inbox("brief.md", t["prompt"])
         self.write_inbox("messages.md", "")
-        os.makedirs(os.path.join(self.inbox, "attachments"), mode=0o2750, exist_ok=True)
+        make_handoff_dir(os.path.join(self.inbox, "attachments"))
         for name in t.get("attachments") or []:
             data = self.tapi("GET", f"/attachments/{urllib.parse.quote(name)}")
             self.write_inbox(os.path.join("attachments", os.path.basename(name)), data)
         parent = t.get("parent") or {}
         if parent.get("report"):
             self.write_inbox(os.path.join("attachments", "previous-REPORT.md"), parent["report"])
+
+    def execute(self):
+        t = self.task
+        self.fill_inbox()
+        parent = t.get("parent") or {}
 
         # Which folder and which session?
         provider, model, session = t["provider"], t["model"], None

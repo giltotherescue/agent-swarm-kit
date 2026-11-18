@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
 MAX_ARTIFACT = 25 * 1024 * 1024
@@ -93,6 +93,21 @@ def copy_in(src, dst):
         with open(dst, "wb") as fout:
             shutil.copyfileobj(fin, fout)
     return True
+
+
+def make_handoff_dir(path):
+    """Make a folder inside the outbox and check it kept the group and setgid bit of its parent.
+
+    Never chmod a folder made here: chmod by a user who is not in the folder's group (the agent is not in the
+    runner's group) clears the setgid bit, and then the runner cannot read what the agent wrote (fixed in 0.2.1).
+    The umask set in main() (0027) already gives mode 750.
+    """
+    os.makedirs(path, mode=0o750)
+    parent = os.stat(os.path.dirname(path))
+    st = os.stat(path)
+    if parent.st_mode & 0o2000 and (st.st_gid != parent.st_gid or not st.st_mode & 0o2000):
+        die(f"{path} did not get the group and setgid bit of its parent folder; check the outbox modes", 3)
+    return path
 
 
 def git(wd, *args, check=True):
@@ -261,8 +276,7 @@ def cmd_collect(p, task, name):
             os.remove(out)
         else:
             shutil.rmtree(out)
-    os.makedirs(out, mode=0o2750)
-    os.chmod(out, 0o2750)
+    make_handoff_dir(out)
     summary = {"files": {}}
     for src, dst in (("REPORT.md", "REPORT.md"), ("AGENT_STATUS", "AGENT_STATUS"), ("PR_DESCRIPTION.md", "PR_DESCRIPTION.md"),
                      (".task-context/session-claude", "session-claude"), (".task-context/session-codex", "session-codex"),
@@ -273,7 +287,7 @@ def cmd_collect(p, task, name):
                 summary["files"][dst] = int(os.lstat(path).st_mtime)
     # Artifacts: regular files only, unique flat names, every omission listed.
     art, adir = os.path.join(wd, "artifacts"), os.path.join(out, "artifacts")
-    os.makedirs(adir, mode=0o2750)
+    make_handoff_dir(adir)
     manifest, omitted, used = [], [], set()
     if os.path.isdir(art) and not os.path.islink(art):
         for root, dirs, files in os.walk(art, followlinks=False):
@@ -322,9 +336,8 @@ def cmd_collect(p, task, name):
                           check=False).returncode == 0
         summary["git"] = {"head": head or None, "branch": branch or None, "unpushed": unpushed, "bundled": bundled,
                           "uncommitted": len(dirty)}
+    # Files only. Folders keep the mode they were made with (see make_handoff_dir).
     for root, dirs, files in os.walk(out):
-        for d in dirs:
-            os.chmod(os.path.join(root, d), 0o2750)
         for f in files:
             os.chmod(os.path.join(root, f), 0o640)
     with open(os.path.join(out, "summary.json"), "w") as fh:

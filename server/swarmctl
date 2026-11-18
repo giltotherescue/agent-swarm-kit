@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DRAIN_FILE = os.environ.get("SWARM_DRAIN_FILE", "/var/lib/swarm-runner/drain")
 STATE_FILE = os.environ.get("SWARM_STATE_FILE", "/var/lib/swarm-runner/runner-state.json")

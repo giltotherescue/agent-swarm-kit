@@ -2,7 +2,8 @@
 # smoke-test: after setup-worker.sh, check that the worker is set up the way the docs say, then run one
 # script task (no model, no tokens spent) from queued to done.
 # Usage: sudo bash scripts/smoke-test.sh [--no-task]
-# Prints PASS, WARN or FAIL per check. Exit 1 if anything failed. It never prints a token.
+# Prints PASS, WARN, FAIL or NOTE per check. Exit 1 if anything failed. It never prints a token.
+# On a new box expect 0 failed and 2 warnings (GitHub login and Tailscale) until you do those steps.
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 RUN_TASK=1; [[ "${1:-}" == "--no-task" ]] && RUN_TASK=0
@@ -17,6 +18,10 @@ expect_mode() {  # expect_mode FILE "640 root:swarm"
   local got; got=$(mode_owner "$1")
   if [[ "$got" == "$2" ]]; then pass "$1 is $2"; else fail "$1 is '${got:-missing}', expected $2"; fi
 }
+# Run shell code as the agent user in a login shell (PATH includes ~/.local/bin). Not "sudo -i", which escapes
+# the command line and breaks any $ in it.
+as_agent() { (cd "/home/$AGENT" && sudo -u "$AGENT" -H bash -lc "$1"); }
+note() { printf 'NOTE  %s\n' "$*"; }
 agent_cannot_read() {
   if sudo -u "$AGENT" test -r "$1" 2>/dev/null; then fail "agent can read $1"; else pass "agent cannot read $1"; fi
 }
@@ -65,13 +70,14 @@ if [[ -z "$bind" || "$bind" == 127.0.0.1:* ]]; then pass "backend listens on loc
 
 echo "== Logins (checked, never printed)"
 if sudo -u "$RUNNER" -H gh auth status >/dev/null 2>&1; then pass "swarm-runner is logged in to GitHub"; else warn "swarm-runner is not logged in to GitHub (repo tasks cannot clone or push): sudo -u $RUNNER -H gh auth login"; fi
-if sudo -iu "$AGENT" bash -c 'gh auth status' >/dev/null 2>&1; then fail "agent is logged in to GitHub; agents must not hold it: sudo -iu $AGENT gh auth logout"; else pass "agent holds no GitHub login"; fi
+if as_agent 'gh auth status' >/dev/null 2>&1; then fail "agent is logged in to GitHub; agents must not hold it: sudo -iu $AGENT gh auth logout"; else pass "agent holds no GitHub login"; fi
 for c in claude codex; do
-  if sudo -iu "$AGENT" bash -c "command -v $c" >/dev/null 2>&1; then pass "$c is installed for agent"; else warn "$c is not installed for agent"; fi
+  if as_agent "command -v $c" >/dev/null 2>&1; then pass "$c is installed for agent"; else warn "$c is not installed for agent"; fi
 done
 if command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1; then pass "Tailscale is connected"; else warn "Tailscale is not connected"; fi
 if command -v ufw >/dev/null && ufw status | grep -E '(^| )22(/tcp)? ' | grep -v tailscale0 | grep -q ALLOW; then
-  warn "public SSH is still open; run setup-worker.sh --lockdown once SSH over Tailscale works"
+  # Expected until lockdown, so a note and not a warning.
+  note "public SSH is still open; run setup-worker.sh --lockdown once SSH over Tailscale works"
 fi
 
 if [[ $RUN_TASK -eq 1 ]]; then

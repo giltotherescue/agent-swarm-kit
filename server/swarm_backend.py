@@ -52,7 +52,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -218,6 +218,8 @@ class Store:
                     if name not in have:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
             db.executescript(SCHEMA_INDEXES)
+            # When this database was first opened by a backend that records it (0.2.1 or later).
+            db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('created_at', ?)", (str(now()),))
             if keys is not None:
                 self.move_keys_out(keys)
 
@@ -1398,9 +1400,15 @@ class Backend:
                 out["warnings"].append(f"{failed} deliveries failed for good. See: swarmctl notices")
             bdir = os.environ.get("SWARM_DB_BACKUP_DIR")
             if bdir and os.path.isdir(bdir):
-                newest = max([os.path.getmtime(os.path.join(bdir, f)) for f in os.listdir(bdir) if f.endswith(".db.gz")] or [0])
-                if newest < now() - 36 * 3600:
-                    out["warnings"].append("The newest database backup is older than 36 hours. Check: systemctl status swarm-backup")
+                stamps = [os.path.getmtime(os.path.join(bdir, f)) for f in os.listdir(bdir) if f.endswith(".db.gz")]
+                if stamps:
+                    if max(stamps) < now() - 36 * 3600:
+                        out["warnings"].append("The newest database backup is older than 36 hours. Check: systemctl status swarm-backup")
+                else:
+                    # A new install has no backup until the first nightly run, so give it 36 hours before warning.
+                    created = int((self.s.one("SELECT value FROM meta WHERE key = 'created_at'") or {}).get("value") or 0)
+                    if created < now() - 36 * 3600:
+                        out["warnings"].append("There is no database backup yet. Check: systemctl status swarm-backup")
         else:
             out["notices"] = {}
         return out
