@@ -24,7 +24,11 @@ How it works:
    `.task-context/attachments/checkpoint.md`. The next cycle starts a **fresh model session**, so it reads
    the checkpoint instead of carrying days of conversation.
 3. The chain ends when a cycle leaves no checkpoint (the agent decided the job is finished), when it
-   reaches `--max-cycles` (default 20, at most `SWARM_MAX_CYCLES`), or when a cycle fails.
+   reaches `--max-cycles` (default 20, at most `SWARM_MAX_CYCLES`), or when a cycle fails. There is no
+   unlimited chain: `--max-cycles 0` is refused with an error, so set a real limit and let the agent end
+   the chain early by leaving no checkpoint.
+   **Chains are for model tasks only.** A script task (`--command`) never writes a checkpoint, so
+   `--chain` with `--command` is refused. A script can still use `--timeout-minutes`.
 4. **Each cycle adds one entry to the project log** ("Cycle 3 done: Polisher", with its summary and what
    happens next). Owner notices are sent only when the chain ends or stops, not for every cycle.
 5. Each cycle's checkpoint is also saved on that task as the artifact `checkpoint.md`, so you can read it
@@ -33,7 +37,8 @@ How it works:
 **Cancel stops the whole chain.** `swarmctl cancel ID` with the id of any cycle, even one that already
 finished, cancels every cycle that is still queued, waiting or running, and logs "Chain ... cancelled".
 A running cycle stops within about 30 seconds and publishes nothing, and since its finish is refused it
-cannot queue another cycle.
+cannot queue another cycle. Its handoff folder is removed right away too, since the backend will never take
+those results; the work itself stays in the agent's folder until the daily cleanup.
 
 **Restarting after a failure.** Fetch the last good checkpoint and start a new chain with it. Add
 `--branch` with the old chain's branch to keep working on the same branch and pull request:

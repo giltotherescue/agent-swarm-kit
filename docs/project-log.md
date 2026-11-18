@@ -42,8 +42,9 @@ An item's status is one of `draft`, `needs-review`, `approved`, `changes` (chang
 - **A new version voids older verdicts.** When a bot re-drafts an item after a verdict (status back to
   `draft` or `needs-review`), the version goes up by one, so the re-draft starts clean. A bot can also
   start a new version on purpose with `new_version`.
-- **Throwaway items** (a test banner, a one-off draft) get `expires_days` when created. Once expired they
-  drop out of every view and export, and the daily cleanup deletes their entries.
+- **Throwaway items** (a test banner, a one-off draft) get `expires_days` when created. As soon as they
+  expire they drop out of every view (`log list`, `log items`, the brief and the export), and the daily
+  cleanup then deletes their entries. Feedback about an expired item stays.
 
 `swarmctl log items PROJECT` shows the current state of every item.
 
@@ -102,7 +103,9 @@ by day. `swarmctl log export --dir DIR` writes one log file and one rules file p
 
 **Weekly export.** If `SWARM_LOG_EXPORT_DIR` is set in `/etc/agent-swarm/swarm.env` (the example config
 sets `/var/lib/agent-swarm/log-exports`), the backend writes, once per week, a folder per project with
-`YYYY-Www.md` (the last 7 days) and `rules.md`.
+`YYYY-Www.md` (the last 7 days) and `rules.md`. On a new install the first weekly export is written in
+the following ISO week (the week you install in is marked done when the backend first starts). For an
+export right away, use `swarmctl log export --dir DIR`.
 
 **Optional git export.** For a project where you want to see changes as diffs, turn it on with
 `swarmctl project set PROJECT --log-git`. Its export folder becomes a local git repo and each weekly

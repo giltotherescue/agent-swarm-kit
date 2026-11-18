@@ -105,6 +105,12 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading from 0.3.0 to 0.3.1
+
+0.3.1 is a fix release. Re-run the setup script as in "Pulling an update". Nothing else to do: no new
+settings and no database change. If a routine or script used `--max-cycles 0`, give it a real number (it
+used to mean 20); and if one used `--chain` with `--command`, drop `--chain` (it never chained).
+
 ## Upgrading from 0.2.1 to 0.3.0
 
 0.3.0 adds the project log, the goals meeting and work heartbeat, and new docs. Re-run the setup script

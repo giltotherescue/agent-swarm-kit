@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # setup-worker.sh: turn a fresh Ubuntu LTS server (22.04 or 24.04) into a swarm worker, or upgrade one.
 #
-# Tested on: 0.2.1 passed a clean install on a fresh Ubuntu 24.04 server on 2026-11-18 (setup, smoke test,
-# admin user, firewall and SSH hardening, lockdown refusal checks, task and cleanup flow). Not yet tested on
-# a real server: joining Tailscale (real lockdown, Serve, Tailscale SSH), Claude and Codex login, a model
-# task, GitHub login and repo pushes, bot notify delivery. 0.2.0 had bugs that 0.2.1 fixed. 0.3.0 (project
-# log, docs) passes the automated tests but has not had its own fresh-server run yet. Read
-# docs/worker-setup.md, run it on a server you can rebuild, and run scripts/smoke-test.sh afterwards.
+# Tested on: 0.3.0 passed a clean install on a fresh Ubuntu 24.04 server on 2026-11-18 (setup, smoke test,
+# admin user, firewall and SSH hardening, lockdown refusal checks, upgrade by re-running this script, the
+# project log, timeouts and chains with a stand-in for the model, task and cleanup flow). 0.3.1 fixes the
+# small defects that run found. Not yet tested on a real server: joining Tailscale (real lockdown, Serve,
+# Tailscale SSH), real Claude and Codex logins and model tasks, GitHub login and repo pushes, bot notify
+# delivery. Read docs/worker-setup.md, run it on a server you can rebuild, and run scripts/smoke-test.sh.
 #
 # Run as root from a copy of this repo:
 #   sudo bash scripts/setup-worker.sh --admin-user NAME   # install or upgrade; see "Tailscale" below

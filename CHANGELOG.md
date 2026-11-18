@@ -4,6 +4,40 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.3.1 (2026-11-18)
+
+Fix release from the fresh-server install test of 0.3.0. **0.3.0 passed a clean install on a fresh
+Ubuntu 24.04 server on 2026-11-18**: setup, smoke test, admin user, firewall and SSH hardening, lockdown
+refusal checks, an upgrade by running setup again, the project log, time limits and chains (with a
+stand-in for the model), and the task and cleanup flow. That run found five small defects, none blocking.
+0.3.1 fixes them. Still not tested on a real server: joining Tailscale (real lockdown, Serve, Tailscale
+SSH), real Claude and Codex logins and model tasks, GitHub login and repo pushes, and bot notify delivery.
+Upgrade steps: docs/updating-the-kit.md ("Upgrading from 0.3.0 to 0.3.1").
+
+Fixed:
+- `--max-cycles 0` was quietly turned into 20 (both `swarmctl` and the backend treated 0 as "not given").
+  It is now refused with a clear error: a chain always has a real limit, and the agent ends it early by
+  leaving no checkpoint.
+- Expired throwaway log items still showed in `swarmctl log list` and the Markdown export until the daily
+  cleanup. They now disappear from every view the moment they expire.
+- `--chain` with `--command` was accepted but could never chain, since a script writes no checkpoint. It
+  is now refused with a clear error.
+- A task cancelled while running left its handoff folder (outbox) for 7 days. The runner now removes it
+  at once whenever the backend has ended the claim, since those results can never be saved.
+- Three setup tests failed when run by a normal user other than `agent`. They now pass for any user.
+- The root-only setup test (`tests/setup_root_check.sh`, used in Docker or with
+  `SWARM_TEST_DESTRUCTIVE_OK=1`) now puts everything back when it ends, pass or fail: the stand-ins for
+  ufw, sshd, systemctl, tailscale and apt-get, root's SSH keys, sshd_config and its test user. On a box
+  that already has a usable admin it changes nothing and the test is skipped with the reason, instead of
+  failing.
+
+Changed:
+- Docs and the setup script header now say 0.3.0 passed a fresh-server install, and list what is still
+  untested.
+- docs/project-log.md says the first weekly export on a new install comes the following week, and how to
+  export right away.
+- Backend, worker, `agent-exec` and `swarmctl` report version 0.3.1.
+
 ## 0.3.0 (2026-11-18)
 
 Easier to start and easier to keep going. The README is friendlier, your Grok Bot can now set the whole
