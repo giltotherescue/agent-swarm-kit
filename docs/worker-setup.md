@@ -2,7 +2,7 @@
 
 This doc takes you from "I have no server" to "a worker is running tasks safely". The worker is an always-on Linux server that runs Claude Code and Codex on your behalf. It also runs the task backend by default. Any cloud provider works. You need about an hour, most of it waiting for installs.
 
-**Tested on: not yet.** The setup script has been checked with shellcheck (a script checker) and its parts were tested one by one, but it has not been run end to end on a fresh server. Run it first on a server you can throw away and rebuild, and run the smoke test (step 8) afterwards.
+**Tested on:** version 0.2.0 was run on a fresh Ubuntu 24.04 server (DigitalOcean, 4 vCPU, 8 GB) on 2026-11-18. That test found real bugs: Claude Code did not install, every task failed before it started, and the lockdown step could lock a root-only server out. Version 0.2.1 fixes them, and most fixes have an automated test. **A clean retest of 0.2.1 on a fresh server is in progress and has not passed yet.** Model logins (Claude, Codex), GitHub login and pushes, and joining Tailscale have not been tested on a real server at all. Run the script first on a server you can throw away and rebuild, and run the smoke test (step 9) afterwards.
 
 If you do not want a server yet, read [grokbot-only.md](grokbot-only.md) first. You can add a worker later.
 
@@ -32,36 +32,74 @@ When you create the server:
 
 - Choose **Ubuntu 24.04 LTS** (22.04 also works).
 - Add your **SSH key** (Secure Shell key) at creation. Do not use a password.
-- If the provider has a cloud firewall, allow SSH (port 22) only from your own IP address for now. You close it fully in step 9.
+- If the provider has a cloud firewall, allow SSH (port 22) only from your own IP address for now. You close it fully in step 10.
 - Turn on the provider's snapshot or backup option if it is cheap. It is a nice safety net.
 
 ## 2. Get the kit onto the server
 
-Log in as root (or the default sudo user) with the SSH key, then:
+Log in as root (or the default sudo user) with the SSH key. You need a copy of the kit on the server. Pick the way that fits:
+
+**A. The repo is public, or you have a release file.** Download it on the server (replace OWNER and the version):
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git
-git clone https://github.com/YOUR-ACCOUNT/agent-swarm-kit.git
+curl -fsSL -o kit.tar.gz https://github.com/OWNER/agent-swarm-kit/archive/refs/tags/v0.2.1.tar.gz
+mkdir agent-swarm-kit && tar -xzf kit.tar.gz -C agent-swarm-kit --strip-components=1
 cd agent-swarm-kit
 ```
 
-If your copy of the repo is private, you need a GitHub account that can read it. See [updating-the-kit.md](updating-the-kit.md).
-
-## 3. Run the setup script
+**B. You have a copy on your laptop** (for example a friend gave you access, or you cloned it there). Pack it on your laptop and copy it over with scp (secure copy, part of SSH). This needs no GitHub login on the server:
 
 ```bash
-sudo bash scripts/setup-worker.sh --tags tag:swarm-worker
+# on your laptop, inside your copy of the repo
+git archive --format=tar.gz -o agent-swarm-kit.tar.gz HEAD
+scp agent-swarm-kit.tar.gz root@YOUR-SERVER-IP:
+# then on the server
+mkdir agent-swarm-kit && tar -xzf agent-swarm-kit.tar.gz -C agent-swarm-kit
+cd agent-swarm-kit
 ```
 
-`--tags` only works once your Tailscale access rules list `tag:swarm-worker` (see [Tailscale access rules](#tailscale-access-rules) below). Leave it off on the very first run if you have not set them up yet.
+**C. The repo is private and you want to pull updates straight on the server.** Do not leave your own GitHub login on the server. Use a credential that can only read this one repo: a **deploy key** (an SSH key added to the repo's settings, with "Allow write access" left off), or a fine-grained token with read-only "Contents" access to this repo only. Then `git clone` with it. [updating-the-kit.md](updating-the-kit.md) has the details.
+
+## 3. Make your admin user (if you only have root)
+
+Many providers (DigitalOcean, Hetzner and others) give you only the `root` account. Later steps turn off root login over SSH, so you first need a normal user with sudo (admin rights) and your SSH key. Skip this if you already log in as a normal user with sudo, for example `ubuntu`.
+
+The setup script can do this for you with `--admin-user NAME` (step 4): it makes the user, adds it to the `sudo` group, copies root's SSH keys to it, and asks you to choose a password for sudo. Or do it yourself as root (replace NAME):
+
+```bash
+adduser NAME                                         # asks for a password; sudo uses it, SSH does not
+usermod -aG sudo NAME
+rsync --archive --chown=NAME:NAME /root/.ssh /home/NAME   # copies root's SSH keys to NAME
+```
+
+Then, from your laptop, check that `ssh NAME@YOUR-SERVER-IP` works and that `sudo -v` there accepts the password. The setup script checks the same things before it turns off root login: the user exists, is not root, has a login shell, is in the `sudo` group, has a password (or a passwordless sudo rule), and has a non-empty `~/.ssh/authorized_keys` that only the user can change.
+
+## 4. Run the setup script
+
+```bash
+sudo bash scripts/setup-worker.sh --admin-user NAME
+```
+
+**The script stops and waits at the Tailscale step.** Tailscale (a private network for your own devices) prints a login link, and the script waits, up to 15 minutes, until you open that link and approve the machine. Choose one:
+
+- Stay at the screen and open the link when it appears. This is the default.
+- `--auth-key FILE`: join with an auth key from the Tailscale admin console, saved in a file. Nothing waits. The key is never printed.
+- `--tailscale later`: install Tailscale but do not join now. Nothing waits. Join any time after with `sudo tailscale up --ssh` (it prints the link), then do the lockdown step.
+- `--no-tailscale`: skip Tailscale fully. The cost: you get no private SSH and no private way for bots to reach the backend, and `--lockdown` refuses to run, so SSH stays open to the whole internet. Only use it if you have another plan for that.
+
+If you started without one of these and do not want to wait, press Ctrl-C and run it again with `--tailscale later`. Running it again is safe.
+
+`--tags tag:swarm-worker` only works once your Tailscale access rules list `tag:swarm-worker` (see [Tailscale access rules](#tailscale-access-rules) below). Leave it off on the very first run if you have not set them up yet.
+
+The screen shows one `==>` line per step. The long output of the package, Node.js, Tailscale and Claude Code installers goes to `/var/log/agent-swarm-setup.log`; look there if a step fails (`sudo tail -n 50 /var/log/agent-swarm-setup.log`). A first run takes about 10 minutes.
 
 The script is safe to run again; a second run is an upgrade. It never prints a token. It ends with exit code 0 when all is done, 1 when it stopped on an error, and 3 when it finished but lists things you still need to do. What it does, in order:
 
 1. Checks it runs as root on Ubuntu 22.04 or 24.04, and that the `agent` account has no sudo rights.
-2. Installs updates and basic tools, and turns on **automatic security updates**.
+2. Installs updates and basic tools, and turns on **automatic security updates**. If another update is running (common on a brand new server), it waits up to 5 minutes for it.
 3. Caps the system log at 1 GB and adds a **swap file** (4 GB by default) if the box has none.
 4. Installs the **GitHub CLI** (`gh`) and **Node.js LTS**.
-5. Installs **Tailscale** and joins your tailnet (your private Tailscale network) with Tailscale SSH turned on.
+5. Installs **Tailscale** and joins your tailnet (your private Tailscale network) with Tailscale SSH turned on, unless you chose `--tailscale later` or `--no-tailscale`.
 6. Creates three users:
    - `swarm` runs the backend and owns the database in `/var/lib/agent-swarm`.
    - `swarm-runner` runs the runner: it takes tasks from the backend, prepares the code, starts the agent, and pushes the result. It holds the worker token and the GitHub login.
@@ -72,21 +110,32 @@ The script is safe to run again; a second run is an upgrade. It never prints a t
 10. Installs Claude Code and Codex CLI for the `agent` user.
 11. Installs the helpers: `agent-exec` (the runner's only way to start anything as `agent`, through one sudo rule), `with-secrets` and `swarmctl`.
 12. Installs the systemd services and timers and starts the backend.
+13. Removes old release folders, keeping only the current and the previous one.
+14. Makes the first database backup, if there is none yet.
+15. Hardens SSH and the firewall as far as is safe before Tailscale works (see below).
+
+What is hardened when the script ends:
+
+- **Firewall (ufw) on:** incoming connections are blocked except SSH and Tailscale. SSH is **still open to the whole internet** on purpose, so you cannot lock yourself out before Tailscale works. Step 10 (lockdown) closes it.
+- **Root login and password login over SSH off**, but only if a working admin user was confirmed: either you ran the script through sudo as that user, or you answered "yes" when it asked you to test `ssh NAME@...` and `sudo -v` in a second window. Otherwise root login stays on, the script says so at the end, and you can finish later with `sudo bash scripts/setup-worker.sh --harden --admin-user NAME`.
 
 Options:
 
 | Option | What it does |
 | --- | --- |
+| `--admin-user NAME` | Your normal login with sudo. Made if it does not exist, with root's SSH keys copied to it. Used to turn off root login safely |
 | `--auth-key FILE` | Join Tailscale with an auth key read from a file, without a browser. The key is never printed. `--tailscale-authkey-file FILE` still works |
+| `--tailscale later` | Install Tailscale but do not join, so nothing waits for a browser. Join later with `sudo tailscale up --ssh` |
 | `--tags TAGS` | Tailscale tags to advertise, for example `tag:swarm-worker` |
-| `--no-tailscale` | Skip Tailscale (not recommended) |
+| `--no-tailscale` | Skip Tailscale (same as `--tailscale off`). Costs you private SSH, and `--lockdown` refuses to run |
 | `--no-claude` / `--no-codex` | Skip installing one of the model CLIs |
 | `--swap-gb N` | Swap size in GB (default 4, `0` to skip) |
 | `--max-wait SECONDS` | On upgrade, how long to wait for running tasks (default 3600) |
 | `--force-os` | Run on an Ubuntu version other than 22.04 or 24.04 |
-| `--lockdown` | Only run the lockdown step (step 9) |
+| `--harden` | Only run the hardening step above (firewall on, root login off once an admin works; public SSH stays open) |
+| `--lockdown` | Only run the lockdown step (step 10) |
 
-## 4. Log in the model CLIs with your own subscriptions
+## 5. Log in the model CLIs with your own subscriptions
 
 The default is plain Claude Code and Codex logged in with your own subscriptions. No API keys.
 
@@ -95,9 +144,11 @@ sudo -iu agent claude              # then type /login and follow the link
 sudo -iu agent codex login --device-auth
 ```
 
+Use `sudo -iu agent` exactly like this. The `-i` starts a login shell for `agent`, which reads its `~/.profile` and puts `~/.local/bin` (where Claude Code and Codex are installed) on the PATH (the list of folders searched for commands). With plain `sudo -u agent claude` you get "command not found".
+
 Heavy users with several subscriptions can add a proxy later. See [optional-services.md](optional-services.md).
 
-## 5. Log in GitHub as the runner (for repo work)
+## 6. Log in GitHub as the runner (for repo work)
 
 Only `swarm-runner` holds a GitHub login. Agents never do.
 
@@ -110,7 +161,7 @@ Use a **fine-grained token** limited to the repos the swarm works on, with "Cont
 
 If you logged in GitHub as `agent` before, log it out: `sudo -iu agent gh auth logout`.
 
-## 6. Start the worker
+## 7. Start the worker
 
 ```bash
 sudo systemctl start swarm-worker
@@ -119,7 +170,9 @@ sudo swarmctl status
 
 `swarmctl` as root uses the admin token through `/root/.config/swarm/client.env`, which the script wrote.
 
-## 7. Let your bots reach the backend
+On a new box, `swarmctl status` shows one warning that is expected: "No Chief of Staff bot with a notify_url". It goes away when you register your Chief of Staff bot ([results-routing.md](results-routing.md)). In 0.2.0 a second warning, "The newest database backup is older than 36 hours", also showed on every new box; 0.2.1 makes a first backup during setup and does not warn in the first 36 hours. If you see a backup warning now, the nightly backup really is not running: `systemctl status swarm-backup`.
+
+## 8. Let your bots reach the backend
 
 Recommended: put Tailscale on each bot's computer, tag it `tag:swarm-bot`, and publish the backend to your tailnet only:
 
@@ -133,24 +186,31 @@ Option 2, only if a bot's computer cannot run Tailscale, is Tailscale Funnel (`s
 
 Then register your bots ([results-routing.md](results-routing.md)).
 
-## 8. Run the smoke test
+## 9. Run the smoke test
 
 ```bash
 sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh
 ```
 
-It checks users, file owners and modes, the sudo rule, services, timers and health, then runs one small script task (`echo ok`, no model, no cost) from queued to done. It prints PASS, WARN or FAIL per line and never prints a token. Use `--no-task` to skip the task.
+It checks users, file owners and modes, the sudo rule, services, timers and health, then runs one small script task (`echo ok`, no model, no cost) from queued to done. It prints PASS, WARN, FAIL or NOTE per line and never prints a token. Use `--no-task` to skip the task.
 
-## 9. Close public SSH (lockdown)
+On a new box, before you log in GitHub and join Tailscale, a good result ends with `0 failed, 2 warnings`. The two warnings are expected:
 
-Do this only after you can log in over Tailscale from your laptop:
+- `WARN  swarm-runner is not logged in to GitHub` (step 6)
+- `WARN  Tailscale is not connected` (until you join Tailscale, for example after `--tailscale later`)
+
+You also see `NOTE  public SSH is still open` until you do step 10. Any `FAIL` line is a real problem.
+
+## 10. Close public SSH (lockdown)
+
+You need your admin user from step 3 first. Do this only after you can log in as that user over Tailscale from your laptop:
 
 ```bash
-ssh YOUR-ADMIN-USER@YOUR-WORKER        # the machine's Tailscale name
+ssh NAME@YOUR-WORKER        # NAME is your admin user; YOUR-WORKER is the machine's Tailscale name
 sudo bash /opt/agent-swarm-kit/current/scripts/setup-worker.sh --lockdown
 ```
 
-The script asks you to confirm first. It then sets the firewall (ufw) so SSH is reachable only over Tailscale, turns off password and root login for SSH, checks the settings really took effect, and reloads SSH. Also remove port 22 from your provider's cloud firewall. If something goes wrong, your provider's web console (serial console) is the way back in.
+The script first checks that a usable admin user exists (the same checks as in step 3). It refuses, and changes nothing, if the only account that can log in is root, and prints the three commands to make one. You can also pass `--admin-user NAME` to have it made. It refuses as well if Tailscale is not installed or not joined. Then it asks you to confirm you can log in as that user over Tailscale. Only then does it set the firewall (ufw) so SSH is reachable only over Tailscale, turn off password and root login for SSH, check the settings really took effect, and reload SSH. Also remove port 22 from your provider's cloud firewall. If something goes wrong, your provider's web console (serial console) is the way back in.
 
 ## Tailscale access rules
 
@@ -182,7 +242,7 @@ Tailscale access rules (the ACL, "access control list", in the Tailscale admin c
 
 Notes:
 
-- Replace `you@example.com` and `YOUR-ADMIN-USER` (a normal user with sudo, not `root`).
+- Replace `you@example.com`, and `YOUR-ADMIN-USER` with the admin user from step 3 (a normal user with sudo, never `root`). The lockdown step prints the sample line with your user filled in.
 - The worker itself needs no rule to reach out: notices to bots go out over the internet.
 - "check" asks you to log in again in the browser now and then before SSH works. Use "accept" if that gets in the way.
 - Tailscale SSH follows these rules, not the OpenSSH settings on the box. If the `ssh` section lets in `root`, root can log in.

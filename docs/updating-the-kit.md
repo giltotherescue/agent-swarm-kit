@@ -18,7 +18,13 @@ The repo is private. To use it you need either:
 - to be added as a collaborator by the owner, then clone it, or
 - your own private fork (copy) of it, which you keep in step with the original.
 
-Your worker pulls with the GitHub login set up during worker setup, or with a read-only deploy key for the kit repo.
+Do not put your own GitHub login on the worker just to fetch the kit. Use one of these instead:
+
+- Copy it from your laptop: `git archive --format=tar.gz -o agent-swarm-kit.tar.gz HEAD`, then `scp` the file to the server and unpack it (exact steps in [worker-setup.md](worker-setup.md), step 2). Nothing on the server can read your repos.
+- A **deploy key**: an SSH key made on the server (`ssh-keygen -t ed25519`) whose public half you add in the kit repo's settings under "Deploy keys", with "Allow write access" left off. It can read only this one repo.
+- A **fine-grained token** with read-only "Contents" access to the kit repo only, used just for `git clone` and `git pull`.
+
+The `swarm-runner` user's GitHub login (for task repos) is separate; it does not need access to the kit repo.
 
 ## Where your own settings live
 
@@ -37,6 +43,8 @@ Each install goes into its own folder, `/opt/agent-swarm-kit/releases/VERSION-TI
 
 - `/opt/agent-swarm-kit/current` is the version that runs. The services start from it.
 - `/opt/agent-swarm-kit/previous` is the one before, kept for rollback.
+
+Since 0.2.1 the setup script removes all other release folders at the end of each run, so only these two are kept.
 
 Switching versions means moving the `current` link, which happens in one step. If the new backend does not start, the setup script moves `current` back to `previous` by itself.
 
@@ -97,6 +105,17 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading from 0.2.0 to 0.2.1
+
+0.2.1 is a fix release from the first install test on a fresh server. Re-run the setup script as in "Pulling an update". What changes for you:
+
+1. **Tasks work again.** In 0.2.0 every task failed while it was being prepared (the inbox and outbox folders lost their shared group). Nothing to do; the fix is in the code.
+2. **Hardening at install time.** If you pass `--admin-user NAME`, or run the script through sudo as your admin user, the script now turns off root and password login over SSH and turns the firewall on, with public SSH still allowed until you run `--lockdown`. If you only have root, it leaves root login on and says so. See [worker-setup.md](worker-setup.md), step 3.
+3. **Lockdown checks for an admin user first** and refuses if only root can log in.
+4. **Old release folders are removed**; only `current` and `previous` stay.
+5. `swarmctl status` no longer warns about backups on a new install; the setup script makes a first backup.
+6. Long installer output goes to `/var/log/agent-swarm-setup.log`.
+
 ## Upgrading from 0.1.0 to 0.2.0
 
 0.2.0 splits the worker into three users and moves secrets out of the database. The setup script does the moves; this is what changes for you:
@@ -130,6 +149,8 @@ python3 -m unittest discover -s tests
 shellcheck scripts/*.sh server/run-agent
 bash scripts/check-secrets.sh .
 ```
+
+Two tests need two real OS users or root: `test_handoff_users.py` (the inbox and outbox handoff between the runner and the agent) and the root part of `test_setup_script.py` (lockdown and admin user checks). They run in a throwaway Docker container when Docker works, and otherwise skip with a loud message. Set `SWARM_REQUIRE_USER_TESTS=1` to make a skip fail instead.
 
    `check-secrets.sh` looks for tokens, keys and real tailnet names. Put your own names (project names, bot ids, hostnames) one per line in a `.secret-patterns` file to check those too. That file is git-ignored.
 

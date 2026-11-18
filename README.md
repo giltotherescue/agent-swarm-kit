@@ -134,15 +134,26 @@ it is. Tailscale is a private network that links your own devices, so nothing ha
 whole internet.
 
 1. Rent an Ubuntu LTS server (4 vCPU, 8 GB to start). See [docs/worker-setup.md](docs/worker-setup.md).
-2. Copy this repo onto it and run the setup script:
+2. Get the kit onto the server. If you have no copy there, download a release file, or pack your own
+   copy with `git archive` and send it with `scp` (secure copy). For a private repo, use a read-only key,
+   never your own GitHub login. All three ways are in
+   [docs/worker-setup.md](docs/worker-setup.md), step 2.
+3. If the server gave you only `root`, pick a name for your own admin user (a normal login with sudo).
+   The script makes it for you with `--admin-user NAME`. Later steps turn off root login, so you need it.
+4. Run the setup script:
 
    ```bash
-   sudo bash scripts/setup-worker.sh
+   sudo bash scripts/setup-worker.sh --admin-user NAME --tailscale later
    ```
 
-3. Log in to Claude Code and Codex as the `agent` user (the user that runs the AI jobs), and GitHub as
-   the `swarm-runner` user (the user that pushes code; the jobs themselves never get your GitHub login).
-   Then start the worker and run the smoke test (a quick check that everything is in place):
+   **Heads up: without `--tailscale later` the script stops at the Tailscale step and waits** (up to
+   15 minutes) until you open the link it prints and approve the server. That is fine if you are at the
+   screen. With `--tailscale later` nothing waits; you join afterwards with `sudo tailscale up --ssh`.
+   `--no-tailscale` skips Tailscale fully, but then public SSH can never be closed (step 7).
+5. When the script has finished, log in to Claude Code and Codex as the `agent` user (the user that runs
+   the AI jobs), and GitHub as the `swarm-runner` user (the user that pushes code; the jobs themselves
+   never get your GitHub login). Then start the worker and run the smoke test (a quick check that
+   everything is in place):
 
    ```bash
    sudo -iu agent claude            # then /login
@@ -153,16 +164,20 @@ whole internet.
    sudo bash scripts/smoke-test.sh
    ```
 
-4. Let your bots reach the worker. The recommended way: put Tailscale on your bot's computer and use
-   Tailscale Serve on the worker, so it is never on the public internet
-   ([docs/worker-setup.md](docs/worker-setup.md)). Then register each bot's own inbox
+   On a new box, expect `0 failed` with up to 2 warnings (GitHub login, Tailscale) until you do those.
+6. Join Tailscale if you have not yet, and let your bots reach the worker. The recommended way: put
+   Tailscale on your bot's computer and use Tailscale Serve on the worker, so it is never on the public
+   internet ([docs/worker-setup.md](docs/worker-setup.md)). Then register each bot's own inbox
    ([templates/bot-setup-checklist.md](templates/bot-setup-checklist.md)).
-5. Close public SSH (remote login from the internet) once Tailscale works:
-   `sudo bash scripts/setup-worker.sh --lockdown`.
-6. Follow the [first week walkthrough](docs/first-week.md) to take one task from start to finish.
+7. Close public SSH (remote login from the internet) once you can log in as your admin user over
+   Tailscale: `sudo bash scripts/setup-worker.sh --lockdown`.
+8. Follow the [first week walkthrough](docs/first-week.md) to take one task from start to finish.
 
-**Honest note:** the setup script has not yet been run end to end on a fresh server. Tested on: not yet.
-Run `scripts/smoke-test.sh` after setup and tell us what fails.
+**Honest note (tested on):** version 0.2.0 was run on a fresh Ubuntu 24.04 server. That test found real
+bugs (Claude Code did not install, every task failed, and the lockdown step could lock out a server that
+had only root). Version 0.2.1 fixes them. A clean retest of 0.2.1 on a fresh server is in progress and has
+not passed yet. Model logins, GitHub and Tailscale have not been tested on a real server. Run
+`scripts/smoke-test.sh` after setup and tell us what fails.
 
 ## What is in the box
 

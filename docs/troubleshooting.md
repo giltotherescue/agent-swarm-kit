@@ -9,6 +9,15 @@ journalctl -u swarm-backend -u swarm-worker -n 100 --no-pager
 
 Run `swarmctl` as root on the worker to use the admin token, or as yourself with `SWARM_URL` and `SWARM_TOKEN_FILE` set.
 
+## Setup problems
+
+- **The setup script seems stuck at "Tailscale".** It is waiting for you to open the login link it printed and approve the machine (up to 15 minutes). Press Ctrl-C and run it again with `--tailscale later` to skip the wait, then join later with `sudo tailscale up --ssh`.
+- **"Could not get lock /var/lib/dpkg/lock-frontend".** Another update is running, which is common on a new server. Since 0.2.1 the script waits up to 5 minutes. If it still fails, wait for `unattended-upgrades` to finish and run the script again.
+- **A step failed and the screen shows only a few lines.** The full installer output is in `/var/log/agent-swarm-setup.log`: `sudo tail -n 100 /var/log/agent-swarm-setup.log`.
+- **"Claude Code did not install".** The installer failed (often a network problem). Run the setup script again; it skips what is already done.
+- **`--lockdown` says "No usable admin account".** Only root can log in, and lockdown turns root login off. Make an admin user first ([worker-setup.md](worker-setup.md), step 3), or pass `--admin-user NAME`.
+- **Every task fails with `PermissionError` on `inbox/...` or `outbox/...`.** This was a 0.2.0 bug. Upgrade to 0.2.1 or later. Check the folders: `stat -c '%a %U:%G' /srv/agent-swarm/inbox /srv/agent-swarm/outbox` must show `2750 swarm-runner:agent` and `2750 agent:swarm-runner`. Re-running the setup script sets them.
+
 ## The backend does not start
 
 - **Check:** `journalctl -u swarm-backend -n 50`. Look for `SWARM_ADMIN_TOKEN_FILE is missing or empty; refusing to start`.

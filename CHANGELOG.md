@@ -4,6 +4,70 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.2.1 (2026-11-18)
+
+Fix release from the first install test of 0.2.0 on a fresh Ubuntu 24.04 server. That test found that
+no task could finish on a new install, that Claude Code did not install, and that the lockdown step could
+lock out a server that has only root. **0.2.1 fixes these, but a clean retest on a fresh server is in
+progress and has not passed yet.** Model logins, GitHub and Tailscale are still untested on a real server.
+Upgrade steps: docs/updating-the-kit.md ("Upgrading from 0.2.0 to 0.2.1").
+
+Why 0.2.1 and not a changed 0.2.0: 0.2.0 was already installed on a test server, and a version that
+changes behavior needs its own number so `swarmctl status` and `/health` show which code is running.
+
+Fixed (numbers are the install-test defects):
+
+1. Claude Code now installs. The setup script ran `sudo -iu agent bash -c '...'`, and `sudo -i` escapes the
+   command line, so `$f` and `$?` were lost and curl failed. Agent commands now run as
+   `sudo -u agent -H bash -lc '...'`. A failed install is reported as "Claude Code did not install" with
+   exit code 3, instead of the misleading "claude does not run as agent". The smoke test had the same
+   pattern and is fixed too.
+2. and 3. Tasks no longer fail while being prepared. The runner and `agent-exec` used `chmod` on new task
+   folders in the shared inbox and outbox. Linux clears the setgid bit (the bit that makes new files take
+   the folder's group) when someone outside the folder's group runs chmod, so files got the wrong group and
+   the other user could not read them. The task folders are no longer chmodded, and both sides now check
+   the group and setgid bit after making a folder.
+4. `--lockdown` refuses unless a usable non-root admin exists: a normal user with a login shell, sudo
+   (group `sudo` or a sudo rule), a password or a passwordless sudo rule, and a non-empty
+   `authorized_keys` only that user can change. `--admin-user NAME` makes one: adds it to `sudo`, copies
+   root's plain key lines, and asks for a sudo password when run in a terminal. The lockdown message and
+   the Tailscale SSH sample now name that user. Lockdown also refuses, with a hint, when Tailscale is not
+   installed or not joined.
+5. Install-time hardening: the firewall (ufw) is turned on at install, allowing SSH from anywhere (so you
+   cannot be locked out) plus SSH over Tailscale and Tailscale's port. Root and password login over SSH are
+   turned off at install only when an admin user is confirmed (the script was run through sudo as that
+   user, or you answered "yes" after testing `ssh` and `sudo -v` as that user). The end of the run says
+   what is and is not hardened. `--harden` runs just this step later.
+6. `swarmctl status` no longer warns "newest database backup is older than 36 hours" on a new install. The
+   backend records when its database was made and does not warn about a missing backup in the first 36
+   hours, and setup makes a first backup. A missing backup after that gives "There is no database backup
+   yet".
+7. apt waits up to 5 minutes for the package lock (`-o DPkg::Lock::Timeout=300`, also written to
+   `/etc/apt/apt.conf.d/90-agent-swarm-lock-wait` so the Node.js and Tailscale installers wait too).
+8. Quieter output: apt, Node.js, Tailscale, Claude Code and Codex installer output goes to
+   `/var/log/agent-swarm-setup.log` (mode 600). The screen keeps the `==>` lines and shows the last log
+   lines if a step fails. The "apt does not have a stable CLI interface" warning now goes only to the log.
+9. Each run removes old release folders, keeping only `current` and `previous`.
+10. `--tailscale later` installs Tailscale without joining, so nothing waits for a browser; `--lockdown`
+    works once you join with `sudo tailscale up --ssh`. The default join now gives up after 15 minutes
+    instead of waiting forever, and a run with no terminal and no auth key joins later on its own.
+    `--no-tailscale` (also `--tailscale off`) still works and the docs say what it costs.
+
+Also:
+
+- The smoke test shows "public SSH is still open" as a NOTE, not a WARN, so a new box ends with
+  0 failed and 2 warnings (GitHub login, Tailscale).
+- Docs: honest "Tested on" notes, how to get the kit onto a server without your own GitHub login (release
+  file, `git archive` plus `scp`, or a read-only deploy key or token), a "Make your admin user" step, the
+  Tailscale pause and how to skip it, the expected `swarmctl status` warning and smoke-test output on a new
+  box, why `sudo -iu agent` is needed for the model CLIs, and a "Setup problems" section in
+  troubleshooting.
+- Tests: 78 before, 100 now. New: the inbox and outbox handoff run as two real OS users in a throwaway
+  container (catches defects 2 and 3), the setup script's lockdown refusal on a root-only box,
+  `--admin-user`, `--harden`, release pruning, the Tailscale modes, the Claude Code install path, the
+  apt lock option, and the backup warning. Tests that need root or two users run in Docker and skip
+  with a loud message when Docker is not there (`SWARM_REQUIRE_USER_TESTS=1` makes that a failure).
+
 ## 0.2.0 (2026-11-18)
 
 Security and reliability release, from two reviews of 0.1.0. **Not yet run end to end on a fresh server.**

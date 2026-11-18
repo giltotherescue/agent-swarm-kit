@@ -431,7 +431,7 @@ parse_args() {
       --force-os) FORCE_OS=1; shift;;
       --harden) ONLY=harden; shift;;
       --lockdown) ONLY=lockdown; shift;;
-      -h|--help) sed -n '2,33p' "$0"; exit 0;;
+      -h|--help) sed -n '2,34p' "$0"; exit 0;;
       *) die "unknown option: $1";;
     esac
   done
@@ -457,6 +457,10 @@ main() {
   if [[ "$ONLY" == lockdown ]]; then lockdown; exit 0; fi
   if [[ "$ONLY" == harden ]]; then harden; exit 0; fi
   echo "Installer output goes to $LOG (sudo tail -f $LOG to watch it)."
+  if [[ -n "$ADMIN_USER" ]]; then
+    say "Admin user '$ADMIN_USER' (checked now, so problems show before the long installs)"
+    create_admin "$ADMIN_USER"
+  fi
 
   VERSION_NEW="$(tr -d '[:space:]' < "$KIT_SRC/VERSION")"
   UPGRADE=0
