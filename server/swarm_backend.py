@@ -142,7 +142,8 @@ MIGRATE_COLUMNS = {
               ("held_behind", "TEXT"), ("push_main", "INTEGER DEFAULT 0"), ("pushed_branch", "TEXT"),
               ("workdir", "TEXT"), ("workspace_host", "TEXT"), ("session_model", "TEXT"),
               ("unpushed", "INTEGER DEFAULT 0"), ("human_snooze_until", "INTEGER"),
-              ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER")],
+              ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER"),
+              ("start_fresh", "INTEGER DEFAULT 0")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0")],
     "notices": [("event", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
@@ -826,8 +827,12 @@ class Backend:
             self.event(task_id, "answer", actor, text, {"via": via})
             self.s.run("UPDATE items SET status = 'answered', answer = ?, updated_at = ? WHERE task_id = ? AND status IN ('open','snoozed')",
                        text, now(), task_id)
+            extra = {}
+            if t["outcome"] == "work_unavailable":
+                # The worker asked because unpushed work was lost. Any answer means: start again from what was pushed.
+                extra = {"unpushed": 0, "start_fresh": 1}
             t = self.set_state(t, "queued", actor, pending_answer=text, waiting_on=None, question=None, outcome=None, not_before=0,
-                               human_snooze_until=None)
+                               human_snooze_until=None, **extra)
         return {"task": self.public_task(t), "resumed": True}
 
     def message(self, who, task_id, b):

@@ -25,49 +25,96 @@ Your worker pulls with the GitHub login set up during worker setup, or with a re
 Keep your changes out of the kit's files, so updates never clash with them:
 
 - Settings: `/etc/agent-swarm/swarm.env`. The setup script never overwrites it.
-- Tokens: `/etc/agent-swarm/*.token` and `/home/agent/.config/swarm/worker.token`. Never in the repo.
+- Tokens and keys: `/etc/agent-swarm/*.token`, `/etc/agent-swarm/bot-keys/` and `/var/lib/swarm-runner/worker.token`. Never in the repo.
 - Data: `/var/lib/agent-swarm/`.
 - Bot briefs, routines and model routing tables live with your bots. Copy them from `templates/` once, then edit your copies.
 
 If you do change kit code, keep it on your own git branch (for example `local`) and rebase it on each update.
+
+## How versions are installed
+
+Each install goes into its own folder, `/opt/agent-swarm-kit/releases/VERSION-TIME`. Two links point at releases:
+
+- `/opt/agent-swarm-kit/current` is the version that runs. The services start from it.
+- `/opt/agent-swarm-kit/previous` is the one before, kept for rollback.
+
+Switching versions means moving the `current` link, which happens in one step. If the new backend does not start, the setup script moves `current` back to `previous` by itself.
 
 ## Pulling an update
 
 1. Read the new entries in `CHANGELOG.md` first.
 2. Back up the database:
 
-```bash
-sudo systemctl start swarm-backup.service
-sudo ls -l /var/lib/agent-swarm/backups
-```
+   ```bash
+   sudo systemctl start swarm-backup.service
+   sudo ls -l /var/lib/agent-swarm/backups
+   ```
 
 3. Pull the new version into your clone (the one you ran setup from, not `/opt`):
 
+   ```bash
+   cd ~/agent-swarm-kit
+   git pull
+   cat VERSION
+   ```
+
+4. Re-run the setup script. It keeps your settings and tokens. Before switching it **drains** the worker (stops it taking new tasks) and waits for running tasks to end, up to `--max-wait` seconds (default an hour). If tasks are still running then, it stops and changes nothing; run it again later.
+
+   ```bash
+   sudo bash scripts/setup-worker.sh
+   sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh
+   ```
+
+5. Compare your `swarm.env` with the new example and add any new settings you want:
+
+   ```bash
+   diff /etc/agent-swarm/swarm.env /opt/agent-swarm-kit/current/config/swarm.env.example
+   ```
+
+New tables and columns are added on their own when the backend starts. If a release changes existing data, its changelog entry says exactly what happens.
+
+## Restarting without killing tasks
+
+Restarting the worker stops running tasks. They come back after their lease runs out (about 10 minutes) and resume, but that wastes time and tokens. Instead:
+
 ```bash
-cd ~/agent-swarm-kit
-git pull
-cat VERSION
+sudo swarmctl restart-when-idle            # drain, wait until no task runs, restart the worker, undrain
+sudo swarmctl restart-when-idle --also swarm-backend --max-wait 7200
 ```
 
-4. Re-run the setup script. It is safe to repeat: it keeps your settings and tokens, copies the new code to `/opt/agent-swarm-kit`, and reinstalls the services.
+`scripts/restart-worker-when-idle.sh` does the same. To pause the worker by hand: `sudo swarmctl drain`, and `sudo swarmctl undrain` to carry on. Queued tasks wait; nothing is lost.
+
+## Rolling back
+
+If a new version misbehaves:
 
 ```bash
-sudo bash scripts/setup-worker.sh
+sudo swarmctl drain
+sudo ln -sfn "$(readlink -f /opt/agent-swarm-kit/previous)" /opt/agent-swarm-kit/current
 sudo systemctl restart swarm-backend swarm-worker
-swarmctl status
+sudo swarmctl undrain
 ```
 
-   The quick alternative, for code-only changes: copy `server/` to `/opt/agent-swarm-kit/server/` and run `sudo systemctl restart swarm-backend swarm-worker`.
+The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
-5. Compare your `swarm.env` with the new `config/swarm.env.example` and add any new settings you want:
+## Upgrading from 0.1.0 to 0.2.0
 
-```bash
-diff /etc/agent-swarm/swarm.env /opt/agent-swarm-kit/config/swarm.env.example
-```
+0.2.0 splits the worker into three users and moves secrets out of the database. The setup script does the moves; this is what changes for you:
 
-The database schema uses `CREATE TABLE IF NOT EXISTS`, so new tables appear on their own when the backend starts. If a release ever changes existing tables, its changelog entry includes the exact migration step.
+1. **The runner is a new user, `swarm-runner`.** Log GitHub in as that user, then log the `agent` user out:
 
-Restarting the worker stops any running task. The backend requeues it after the lease runs out (about 10 minutes) and it resumes. To avoid that, update when `swarmctl status` shows nothing running.
+   ```bash
+   sudo -u swarm-runner -H gh auth login
+   sudo -u swarm-runner -H gh auth setup-git
+   sudo -iu agent gh auth logout
+   ```
+
+2. **The worker token is replaced and moves** to `/var/lib/swarm-runner/worker.token`. The old one was readable by agents, so setup makes a new one and removes the old copy from `/home/agent/.config/swarm/`.
+3. **Trigger keys move to files.** On first start the backend moves each bot's key into `/etc/agent-swarm/bot-keys/BOT_ID.key` and wipes it from the database. **Backups made before the upgrade still contain the keys.** Delete them, or change each bot's key.
+4. **Repo tasks need a project.** A project bot can now queue repo work only for projects that list it. For each project: `sudo swarmctl project set NAME --repo OWNER/REPO --bot BOT_ID`.
+5. **Exposure.** If you used Tailscale Funnel, consider moving to Tailscale Serve with Tailscale on the bot computers ([backend.md](backend.md#reaching-the-backend-from-your-bots)).
+6. **Bots should read `event` and `reason`** in notices, and may answer 409 or `{"duplicate": true}` to repeats ([results-routing.md](results-routing.md)).
+7. Run `sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh`.
 
 ## Giving improvements back
 

@@ -487,7 +487,7 @@ class Runner(threading.Thread):
             if src:
                 self.write_inbox("restore.bundle", self.tapi("GET", src, timeout=300))
                 restore_needed = True
-            elif (t.get("unpushed") or (t.get("follow_up") and parent.get("unpushed"))):
+            elif not t.get("start_fresh") and (t.get("unpushed") or (t.get("follow_up") and parent.get("unpushed"))):
                 return "waiting", {"question": (
                     "The earlier run left commits that were never pushed, and they are not on this worker or saved anywhere. "
                     "Answer 'continue fresh' to start again from the pushed branch, or cancel this task if it is no longer needed."),

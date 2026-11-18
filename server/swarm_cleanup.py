@@ -70,7 +70,8 @@ def gitdir_target(path):
     if not os.path.isfile(gf):
         return None
     try:
-        line = open(gf).read().strip()
+        with open(gf) as fh:
+            line = fh.read().strip()
     except OSError:
         return None
     if not line.startswith("gitdir:"):
