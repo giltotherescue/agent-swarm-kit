@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""swarmctl: command line for the swarm backend. Bots, people and scripts all use this.
+
+Settings come from the environment or ~/.config/swarm/client.env (KEY=VALUE lines):
+  SWARM_URL         backend address, for example https://worker-name.your-tailnet.ts.net
+  SWARM_TOKEN_FILE  file holding your token (default ~/.config/swarm/client.token). Never paste tokens in chat.
+
+Examples:
+  swarmctl status
+  swarmctl enqueue -p website --owner website-bot --pr brief.md
+  swarmctl enqueue --owner website-bot --report-only --key seo-audit-2026-01 brief.md
+  swarmctl enqueue -r you/app --command "npm ci && npm test" --owner app-bot - <<< "Run the full test suite"
+  swarmctl review -r you/app --pr-number 12 -P codex --owner app-bot
+  swarmctl list --state waiting
+  swarmctl show TASK_ID ; swarmctl report TASK_ID
+  swarmctl answer TASK_ID "Use the blue logo"
+  swarmctl message TASK_ID "Also update the footer"
+  swarmctl waiting list
+  swarmctl waiting add --project website --bot website-bot --kind decision --ask "Ship the new homepage?" \
+      --rec "Ship it" --link https://example.com/preview --key homepage-v2
+  swarmctl bot set website-bot --notify-url https://example.com/hooks/website --notify-auth-file ~/.config/swarm/website.hook
+  swarmctl bot test website-bot
+"""
+import argparse
+import base64
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+KIT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_env():
+    path = os.path.expanduser("~/.config/swarm/client.env")
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def token():
+    path = os.path.expanduser(os.environ.get("SWARM_TOKEN_FILE", "~/.config/swarm/client.token"))
+    try:
+        return open(path).read().strip()
+    except OSError:
+        sys.exit(f"swarmctl: cannot read token file {path}. Set SWARM_TOKEN_FILE.")
+
+
+def call(method, path, body=None, raw=False):
+    url = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/") + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + token(), "Content-Type": "application/json", "User-Agent": "swarmctl"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            out = resp.read()
+            return out if raw else json.loads(out)
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode(errors="replace")
+        try:
+            msg = json.loads(msg).get("error", msg)
+        except ValueError:
+            pass
+        sys.exit(f"swarmctl: HTTP {e.code}: {msg}")
+    except urllib.error.URLError as e:
+        sys.exit(f"swarmctl: cannot reach {url}: {e.reason}")
+
+
+def show(obj):
+    print(json.dumps(obj, indent=2, default=str))
+
+
+def read_prompt(arg):
+    return sys.stdin.read() if arg == "-" else open(arg).read()
+
+
+def cmd_enqueue(a):
+    body = {"prompt": read_prompt(a.prompt), "project": a.project, "repo": a.repo, "provider": a.provider,
+            "model": a.model, "owner": a.owner, "kind": a.kind, "report_only": a.report_only, "push": a.push,
+            "open_pr": a.pr, "pr_number": a.pr_number, "branch": a.branch, "ask_human": a.ask_human,
+            "untrusted_input": a.untrusted_input, "command": a.command, "idempotency_key": a.key,
+            "title": a.title, "allow_duplicate": a.allow_duplicate, "parent_id": a.parent}
+    if a.attach:
+        body["attachments"] = [{"name": os.path.basename(p), "content_base64": base64.b64encode(open(p, "rb").read()).decode()}
+                               for p in a.attach]
+    for bad in ("/Users/", "/home/", "C:\\"):
+        if bad in body["prompt"] and not a.attach:
+            print(f"WARNING: the brief mentions a local path ({bad}...). The worker cannot see your files; use --attach.", file=sys.stderr)
+            break
+    r = call("POST", "/tasks", {k: v for k, v in body.items() if v not in (None, False)})
+    t = r["task"]
+    note = " (duplicate: this task already exists)" if r.get("duplicate") else ""
+    print(f"{t['id']} {t['state']} {t['provider']}/{t['model']}{note}")
+
+
+def cmd_review(a):
+    tmpl = open(os.path.join(KIT_DIR, "templates", "review-prompt.md")).read()
+    prompt = tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)) + ("\n\n" + read_prompt(a.extra) if a.extra else "")
+    r = call("POST", "/tasks", {k: v for k, v in {"prompt": prompt, "repo": a.repo, "pr_number": a.pr_number, "kind": "review",
+                                                  "report_only": True, "provider": a.provider, "model": a.model,
+                                                  "owner": a.owner, "project": a.project}.items() if v is not None})
+    print(r["task"]["id"], r["task"]["state"], r["task"]["provider"] + "/" + r["task"]["model"])
+
+
+def cmd_list(a):
+    qs = {k: v for k, v in {"state": a.state, "owner": a.owner, "project": a.project, "updated_since": a.since,
+                            "limit": a.limit}.items() if v}
+    r = call("GET", "/tasks?" + urllib.parse.urlencode(qs))
+    if a.json:
+        return show(r)
+    for t in r["tasks"]:
+        title = (t.get("title") or t["prompt"].strip().splitlines()[0] if t["prompt"].strip() else "")[:60]
+        print(f"{t['id']:30} {t['state']:9} {str(t.get('owner') or '-'):18} {title}")
+
+
+def cmd_status(a):
+    r = call("GET", "/status")
+    if a.json:
+        return show(r)
+    print(f"backend {r['version']}  tasks: " + ", ".join(f"{k} {v}" for k, v in sorted(r["tasks"].items())) or "none")
+    print(f"waiting on you: {r['items_due']}   notices: " + ", ".join(f"{k} {v}" for k, v in sorted(r["notices"].items())))
+    for t in r["running"]:
+        print(f"  running  {t['id']}  owner {t['owner']}  on {t['lease_worker']}")
+    for t in r["waiting"]:
+        print(f"  waiting  {t['id']}  on {t['waiting_on']}  {(t['question'] or '')[:80]}")
+    for w in r.get("warnings") or []:
+        print("  WARNING: " + w)
+    if r["stuck_running"]:
+        print("  STUCK (no heartbeat): " + ", ".join(r["stuck_running"]))
+
+
+def cmd_waiting(a):
+    if a.action == "list":
+        r = call("GET", "/waiting?" + urllib.parse.urlencode({"status": a.status or "due"}))
+        if a.json:
+            return show(r)
+        for i in r["items"]:
+            print(f"{i['id']:24} {i['project'] or '-':14} {i['bot'] or '-':16} {i['kind']:18} {(i['ask'] or '')[:70]}")
+            if i.get("recommendation"):
+                print(f"{'':24} recommend: {i['recommendation'][:90]}")
+        return
+    if a.action == "add":
+        body = {"project": a.project, "bot": a.bot, "kind": a.kind, "ask": a.ask, "recommendation": a.rec,
+                "links": a.link or [], "options": a.option or [], "dedupe_key": a.key, "task_id": a.task_id}
+        return show(call("POST", "/waiting", body))
+    body = {"action": a.action, "answer": a.text, "note": a.text}
+    if a.action == "snooze":
+        import time
+        body["until"] = int(time.time() + 86400 * (a.days or 1))
+    show(call("POST", f"/waiting/{a.id}", body))
+
+
+def cmd_bot(a):
+    if a.action == "list":
+        return show(call("GET", "/bots"))
+    if a.action == "token":
+        r = call("POST", f"/bots/{a.id}/token")
+        out = os.path.expanduser(a.out or f"~/.config/swarm/bot-{a.id}.token")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(r["token"] + "\n")
+        print(f"token for {a.id} written to {out} (chmod 600). Hand the file to the bot through your secrets store, not chat.")
+        return
+    if a.action == "test":
+        return show(call("POST", f"/bots/{a.id}/test", {"nonce": a.nonce} if a.nonce else {}))
+    if a.action == "show":
+        return show(call("GET", f"/bots/{a.id}"))
+    body = {}
+    if a.notify_url is not None:
+        body["notify_url"] = a.notify_url
+    if a.notify_auth_file:
+        body["notify_auth"] = open(os.path.expanduser(a.notify_auth_file)).read().strip()
+    if a.role:
+        body["role"] = a.role
+    show(call("PUT", f"/bots/{a.id}", body))
+
+
+def main():
+    load_env()
+    p = argparse.ArgumentParser(prog="swarmctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    e = sub.add_parser("enqueue", help="queue a task")
+    e.add_argument("prompt", help="brief file, or - for stdin")
+    e.add_argument("-p", "--project"); e.add_argument("-r", "--repo"); e.add_argument("-P", "--provider", choices=["claude", "codex"])
+    e.add_argument("-m", "--model"); e.add_argument("--owner"); e.add_argument("--kind"); e.add_argument("--title")
+    e.add_argument("--report-only", action="store_true"); e.add_argument("--push", action="store_true")
+    e.add_argument("--pr", action="store_true", help="push agent/<id> and open a draft PR")
+    e.add_argument("--pr-number", type=int, help="work on top of this existing PR"); e.add_argument("--branch")
+    e.add_argument("--ask-human", action="store_true", help="a question from this task goes to the human, not the bot")
+    e.add_argument("--untrusted-input", action="store_true", help="brief came from email, tickets or scraped pages")
+    e.add_argument("--command", help="script task: run this shell command with no model")
+    e.add_argument("--attach", action="append"); e.add_argument("--key", help="idempotency key: same key returns the same task")
+    e.add_argument("--allow-duplicate", action="store_true"); e.add_argument("--parent")
+    e.set_defaults(fn=cmd_enqueue)
+
+    r = sub.add_parser("review", help="queue a second-model review of a PR (report only)")
+    r.add_argument("-r", "--repo", required=True); r.add_argument("--pr-number", type=int, required=True)
+    r.add_argument("-P", "--provider", choices=["claude", "codex"]); r.add_argument("-m", "--model")
+    r.add_argument("--owner"); r.add_argument("-p", "--project"); r.add_argument("--extra", help="file with extra context")
+    r.set_defaults(fn=cmd_review)
+
+    ls = sub.add_parser("list", help="list tasks")
+    for f in ("--state", "--owner", "--project", "--since", "--limit"):
+        ls.add_argument(f)
+    ls.add_argument("--json", action="store_true"); ls.set_defaults(fn=cmd_list)
+
+    st = sub.add_parser("status", help="one-screen summary"); st.add_argument("--json", action="store_true"); st.set_defaults(fn=cmd_status)
+
+    for name, method, path in (("show", "GET", "/tasks/{}"), ("report", "GET", "/tasks/{}/report"),
+                               ("artifacts", "GET", "/tasks/{}/artifacts"), ("cancel", "POST", "/tasks/{}/cancel")):
+        s = sub.add_parser(name); s.add_argument("id")
+        s.set_defaults(fn=lambda a, m=method, pth=path, n=name: (
+            sys.stdout.write(call(m, pth.format(a.id), {} if m == "POST" else None, raw=True).decode()) if n == "report"
+            else show(call(m, pth.format(a.id), {} if m == "POST" else None))))
+
+    g = sub.add_parser("get-artifact"); g.add_argument("id"); g.add_argument("name"); g.add_argument("-o", "--out", required=True)
+    g.set_defaults(fn=lambda a: open(a.out, "wb").write(call("GET", f"/tasks/{a.id}/artifacts/{urllib.parse.quote(a.name)}", raw=True)))
+
+    for name, field in (("answer", "answer"), ("message", "text")):
+        s = sub.add_parser(name); s.add_argument("id"); s.add_argument("text")
+        s.set_defaults(fn=lambda a, n=name, f=field: show(call("POST", f"/tasks/{a.id}/{n}", {f: a.text})))
+
+    w = sub.add_parser("waiting", help="the Waiting on you list")
+    w.add_argument("action", choices=["list", "add", "answer", "snooze", "drop", "done", "withdraw"])
+    w.add_argument("id", nargs="?"); w.add_argument("text", nargs="?")
+    w.add_argument("--status"); w.add_argument("--project"); w.add_argument("--bot")
+    w.add_argument("--kind", choices=["decision", "deliverable-review"], default="decision")
+    w.add_argument("--ask"); w.add_argument("--rec"); w.add_argument("--link", action="append"); w.add_argument("--option", action="append")
+    w.add_argument("--key"); w.add_argument("--task-id"); w.add_argument("--days", type=int); w.add_argument("--json", action="store_true")
+    w.set_defaults(fn=cmd_waiting)
+
+    b = sub.add_parser("bot", help="bot settings")
+    b.add_argument("action", choices=["list", "show", "set", "token", "test"]); b.add_argument("id", nargs="?")
+    b.add_argument("--notify-url"); b.add_argument("--notify-auth-file"); b.add_argument("--role", choices=["chief", "project"])
+    b.add_argument("--out"); b.add_argument("--nonce", help="bot test: reuse a nonce to check that a repeat is not sent twice")
+    b.set_defaults(fn=cmd_bot)
+
+    pj = sub.add_parser("project", help="set project defaults")
+    pj.add_argument("name"); pj.add_argument("--repo"); pj.add_argument("--provider"); pj.add_argument("--model")
+    pj.add_argument("--no-push", action="store_true")
+    pj.set_defaults(fn=lambda a: show(call("PUT", f"/projects/{a.name}", {k: v for k, v in {
+        "default_repo": a.repo, "default_provider": a.provider, "default_model": a.model}.items() if v} | ({"allow_push": False} if a.no_push else {}))))
+
+    nt = sub.add_parser("notices", help="recent deliveries to bot inboxes (admin or chief)")
+    nt.set_defaults(fn=lambda a: show(call("GET", "/notices")))
+
+    al = sub.add_parser("alert", help="send an alert to the Chief of Staff (worker scripts use this)")
+    al.add_argument("key"); al.add_argument("text")
+    al.set_defaults(fn=lambda a: show(call("POST", "/alerts", {"key": a.key, "text": a.text})))
+
+    a = p.parse_args()
+    if getattr(a, "action", None) not in (None, "list", "add") and a.cmd in ("waiting",) and not a.id:
+        sys.exit("swarmctl: this action needs an item id")
+    if a.cmd == "bot" and a.action != "list" and not a.id:
+        sys.exit("swarmctl: this action needs a bot id")
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

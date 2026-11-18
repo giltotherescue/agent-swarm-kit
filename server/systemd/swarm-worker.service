@@ -1,0 +1,19 @@
+[Unit]
+Description=agent-swarm-kit worker (claims tasks and runs Claude Code or Codex)
+After=network-online.target swarm-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+Environment=HOME=/home/agent
+Environment=PATH=/home/agent/.local/bin:/home/agent/bin:/usr/local/bin:/usr/bin:/bin
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+EnvironmentFile=/etc/agent-swarm/swarm.env
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/server/swarm_worker.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

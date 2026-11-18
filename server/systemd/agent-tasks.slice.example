@@ -1,0 +1,7 @@
+# Optional: copy to /home/agent/.config/systemd/user/ to cap all tasks together.
+# Soft limits first: MemoryHigh slows tasks down, MemoryMax is the backstop that keeps
+# the backend, SSH and Tailscale alive when a task runs away.
+[Slice]
+CPUWeight=100
+MemoryHigh=70%
+MemoryMax=80%

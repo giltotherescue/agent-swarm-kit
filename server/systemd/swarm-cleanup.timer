@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cleanup of finished task folders
+
+[Timer]
+OnCalendar=*-*-* 03:40
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

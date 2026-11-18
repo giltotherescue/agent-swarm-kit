@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-swarm-kit nightly database backup
+
+[Service]
+Type=oneshot
+User=swarm
+EnvironmentFile=/etc/agent-swarm/swarm.env
+Environment=HOME=/var/lib/agent-swarm
+Environment=SWARM_DB_BACKUP_DIR=/var/lib/agent-swarm/backups
+ExecStart=/opt/agent-swarm-kit/scripts/backup.sh

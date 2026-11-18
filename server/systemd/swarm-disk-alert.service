@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-swarm-kit disk space check
+
+[Service]
+Type=oneshot
+User=agent
+Environment=HOME=/home/agent
+EnvironmentFile=/etc/agent-swarm/swarm.env
+Environment=SWARM_TOKEN_FILE=/home/agent/.config/swarm/worker.token
+ExecStart=/opt/agent-swarm-kit/scripts/disk-alert.sh

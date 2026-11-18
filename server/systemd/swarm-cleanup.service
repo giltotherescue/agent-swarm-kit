@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-swarm-kit cleanup of finished task folders (no AI)
+
+[Service]
+Type=oneshot
+User=agent
+Environment=HOME=/home/agent
+EnvironmentFile=/etc/agent-swarm/swarm.env
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/server/swarm_cleanup.py
+Nice=10

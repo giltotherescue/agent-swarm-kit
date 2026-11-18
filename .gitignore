@@ -1,0 +1,9 @@
+*.token
+*.key
+.env
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.secret-patterns

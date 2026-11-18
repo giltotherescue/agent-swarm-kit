@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# run-agent: run one headless Claude Code or Codex session in a folder.
+# Usage: run-agent <claude|codex> <model|default> <workdir> <prompt-file> [session-id-to-resume]
+# Writes the session id to <workdir>/.task-context/session so a later answer can resume the same session.
+# Exit codes: the CLI's own code, 75 when the output shows a usage or rate limit, 124 on timeout.
+set -uo pipefail
+PROVIDER="${1:?provider}"; MODEL="${2:?model}"; WORKDIR="${3:?workdir}"; PROMPT="${4:?prompt file}"; RESUME="${5:-}"
+TIMEOUT="${SWARM_TASK_TIMEOUT:-14400}"
+CTX="$WORKDIR/.task-context"; mkdir -p "$CTX"
+OUT="$CTX/agent-output.jsonl"; ERR="$CTX/agent-stderr.log"
+cd "$WORKDIR" || exit 2
+
+LIMIT_RE='(usage limit|rate limit|rate_limit|too many requests|429|quota exceeded|limit reached|hit your limit)'
+
+case "$PROVIDER" in
+  claude)
+    args=(-p --permission-mode bypassPermissions --output-format stream-json --verbose)
+    [[ "$MODEL" != default ]] && args+=(--model "$MODEL")
+    [[ -n "$RESUME" ]] && args+=(--resume "$RESUME")
+    timeout "$TIMEOUT" claude "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
+    code=$?
+    sid=$(grep -o '"session_id":"[^"]*"' "$OUT" | head -1 | cut -d'"' -f4)
+    ;;
+  codex)
+    args=(exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C "$WORKDIR")
+    [[ "$MODEL" != default ]] && args+=(-m "$MODEL")
+    if [[ -n "$RESUME" ]]; then args+=(resume "$RESUME" -); else args+=(-); fi
+    timeout "$TIMEOUT" codex "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
+    code=$?
+    sid=$(grep -o '"thread_id":"[^"]*"' "$OUT" | head -1 | cut -d'"' -f4)
+    ;;
+  *) echo "provider must be claude or codex" >&2; exit 2;;
+esac
+
+[[ -n "${sid:-}" ]] && printf '%s\n' "$sid" > "$CTX/session"
+if [[ $code -ne 0 && $code -ne 124 ]] && tail -c 20000 "$OUT" "$ERR" 2>/dev/null | grep -Eqi "$LIMIT_RE"; then
+  exit 75
+fi
+exit "$code"
