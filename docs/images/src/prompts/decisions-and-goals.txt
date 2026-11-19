@@ -1,0 +1,4 @@
+A cycle diagram with three main stations from left to right connected by orange arrows, plus a big curved orange return arrow along the bottom forming a loop from the right station back to the left station. Each station has one wide empty label tag beneath it. A small empty tag sits on the middle of the bottom return arrow.
+Left station: several small hexagonal assistant modules (with orange status dots) dropping blank cards via dashed lines into one isometric inbox tray holding a neat stack of cards.
+Middle station: a small rising-sun line icon over a phone showing one single message card; a wireframe hand holding up one card that glows orange (the decision), with a small clock outline.
+Right station: an isometric round meeting table with a standing calendar grid and three small target / bullseye icons on little flags; small hexagonal assistant modules seated around it. Above the table, a small row of tiny pulse-line / gauge icons (daily checks).

@@ -24,32 +24,26 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 
 ## How it works, in four pictures
 
-![You talk to your Grok Bots. They hand big jobs to the worker and get the results back.](docs/images/who-does-what.png)
+<table>
+<tr>
+<td width="50%"><a href="docs/images/who-does-what.png"><img src="docs/images/who-does-what.png" width="440" alt="You talk to your Grok Bots. They hand big jobs to the worker and get the results back."></a></td>
+<td><b>Who does what.</b> You chat with your Grok Bots: a Chief of Staff and one bot per project. The worker does the long, hard jobs with Claude or Codex and sends results back.</td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/images/request-journey.png"><img src="docs/images/request-journey.png" width="440" alt="A request goes from you, to a bot that plans it, to the worker that does it, and back to you as a finished result."></a></td>
+<td><b>A request's journey.</b> You ask, the bot writes up the job, the worker does it, and the bot checks the result and sends you one message with a link.</td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/images/decisions-and-goals.png"><img src="docs/images/decisions-and-goals.png" width="440" alt="Bots drop decisions on one Waiting on you list, you decide, and a weekly goals meeting keeps the bots moving."></a></td>
+<td><b>Where decisions land.</b> Everything that needs you goes on one "Waiting on you" list, sent each morning. A weekly goals meeting sets one to three goals per project.</td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/images/which-tool-when.png"><img src="docs/images/which-tool-when.png" width="440" alt="Four cards: Connectors, treg, Worker and Executor."></a></td>
+<td><b>Which tool when.</b> Connectors for your accounts, treg for paid data, the worker for coding and long jobs, Executor only later. <a href="#which-tool-when-short-version">Short version below</a>.</td>
+</tr>
+</table>
 
-**Who does what.** You talk to your Grok Bots: a Chief of Staff plus one bot per project. They plan,
-draft and keep track. The worker is a rented server that does the long or hard jobs and sends the
-result back to the bot that asked.
-
-![A request goes from you, to a bot that plans it, to the worker that does it, and back to you as a finished result.](docs/images/request-journey.png)
-
-**A request's journey.** You ask your website bot to refresh the pricing page. The bot writes up the
-job, the worker does it with Claude or Codex, and the result goes straight back to that same bot. The
-bot checks it and sends you one short message with a link. If the worker gets stuck on a question, the
-bot answers it, or asks you if only you can decide.
-
-![Bots drop decisions on one Waiting on you list, you decide, and a weekly goals meeting keeps the bots moving.](docs/images/decisions-and-goals.png)
-
-**Where decisions land.** Anything that needs you goes on one "Waiting on you" list, and the Chief of
-Staff sends it to you as one short message each morning. Once a week the Chief of Staff runs a goals
-meeting: what each project got done, and one to three clear goals for next week. Between meetings each
-project bot checks its goals daily and stays quiet unless a goal is at risk.
-
-![Four cards: Connectors, treg, Worker and Executor.](docs/images/which-tool-when.png)
-
-**Which tool when.** Grok Bot connectors for your own accounts. treg for paid data without a
-subscription, and for some of your private tools like Search Console and Google Ads. The worker for all
-coding and anything long. Executor only later, if the worker needs your connected tools too. Short
-version below; the full guide is [docs/which-tool-when.md](docs/which-tool-when.md).
+The longer story behind each picture is in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## What you need
 
@@ -269,6 +263,7 @@ Start with the concepts, then follow your path.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Worker server setup](docs/worker-setup.md): any provider, Tailscale, and the security baseline.
 - [Sizing and sandboxes](docs/sizing-and-sandboxes.md): how big a server, and when to offload tests.
+- [How it works, in four pictures](docs/how-it-works.md): the long version of the README diagrams.
 - [How it works, technical](docs/how-it-works-technical.md): flow charts and states for developers.
 - [Backend](docs/backend.md): the task tracker, its API and who can call what.
 - [Results routing](docs/results-routing.md): straight to the owner bot, with a fallback.

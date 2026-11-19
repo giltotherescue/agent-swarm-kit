@@ -1,0 +1,5 @@
+A 2 by 2 grid of four equal panels with thin off-white outlined frames and corner registration ticks, with small gaps between panels, below the empty title area. In each panel: the left 40% stays mostly empty background (for text) except one small empty square tag near the bottom-left; the right 60% holds a detailed isometric vignette.
+Panel 1 (top-left): a central plug / connector hub with cables branching to an envelope, a calendar grid, a document folder and a cloud drive.
+Panel 2 (top-right): a magnifying glass over a dashboard of bar and line charts, one bar orange, with a small coin / meter dial beside it.
+Panel 3 (bottom-left): an isometric server rack with orange status lights, a robotic arm, and two floating terminal windows with abstract code lines (no characters).
+Panel 4 (bottom-right): an isometric toolbox with a key in orange, linked by thin lines to three small tool nodes (plug, gear, database cylinder).
