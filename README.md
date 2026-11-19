@@ -304,5 +304,4 @@ from it is fine.
 
 ## Version
 
-See [VERSION](VERSION) and [CHANGELOG.md](CHANGELOG.md). License: [LICENSE](LICENSE) (private, all rights
-reserved).
+See [VERSION](VERSION) and [CHANGELOG.md](CHANGELOG.md). License: [MIT](LICENSE).
