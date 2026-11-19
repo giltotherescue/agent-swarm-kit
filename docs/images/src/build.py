@@ -562,8 +562,8 @@ def decisions_and_goals():
          ("One message", "each morning, from the Chief of Staff", ["grok"],
           ["Every open item, numbered, each with a recommendation.",
            "On a normal day you hear nothing else."], False),
-         ("You reply", "in one line", None,
-          ["“1 yes, 2 drop, 3 snooze”",
+         ("You reply", "in one line, or on a call", None,
+          ["“1 yes, 2 drop, 3 snooze”, or talk it through by voice.",
            "Dropping is fine: the bot stops and does not ask again. Only your yes counts."], True),
          ("Weekly goals", "about 10 minutes a week", None,
           ["Last week gets scored, and each project gets 1 to 3 goals.",
@@ -628,17 +628,17 @@ def which_tool_when():
            "Jobs that run for days go as a chain."], False)], arrows=False), "which-tool-when")
 
     L = Lanes(KICK_C, "Which tool when, step by step",
-              "How a bot picks a route for your ask. It checks these questions in order.",
+              "How a bot picks a route for your ask: the questions it weighs, and where each answer leads.",
               [("You", "in Grok chat", None),
                ("Your bot", "a Grok Bot decides, and does quick things itself", ["grok"]),
                ("Connectors", "Grok Bot connectors to your accounts", ["grok"]),
                ("treg", "pay per call data", None),
                ("The worker", "Claude Code or Codex", ["claude", "openai"])])
-    L.card("ask", 0, 0, "Ask", "anything, in plain words", 1, "you")
-    L.card("q1", 1, 1, "Code, or over ~15 min?", "also design, deep research, bulk scraping, a set model", 2)
-    L.card("q2", 3, 1, "Your own account?", "Gmail, Slack, calendar, analytics, docs", 3)
-    L.card("q3", 5, 1, "Paid data?", "keywords, search results, enrichment", 4)
-    L.card("self", 7, 1, "Bot does it", "lookups, messages, short drafts", 5)
+    L.card("ask", 0, 0, "Ask", "anything, in plain words", None, "you")
+    L.card("q1", 1, 1, "Code, or over ~15 min?", "also design, deep research, bulk scraping, a set model", None)
+    L.card("q2", 3, 1, "Your own account?", "Gmail, Slack, calendar, analytics, docs", None)
+    L.card("q3", 5, 1, "Paid data?", "keywords, search results, enrichment", None)
+    L.card("self", 7, 1, "Bot does it", "lookups, messages, short drafts", None)
     L.card("worker", 2, 4, "Worker task", "any size of code; a draft PR comes back. Jobs that run for days: a chain", None)
     L.card("exec", 4, 4, "Executor, later", "only if a worker task needs your connected tools too", None, "plain")
     L.card("conn", 4, 2, "Use a connector", "quick reads and drafts; nothing sent without your yes", None)

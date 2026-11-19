@@ -41,7 +41,7 @@ If you make a folder by hand on the worker, put it in `/home/agent/work/scratch/
 
 ### Morning decision batch
 
-The Waiting on you list (`GET /waiting?status=due`) holds every open decision and every task waiting on the human. The Chief of Staff reads it once a day and sends one numbered message. You reply in one line, for example "1 yes, 2 drop, 3 snooze". "Drop" means "don't need it": the bot stops work on that ask and must not file it again. Dropping is guilt-free. That is the point of the list.
+The Waiting on you list (`GET /waiting?status=due`) holds every open decision and every task waiting on the human. The Chief of Staff reads it once a day and sends one numbered message. You reply in one line, for example "1 yes, 2 drop, 3 snooze". "Drop" means "don't need it": the bot stops work on that ask and must not file it again. Dropping is guilt-free. That is the point of the list. You can also go through the list by voice with the Chief of Staff in the Grok Bot app; see [the morning review call](how-it-works.md#the-morning-review-call).
 
 ### Weekly goals meeting and daily work heartbeat
 

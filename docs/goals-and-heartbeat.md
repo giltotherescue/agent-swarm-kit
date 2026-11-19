@@ -4,7 +4,7 @@ Two habits keep your bots moving without you chasing them: a **weekly goals meet
 three clear goals per project, and a **daily work heartbeat** where each project bot checks its own
 goals and stays quiet unless something is stuck.
 
-![Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line, and a weekly goals meeting sets 1 to 3 goals per project.](images/decisions-and-goals.png)
+![Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line or talk it through on a voice call, and a weekly goals meeting sets 1 to 3 goals per project.](images/decisions-and-goals.png)
 
 The copy-paste prompts are in [../templates/routine-prompts.md](../templates/routine-prompts.md)
 (prompts 6 and 7). The goals file format is in [../templates/goals.md](../templates/goals.md).

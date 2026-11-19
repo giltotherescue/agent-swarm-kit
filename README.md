@@ -24,38 +24,31 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 
 ## How it works, in four pictures
 
-Each topic has a short version and a step-by-step version; orange outlines mark the only places you
-act, and [docs/how-it-works.md](docs/how-it-works.md) tells the longer story.
+Orange outlines mark where you act. The longer story is in [docs/how-it-works.md](docs/how-it-works.md).
 
 ### Who does what
 
 <img src="docs/images/who-does-what.png" width="800" alt="Four columns: you, the Chief of Staff, one project bot per project, and the worker that runs Claude Code or Codex.">
 
-![A normal day in swimlanes: the morning list, your one-line reply, the project bot queues a task, the worker does it, a draft PR, and the result goes straight back to the bot that asked.](docs/images/who-does-what-steps.png)
-
-You talk to your bots; they hand code and long jobs to the worker, and the result comes straight back to the bot that asked.
+Results come straight back to the bot that asked. [See the step-by-step swimlane](docs/how-it-works.md#who-does-what).
 
 ### A request's journey
 
 <img src="docs/images/request-journey.png" width="800" alt="You ask, the bot plans, the worker does it, you review a draft pull request.">
 
-![A request's journey in swimlanes: ask, brief, queue, claim, work, publish, draft PR, notify, check, merge, with a dashed loop for when the model gets stuck.](docs/images/request-journey-steps.png)
-
-Task states run queued, running, done; the dashed cards only happen when the model stops with a question.
+The worker opens a draft pull request; only you merge. [See the step-by-step swimlane](docs/how-it-works.md#a-requests-journey).
 
 ### Where decisions land
 
-<img src="docs/images/decisions-and-goals.png" width="800" alt="Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line, and a weekly goals meeting sets 1 to 3 goals per project.">
+<img src="docs/images/decisions-and-goals.png" width="800" alt="Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line or talk it through on a voice call, and a weekly goals meeting sets 1 to 3 goals per project.">
 
-![Where decisions land in swimlanes: items are filed during the day, sent as one morning list, answered by you, and routed back to the bot or task that asked; the weekly goals meeting runs once a week.](docs/images/decisions-and-goals-steps.png)
+Answer in one line, or on a [voice call](#the-morning-review-call). [See the step-by-step swimlane](docs/how-it-works.md#where-decisions-land).
 
 ### Which tool when
 
 <img src="docs/images/which-tool-when.png" width="800" alt="Four routes: the bot itself, Grok Bot connectors, treg, and the worker.">
 
-![Which tool when in swimlanes: the bot asks whether it is code or long, then whether it uses your own account, then whether it needs paid data, and otherwise does it itself.](docs/images/which-tool-when-steps.png)
-
-More detail in the [short version below](#which-tool-when-short-version) and [docs/which-tool-when.md](docs/which-tool-when.md).
+Also as a [table below](#which-tool-when-short-version). [See the step-by-step swimlane](docs/how-it-works.md#which-tool-when).
 
 ## What you need
 
@@ -139,6 +132,8 @@ worker, or an afternoon with one.
   sends you one short list of decisions each morning.
 - **A project bot for each project.** A business, a website, an app, your marketing. Each one owns its
   project from end to end and knows its goals, people and limits.
+- **A morning review call.** You can also talk the morning list through out loud.
+  [More below](#the-morning-review-call).
 - **A weekly goals meeting and a daily work heartbeat.** Clear goals each week, a quiet daily check, and
   a nudge only when something is stuck.
 - **A project log.** Every project, with or without code, keeps a history of what was done, what you
@@ -151,6 +146,16 @@ worker, or an afternoon with one.
   or drop each one. Dropping is fine.
 - **Light rules.** Nothing goes outside, nothing is deleted, and no money is spent without your yes.
   Everything else just gets done.
+
+### The morning review call
+
+Overnight and through the day, your bots file every open question and action item on the Waiting on
+you list. Each morning the Chief of Staff rolls them all up into one list. If you would rather talk
+than type, start a voice conversation with the Chief of Staff in the Grok Bot app and go through the
+items back and forth, hands free, for example on a drive. You can ask what an item means, push back
+on a recommendation, or say "drop it". When the call ends, the Chief of Staff writes each answer to its
+item on the list (answered, snoozed or dropped), which also logs it as a decision for that project, and
+messages the project bots so they get back to work on it. A worker task that was waiting on one of those answers picks up again on its own.
 
 ## Which tool when (short version)
 

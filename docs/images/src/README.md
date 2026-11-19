@@ -35,5 +35,6 @@ cat docs/images/src/prompts/who-does-what.txt docs/images/src/prompts/_style.txt
 Save it as `strips/<topic>.webp`. The objects are found by the white gaps between them, so the
 prompt must keep exactly four objects with clear space in between.
 
-Text sizes are set for the README: the short version is shown at 800 px wide and the step-by-step
-version at GitHub's full README width (about 840 px), so no text ends up under about 12 px.
+Text sizes are set for GitHub: the short version is shown in the README at 800 px wide, and the
+step-by-step version in docs/how-it-works.md at GitHub's full content width (about 840 px), so no text
+ends up under about 12 px.
