@@ -18,6 +18,8 @@ This path is for people who do not want to run a server, or who want to start sm
 - **Research inside the bot.** Short web research, summaries, comparisons.
 - **Project briefs.** Each bot knows its project, goals, people and limits.
 - **Approvals.** The same light rules apply.
+- **Goals meeting and work heartbeat.** The weekly goals meeting and each bot's daily goal check work the same way; the goals file is a note the Chief of Staff keeps. See [goals and heartbeat](goals-and-heartbeat.md).
+- **A project log.** Each bot keeps its log (work, decisions, your feedback, lessons) as a note in memory. See [project log](project-log.md), section "Without a worker".
 - **Routines.** Scheduled prompts run inside Grok Bot: the morning decision batch, the nightly memory cleanup, and any pass/fail checks you add (for example "the site homepage loads").
 - **A Waiting on you list.** Without a backend, keep it as a pinned note or a memory file the Chief of Staff owns. Each line: project, the ask, the recommended answer, a link, and the date filed. Bots add a line whenever they hand you a decision or deliverable. You answer, snooze, or write "drop". A dropped line means stop work on it, and nobody files it again unless you ask.
 
@@ -46,8 +48,8 @@ If you notice you keep asking a bot for something it cannot finish in one turn, 
 Adding a worker does not replace anything. Your bots, briefs, connectors and routines stay as they are.
 
 1. Rent a server and follow [worker setup](worker-setup.md). It installs the worker and the backend together.
-2. Make your bots able to reach the backend (see [backend](backend.md)).
-3. For each bot, walk through [the per-bot setup checklist](../templates/bot-setup-checklist.md): give it a token, its own results trigger, and a test.
+2. Make your bots able to reach the backend. The recommended way is to install Tailscale (a private network for your own devices) on your bot's computer and use Tailscale Serve on the worker, so the worker is never on the public internet. See [worker setup](worker-setup.md).
+3. For each bot, walk through [the per-bot setup checklist](../templates/bot-setup-checklist.md): give it a token (its own password for the worker), bind it to its project, set up its own results trigger, and test it.
 4. Update each brief: add repos, tests, and the [model routing table](../templates/model-routing.md). Add the backend sections back into the Chief of Staff instructions.
 5. Move the Waiting on you note into the backend. For each open line, the bot that filed it runs `swarmctl waiting add` with a stable `--key`. Then archive the note.
 6. Run the [first week walkthrough](first-week.md) with one small task.

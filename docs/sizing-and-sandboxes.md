@@ -12,9 +12,9 @@ That runs two tasks at once with room to spare for most small projects. Change `
 
 - **The model CLIs are light.** Claude Code and Codex mostly wait for the model, which runs in the provider's cloud. Each uses a few hundred MB of memory.
 - **Your repo's tools are heavy.** Installing packages, builds, type checks, full test suites, databases, headless browsers and dev servers are what fill CPU and memory.
-- **Disk grows with checkouts.** Each task gets its own folder in `/home/agent/work`. The daily cleanup removes them after `SWARM_KEEP_DAYS` (default 7).
+- **Disk grows with checkouts.** Each task gets its own folder in `/home/agent/work`, and the publisher keeps a private copy of the repo while the task is open. The daily cleanup removes them after `SWARM_KEEP_DAYS` (default 7).
 
-Each task is limited to `SWARM_TASK_CPU_QUOTA` (default `200%`, meaning 2 CPUs) and `SWARM_TASK_MEMORY_MAX` (default `75%` of memory). The worker also refuses new work while the box is busy: load per CPU above `SWARM_MAX_LOAD_PER_CPU` (1.5) or free memory below `SWARM_MIN_FREE_MEM_MB` (1500).
+Each task is limited to `SWARM_TASK_CPU_QUOTA` (default `200%`, meaning 2 CPUs) and `SWARM_TASK_MEMORY_MAX` (default `75%` of memory). All tasks together are also capped by a limit on the whole `agent` user that the setup script installs, so a runaway task cannot starve SSH, Tailscale or the backend. Every run, model or script, has a hard time limit (`SWARM_TASK_TIMEOUT`). The worker also refuses new work while the box is busy: load per CPU above `SWARM_MAX_LOAD_PER_CPU` (1.5) or free memory below `SWARM_MIN_FREE_MEM_MB` (1500).
 
 ## Decision guide
 
@@ -31,12 +31,12 @@ Rule of thumb: **if a full test suite takes more than about 10 minutes or more t
 ## Ways to offload heavy work
 
 1. **GitHub Actions as the test runner.** The simplest. The worker opens a draft pull request and CI (continuous integration) runs the full suite there. The task only runs the tests for the files it touched.
-2. **Script tasks.** A script task runs a shell command with no model at all, so no tokens are spent watching a suite:
+2. **Script tasks.** The rule: full test suites always run as script tasks, never inside a model session. A script task runs a shell command with no model at all, so no tokens are spent watching a suite, the result is reliable, and it can run in parallel with model work:
    ```bash
    swarmctl enqueue -r YOUR-ORG/app --command "npm ci && npm test" --owner app-bot - <<< "Run the full test suite"
    ```
    The output lands in `artifacts/script.log` on the task, and a nonzero exit marks the task `failed` with outcome `script_failed`. A script task still runs on the worker, so it helps with tokens, not CPU. Point the command at a sandbox to help with CPU too.
-3. **Cloud sandboxes.** Services such as Cloudflare Sandbox, E2B, Modal or Daytona start a fresh container, run a command and give you the output. Use them from a script task command, or tell agents in the project brief to use them for full suites. Never put production secrets in a sandbox.
+3. **Cloud sandboxes (the remote-run pattern).** Services such as Cloudflare Sandbox, E2B, Modal or Daytona start a fresh container, run a command and give you the output. Use them from a script task command, or tell agents in the project brief to use them for full suites. Prove the setup once against CI (same commit, same result) before you trust it, and never edit the project's tests to make them pass in the sandbox. Never put production secrets in a sandbox.
 4. **A second cheap box.** A plain small server that runs only tests, reached over Tailscale.
 
 Write your rule into each project brief ([../templates/project-bot-brief.md](../templates/project-bot-brief.md)), for example "full suite runs in CI, agents run only touched test files".
@@ -57,7 +57,11 @@ Before you resize, look at real use:
 - **Add a second worker.** Best when you want more tasks at once. Several workers can share one backend. On the new box, run the setup script, then:
   1. Stop and disable its own backend: `sudo systemctl disable --now swarm-backend`.
   2. Set `SWARM_URL` in its `/etc/agent-swarm/swarm.env` to the first box's backend address over Tailscale, for example `https://YOUR-WORKER.YOUR-TAILNET.ts.net`.
-  3. Copy the first box's worker token into `/home/agent/.config/swarm/worker.token` (owner `agent`, `chmod 600`). Copy it with `scp` over Tailscale, never through chat.
+  3. Copy the first box's worker token into `/var/lib/swarm-runner/worker.token` (owner `swarm-runner`, `chmod 600`). Copy it with `scp` over Tailscale, never through chat. Never give it to the `agent` user.
   4. Start the worker: `sudo systemctl restart swarm-worker`.
 
   Each worker names itself with `SWARM_WORKER_NAME` (default: its hostname), which shows in `swarmctl status`.
+
+### Resume is pinned to one worker
+
+A task folder and the Claude or Codex session live only on the worker that ran it. So a task that waits for an answer, or ends with `next`, is resumed on the same worker when that worker is still checking in. If that worker is gone (or you moved to a new server and copied only the database), the task starts fresh on another worker with the full brief and every earlier answer, from the branch it pushed or from its saved bundle of unpushed commits. The report says it started fresh. If unpushed work was lost, the task waits with a clear question instead of guessing.

@@ -3,8 +3,15 @@ Description=agent-swarm-kit cleanup of finished task folders (no AI)
 
 [Service]
 Type=oneshot
-User=agent
-Environment=HOME=/home/agent
+# Plans as swarm-runner (task states need the worker token), acts as agent through agent-exec.
+User=swarm-runner
+Group=swarm-runner
+Environment=HOME=/var/lib/swarm-runner
+Environment=SWARM_AGENT_USER=agent
+Environment=SWARM_WORKER_TOKEN_FILE=/var/lib/swarm-runner/worker.token
+Environment=SWARM_RUNNER_DIR=/var/lib/swarm-runner
+Environment=SWARM_HANDOFF_DIR=/srv/agent-swarm
+Environment=SWARM_WORK_DIR=/home/agent/work
 EnvironmentFile=/etc/agent-swarm/swarm.env
-ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/server/swarm_cleanup.py
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/current/server/swarm_cleanup.py
 Nice=10

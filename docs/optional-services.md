@@ -8,7 +8,7 @@ This page lists the outside services the swarm can use, why each one helps, and 
 
 **Why:** the worker clones repos (code repositories), works on a branch named `agent/<task id>`, pushes it, and can open a draft PR (pull request) for you to review. Without GitHub the worker can still do research, writing and script tasks, just not repo work.
 
-**Setup:** log in once as the agent user: `sudo -iu agent gh auth login`. Give that login access only to the repos the swarm should touch. A separate GitHub account for the swarm, added as a collaborator to those repos, keeps its access easy to see and easy to remove.
+**Setup:** log in once as the publisher user, not the agent user: `sudo -u swarm-runner -H gh auth login`, then `sudo -u swarm-runner -H gh auth setup-git`. The AI jobs never get this login; the publisher pushes for them. Prefer a fine-grained GitHub token limited to the repos the swarm works on over a full account login. A separate GitHub account for the swarm, added as a collaborator to those repos, keeps its access easy to see and easy to remove.
 
 **Skip it if:** you have no code.
 
@@ -16,7 +16,7 @@ This page lists the outside services the swarm can use, why each one helps, and 
 
 **What it is:** a private network between your own devices. Your laptop, phone and the worker can talk to each other as if they were in the same room, without opening ports to the internet.
 
-**Why:** it lets you reach the worker over SSH (secure shell, remote login) with public SSH closed, and it lets your bots reach the backend through Tailscale Funnel or Serve. See [backend](backend.md) for the exposure options and their tradeoffs, and [worker setup](worker-setup.md) for the lockdown step.
+**Why:** it lets you reach the worker over SSH (secure shell, remote login) with public SSH closed, and it lets your bots reach the backend. The recommended way: install Tailscale on your bot's computer too (a Grok Bot box is a real Linux machine that can join your tailnet) and use Tailscale Serve, so the backend is never on the public internet. Tailscale Funnel (public) is a second option with warnings. See [worker setup](worker-setup.md) for both, the sample access rules, and the lockdown step.
 
 **Skip it if:** you have no worker. With a worker, treat it as required.
 
@@ -58,19 +58,21 @@ This page lists the outside services the swarm can use, why each one helps, and 
 
 - Check each provider's terms of service. Some limit how subscriptions may be shared or automated. You are responsible for staying within them.
 - It adds a moving part. When it is down, every task fails.
-- Never restart it while tasks are running. A restart drops live model streams and those tasks fail. Its rate-limit cooldown reflects the real provider limit, so restarting does not clear anything.
+- Never restart it while tasks are running. A restart drops live model streams and those tasks fail. Its rate-limit cooldown reflects the real provider limit, so restarting does not clear anything. Use the same pattern as the worker: `sudo swarmctl drain`, wait until `swarmctl status` shows nothing running, restart the proxy, then `sudo swarmctl undrain`.
 
 **Skip it if:** one Claude subscription plus one ChatGPT subscription covers your work. The default setup (plain CLIs, your own logins, Codex as fallback) is enough for most people.
 
-**Setup:** not included in the kit. Follow the project's own instructions, keep it bound to `127.0.0.1` (only reachable from the box itself), and point the CLIs at it through their base URL settings.
+**Setup:** not included in the kit. Follow the project's own instructions, keep it bound to `127.0.0.1` (only reachable from the box itself), and point the CLIs at it through their base URL settings. Tasks run with a clean environment, so put the base URL setting in `/etc/agent-swarm/agent.env` (one `KEY=VALUE` per line, owned by root).
 
 ## Cloudflare
 
 **What it is:** a hosting platform. Its Workers product runs small web services, and D1 is its database.
 
-**Why:** only if you want the backend to live off the worker, so task tracking survives the worker being down. See [backend](backend.md) for that option.
+**Status: design only, not built.** There is no Cloudflare Worker, D1 database setup or deploy file in this kit. Do not plan on it as a setup path today.
 
-**Skip it if:** you are fine with the default, where the backend runs on the worker.
+**Why it might come later:** to keep task tracking working while the worker is down. The design is written up in [backend](backend.md).
+
+**Skip it:** the backend runs on the worker, and that is the only path that ships.
 
 ## Adding a service to a bot
 

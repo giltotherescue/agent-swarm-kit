@@ -12,11 +12,11 @@ This page explains the parts of the swarm and the words the other docs use. Read
 
 **The backend.** A small service that keeps the list of tasks, their questions and answers, reports, artifacts (files a task produced), which bot owns what, and your "Waiting on you" list. By default it runs on the worker server and stores everything in one SQLite database file. See [backend](backend.md).
 
-**The worker.** An always-on server that does the real work. It claims tasks from the backend, runs them with the model CLIs (command line interfaces), and posts results back. See [worker setup](worker-setup.md).
+**The worker.** An always-on server (a rented computer in the cloud) that does the real work. It picks up tasks from the backend, runs them with the model CLIs (command line interfaces), and posts results back. See [worker setup](worker-setup.md).
 
 **Model CLIs.** Claude Code (`claude`) and Codex CLI (`codex`), logged in with your own subscriptions. The worker runs them without a human at the keyboard.
 
-**GitHub.** Where code lives. The worker clones repos (code repositories), works on a branch, and can open a draft PR (pull request, a proposed change someone reviews before it is merged). A human merges.
+**GitHub.** Where code lives. The worker clones repos (code repositories), works on a branch, and can open a draft PR (pull request, a proposed change someone reviews before it is merged). A human merges. The AI itself never holds your GitHub login: the worker pushes for it after checking the rules.
 
 ## Bot or worker?
 
@@ -45,6 +45,8 @@ A task is always in exactly one state:
 | `cancelled` | Someone cancelled it. Final. |
 
 If the worker stops checking in for 10 minutes, the backend puts the task back in the queue. After 5 attempts (the default) it stops retrying and asks the owner.
+
+A task waiting on its owner bot for 12 hours gets one reminder. After 24 hours it is put on the Waiting on you list once, so it is not forgotten.
 
 ## How a run ends
 
@@ -84,21 +86,25 @@ One list of everything that needs you: decisions and deliverables to review. Bot
 
 ## Script tasks
 
-Some work needs no model at all, like running a full test suite. Queue it with `--command`:
+Some work needs no model at all, like running a full test suite. **Full test suites always run as script tasks**, not inside a model session: they cost no tokens, they are reliable, and they can run next to model work. Queue one with `--command`:
 
 ```
 swarmctl enqueue -r you/app --command "npm ci && npm test" --owner app-bot - <<< "Run the full test suite"
 ```
 
-The worker runs the command, saves the output as `artifacts/script.log`, and marks the task `done` (exit code 0) or `failed`. No tokens spent.
+The worker runs the command, saves the output as `artifacts/script.log`, and marks the task `done` (exit code 0) or `failed`. No tokens spent. Script tasks have the same time limit as model runs.
 
 ## Follow-ups and messages
 
 - **Message a running task:** `swarmctl message TASK_ID "Also update the footer"`. The worker writes it to `.task-context/messages.md` within about 30 seconds, and the agent checks that file between steps. A message to a task that waits on its owner is treated as the answer.
 - **Answer a waiting task:** `swarmctl answer TASK_ID "Use the blue logo"`.
-- **Change finished work:** queue a new task with `--parent TASK_ID`, name the branch with `--branch agent/TASK_ID`, and say what to change. A finished task cannot be messaged.
+- **Continue or change earlier work:** `swarmctl enqueue --follow-up TASK_ID brief.md`. The follow-up reuses the earlier task's repo, branch and push or PR settings. If the earlier folder is still on the worker, it picks up the same folder and session; if not, it starts from the pushed branch (or the saved unpushed work) and gets the earlier report as `previous-REPORT.md`. If the earlier task is still waiting on its bot, the follow-up counts as the answer. If it is still queued or running, message it instead. Two follow-ups of the same task run one after the other; the second shows `held behind` the first.
 
 Messages never grant permission to push, merge, deploy or send anything outside.
+
+## Trust model, short version
+
+One trusted owner (you) runs the swarm on a dedicated worker. One task cannot read or change another task. A project bot cannot see or act on another bot's tasks. Tasks never get the worker's long-lived token or your GitHub login. See [secrets](secrets.md).
 
 ## Memory belongs to the owner bot
 

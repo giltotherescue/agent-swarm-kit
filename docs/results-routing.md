@@ -13,8 +13,16 @@ This page explains how a task's result gets back to the bot that asked for it. T
 | Delivery to the owner failed for good | Chief of Staff | `fallback` |
 | Disk alert or other worker alert | Chief of Staff | `alert` |
 | The human answers or drops a Waiting on you item | The bot that filed it | `owner` |
+| A task has waited on its owner bot for 12 hours | The owner bot, once | `owner` (event `reminder`) |
+| A task has waited on its owner bot for 24 hours | Chief of Staff, once, and it goes on Waiting on you | `alert` (event `escalated`) |
+| No runner checked in for 10 minutes, or a task ran far past its time limit | Chief of Staff | `alert` (event `watchdog`) |
 
-An owner cancelling its own task sends no notice. Nothing is sent while a task is queued or running.
+An owner cancelling its own task sends no notice. Nothing is sent while a task is queued or running. The reminder and escalation times are `SWARM_REMIND_HOURS` and `SWARM_ESCALATE_HOURS` in the settings file.
+
+Two fields tell a bot what it is looking at:
+
+- `event` says **what happened**: `task` (a task changed state), `item_answer` or `item_drop` (the human answered or dropped a Waiting on you item), `alert`, `test`, `reminder`, `escalated` or `watchdog`.
+- `reason` says **why this bot got it**: `owner`, `no_owner`, `owner_not_registered`, `waiting_on_human`, `fallback`, `alert` or `test`.
 
 ```mermaid
 flowchart TD
@@ -26,7 +34,7 @@ flowchart TD
     H -- yes --> C3[Also send to Chief of Staff<br/>reason: waiting_on_human]
     H -- no --> D
     P --> D{Delivered?}
-    D -- "2xx" --> OK[Marked sent. Never sent again.]
+    D -- "2xx or 409" --> OK[Marked sent. Never sent again.]
     D -- "network error, 5xx, 408, 429" --> R[Retry: 30s, 60s, 120s ... up to 6 tries]
     R --> D
     D -- "other 4xx, or 6 tries used" --> F[Marked failed, logged on the task]
@@ -39,6 +47,7 @@ The backend makes an HTTP POST (a web request) with a JSON (a common structured 
 
 ```json
 {
+  "event": "task",
   "event_id": "t20260105120000-a1b2c3:done:1",
   "idempotency_key": "t20260105120000-a1b2c3:done:1",
   "reason": "owner",
@@ -65,15 +74,22 @@ Headers sent with every notice:
 - `Idempotency-Key`: the same value as `event_id`
 - `Authorization`: only if the bot registered a trigger key. A bare key is sent as `Bearer <key>`; a value that already has a scheme is sent as is.
 
+Only https trigger URLs on public addresses are accepted. The backend never follows a redirect, so the URL you register must be the final one. See [backend.md](backend.md#protections-built-into-the-backend).
+
 `report_url` is only filled in when `SWARM_PUBLIC_URL` is set in the [settings file](../config/swarm.env.example). Reading it needs the bot's token.
 
-## Never delivered twice
+## Delivered at least once, so receivers skip repeats
+
+Delivery is "at least once": the backend keeps trying until the bot confirms, so in rare cases (a reply lost on the network, a restart at the wrong moment) a bot can get the same notice twice. Your receiver should skip an `event_id` it has already handled.
+
+A receiver can tell the backend "I already have this" in two ways, and both count as delivered with no retry and no fallback to the Chief of Staff:
+
+- answer HTTP 409 (conflict);
+- answer 2xx with a JSON body containing `"duplicate": true`.
 
 Each event has an ID built as `<task id>:<state>:<n>`. The `n` counts how many times that task has entered that state, so a second question on the same task is a new event, but the same question is not.
 
-The backend stores each delivery under the key `<event id>><bot id>` in a table where that key must be unique. Saving the same event for the same bot again does nothing. So a retry, a restart, or a bug that fires twice cannot send a second copy.
-
-Receivers should still keep a short list of `event_id` values they have handled and skip repeats. Networks can deliver a request whose reply got lost.
+The backend stores each delivery under the key `<event id>><bot id>` in a table where that key must be unique. Saving the same event for the same bot again does nothing. So a bug that queues the same event twice cannot send a second copy. Only the network can, as described above.
 
 **Warning: never reuse an idempotency key for different work.** The same rule applies in both directions:
 

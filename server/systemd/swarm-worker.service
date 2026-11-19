@@ -1,19 +1,28 @@
 [Unit]
-Description=agent-swarm-kit worker (claims tasks and runs Claude Code or Codex)
+Description=agent-swarm-kit runner (claims tasks, runs Claude Code or Codex as the agent user, publishes)
 After=network-online.target swarm-backend.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=agent
-Group=agent
-Environment=HOME=/home/agent
-Environment=PATH=/home/agent/.local/bin:/home/agent/bin:/usr/local/bin:/usr/bin:/bin
-Environment=XDG_RUNTIME_DIR=/run/user/%U
+# The runner holds the worker token and the GitHub login. Agents run as the agent user through
+# /usr/local/lib/agent-swarm/agent-exec (one sudoers rule) and never see either.
+User=swarm-runner
+Group=swarm-runner
+Environment=HOME=/var/lib/swarm-runner
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=SWARM_AGENT_USER=agent
+Environment=SWARM_WORKER_TOKEN_FILE=/var/lib/swarm-runner/worker.token
+Environment=SWARM_RUNNER_DIR=/var/lib/swarm-runner
+Environment=SWARM_HANDOFF_DIR=/srv/agent-swarm
+Environment=SWARM_WORK_DIR=/home/agent/work
+Environment=SWARM_REQUIRE_SCOPE=1
+Environment=SWARM_RUN_AGENT=/opt/agent-swarm-kit/current/server/run-agent
 EnvironmentFile=/etc/agent-swarm/swarm.env
-ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/server/swarm_worker.py
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/current/server/swarm_worker.py
 Restart=always
 RestartSec=10
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

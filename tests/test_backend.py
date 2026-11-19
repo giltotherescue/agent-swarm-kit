@@ -40,6 +40,8 @@ class BackendTest(unittest.TestCase):
         os.environ["SWARM_BACKEND_WORKER_TOKEN_FILE"] = os.path.join(cls.tmp, "worker")
         os.environ["SWARM_ALLOW_HTTP_NOTIFY"] = "1"
         os.environ["SWARM_QUIET"] = "1"
+        os.environ["SWARM_BOT_KEYS_DIR"] = os.path.join(cls.tmp, "bot-keys")
+        os.environ["SWARM_AUTH_FAIL_LIMIT"] = "100000"
         cls.srv, cls.api = sb.make_server(os.path.join(cls.tmp, "t.db"), "127.0.0.1:0", "https://swarm.example")
         cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
@@ -53,6 +55,8 @@ class BackendTest(unittest.TestCase):
         cls.web = cls.req("POST", "/bots/web/token")["token"]
         cls.shop = cls.req("POST", "/bots/shop/token")["token"]
         cls.chief = cls.req("POST", "/bots/chief/token")["token"]
+        # 0.2.0: a project bot works only on repos of projects it is bound to.
+        cls.req("PUT", "/projects/site", {"default_repo": "acme/site", "add_repos": ["a/b"], "add_bots": ["web"]})
 
     @classmethod
     def tearDownClass(cls):
@@ -60,9 +64,11 @@ class BackendTest(unittest.TestCase):
         cls.rx.shutdown()
 
     @classmethod
-    def req(cls, method, path, body=None, tok="admin-test-token", expect=200):
-        r = urllib.request.Request(cls.base + path, data=json.dumps(body).encode() if body is not None else None,
-                                   method=method, headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    def req(cls, method, path, body=None, tok="admin-test-token", expect=200, raw=None, headers=None):
+        h = {"Authorization": "Bearer " + tok, "Content-Type": "application/json"}
+        h.update(headers or {})
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        r = urllib.request.Request(cls.base + path, data=data, method=method, headers=h)
         try:
             with urllib.request.urlopen(r) as resp:
                 status, data = resp.status, resp.read()
@@ -74,10 +80,16 @@ class BackendTest(unittest.TestCase):
         except ValueError:
             return data
 
-    def work(self, tid, status, **extra):
+    def claim(self, tid=None):
         claimed = self.req("POST", "/worker/claim", {"worker": "w1"}, tok="worker-test-token")["task"]
-        self.assertEqual(claimed["id"], tid)
-        return self.req("POST", f"/tasks/{tid}/finish", dict(extra, status=status), tok="worker-test-token")["task"]
+        if tid:
+            self.assertEqual(claimed["id"], tid)
+        return claimed
+
+    def work(self, tid, status, **extra):
+        c = self.claim(tid)
+        return self.req("POST", f"/tasks/{tid}/finish", dict(extra, status=status, claim_id=c["claim_id"]),
+                        tok=c["task_token"])["task"]
 
     def deliver(self):
         Receiver.got.clear()
@@ -118,13 +130,14 @@ class BackendTest(unittest.TestCase):
         self.api.notify_task(self.api.s.one("SELECT * FROM tasks WHERE id = ?", tid))
         self.assertEqual(self.deliver(), [])
         self.req("POST", f"/tasks/{tid}/answer", {"answer": "Blue"}, tok=self.web)
-        claimed = self.req("POST", "/worker/claim", {"worker": "w1"}, tok="worker-test-token")["task"]
+        claimed = self.claim(tid)
         self.assertEqual(claimed["pending_answer"], "Blue")
+        tt, cid = claimed["task_token"], claimed["claim_id"]
         self.req("POST", f"/tasks/{tid}/message", {"text": "also the footer"}, tok=self.web)
-        hb = self.req("POST", f"/tasks/{tid}/heartbeat", {}, tok="worker-test-token")
+        hb = self.req("POST", f"/tasks/{tid}/heartbeat", {"claim_id": cid}, tok=tt)
         self.assertEqual([m["text"] for m in hb["messages"]], ["also the footer"])
-        self.req("PUT", f"/tasks/{tid}/files/report/REPORT.md", None, tok="worker-test-token")  # empty body ok
-        self.req("POST", f"/tasks/{tid}/finish", {"status": "done", "summary": "Header fixed"}, tok="worker-test-token")
+        self.req("PUT", f"/tasks/{tid}/files/report/REPORT.md", None, tok=tt, headers={"X-Claim-Id": cid})  # empty body ok
+        self.req("POST", f"/tasks/{tid}/finish", {"status": "done", "summary": "Header fixed", "claim_id": cid}, tok=tt)
         got = self.deliver()
         self.assertEqual([(g[0], g[3]["state"], g[3]["summary"]) for g in got], [("/web", "done", "Header fixed")])
         self.assertTrue(got[0][1].startswith(tid + ":done:"))
@@ -174,7 +187,7 @@ class BackendTest(unittest.TestCase):
 
     def test_reaper_requeues_lost_tasks(self):
         tid = self.req("POST", "/tasks", {"prompt": "will be lost"}, tok=self.web)["task"]["id"]
-        self.req("POST", "/worker/claim", {"worker": "w1"}, tok="worker-test-token")
+        self.claim(tid)
         self.api.s.run("UPDATE tasks SET lease_until = 1 WHERE id = ?", tid)
         self.api.reap()
         t = self.req("GET", f"/tasks/{tid}")["task"]
