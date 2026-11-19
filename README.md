@@ -9,11 +9,11 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 > It follows [SETUP-WITH-GROKBOT.md](SETUP-WITH-GROKBOT.md) and walks you through every step, one
 > plain question at a time.
 
-**Contents:** [How it works](#how-it-works-in-four-pictures) ·
+**Contents:** [What you get](#what-you-get) ·
+[How it works](#how-it-works-in-four-pictures) ·
 [**What you need**](#what-you-need) ·
 [Where to run the worker](#where-to-run-the-worker) ·
 [Set it up with your Grok Bot](#set-it-up-with-your-grok-bot-recommended) ·
-[What you get](#what-you-get) ·
 [Which tool when](#which-tool-when-short-version) ·
 [Set it up by hand](#set-it-up-by-hand) ·
 [Trust model](#trust-model) ·
@@ -21,6 +21,37 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 [Docs](#docs) ·
 [The rules](#the-rules-in-one-breath) ·
 [Version](#version)
+
+## What you get
+
+- **A Chief of Staff bot.** One bot you talk to about everything. It keeps track of what needs you and
+  sends you one short list of decisions each morning.
+- **A project bot for each project.** A business, a website, an app, your marketing. Each one owns its
+  project from end to end and knows its goals, people and limits.
+- **A morning review call.** You can also talk the morning list through out loud.
+  [More below](#the-morning-review-call).
+- **A weekly goals meeting and a daily work heartbeat.** Clear goals each week, a quiet daily check, and
+  a nudge only when something is stuck.
+- **A project log.** Every project, with or without code, keeps a history of what was done, what you
+  decided, and your feedback, so bots learn what you like.
+- **A worker that does the heavy lifting (optional).** A rented server that runs long jobs, code changes,
+  research and anything that needs a strong or specific AI model, while you sleep if you like.
+- **Results that come back to the right bot.** When a job finishes, the bot that asked for it gets the
+  result directly.
+- **One "Waiting on you" list.** Every decision that needs you lands in one place. You can answer, snooze
+  or drop each one. Dropping is fine.
+- **Light rules.** Nothing goes outside, nothing is deleted, and no money is spent without your yes.
+  Everything else just gets done.
+
+### The morning review call
+
+Overnight and through the day, your bots file every open question and action item on the Waiting on
+you list. Each morning the Chief of Staff rolls them all up into one list. If you would rather talk
+than type, start a voice conversation with the Chief of Staff in the Grok Bot app and go through the
+items back and forth, hands free, for example on a drive. You can ask what an item means, push back
+on a recommendation, or say "drop it". When the call ends, the Chief of Staff writes each answer to its
+item on the list (answered, snoozed or dropped), which also logs it as a decision for that project, and
+messages the project bots so they get back to work on it. A worker task that was waiting on one of those answers picks up again on its own.
 
 ## How it works, in four pictures
 
@@ -125,37 +156,6 @@ a mini PC. A Mac mini can't run the kit directly (running Ubuntu in a virtual ma
 The bot never asks you to paste a password or key into chat (it uses Grok Bot's secret request form),
 and it asks before anything that costs money, like renting a server. Plan on about an hour without a
 worker, or an afternoon with one.
-
-## What you get
-
-- **A Chief of Staff bot.** One bot you talk to about everything. It keeps track of what needs you and
-  sends you one short list of decisions each morning.
-- **A project bot for each project.** A business, a website, an app, your marketing. Each one owns its
-  project from end to end and knows its goals, people and limits.
-- **A morning review call.** You can also talk the morning list through out loud.
-  [More below](#the-morning-review-call).
-- **A weekly goals meeting and a daily work heartbeat.** Clear goals each week, a quiet daily check, and
-  a nudge only when something is stuck.
-- **A project log.** Every project, with or without code, keeps a history of what was done, what you
-  decided, and your feedback, so bots learn what you like.
-- **A worker that does the heavy lifting (optional).** A rented server that runs long jobs, code changes,
-  research and anything that needs a strong or specific AI model, while you sleep if you like.
-- **Results that come back to the right bot.** When a job finishes, the bot that asked for it gets the
-  result directly.
-- **One "Waiting on you" list.** Every decision that needs you lands in one place. You can answer, snooze
-  or drop each one. Dropping is fine.
-- **Light rules.** Nothing goes outside, nothing is deleted, and no money is spent without your yes.
-  Everything else just gets done.
-
-### The morning review call
-
-Overnight and through the day, your bots file every open question and action item on the Waiting on
-you list. Each morning the Chief of Staff rolls them all up into one list. If you would rather talk
-than type, start a voice conversation with the Chief of Staff in the Grok Bot app and go through the
-items back and forth, hands free, for example on a drive. You can ask what an item means, push back
-on a recommendation, or say "drop it". When the call ends, the Chief of Staff writes each answer to its
-item on the list (answered, snoozed or dropped), which also logs it as a decision for that project, and
-messages the project bots so they get back to work on it. A worker task that was waiting on one of those answers picks up again on its own.
 
 ## Which tool when (short version)
 
