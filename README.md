@@ -53,6 +53,18 @@ on a recommendation, or say "drop it". When the call ends, the Chief of Staff wr
 item on the list (answered, snoozed or dropped), which also logs it as a decision for that project, and
 messages the project bots so they get back to work on it. A worker task that was waiting on one of those answers picks up again on its own.
 
+### Why one bot per project
+
+There are a few ways to set up Grok Bot. Some people go role-based, with an SEO bot, an ad bot, a
+support bot and so on. Others split further by project and role, and end up with dozens of bots to
+keep track of.
+
+This kit is opinionated: one bot per project. That bot owns the project and manages it, but it
+doesn't do all the work itself. When a piece needs focus, like an SEO push, a round of ad creatives or
+a code change, the project bot hands it to a specialist agent on the worker, picking the right model
+for the job, and gets the result back. The project bot stays on the goals, the decisions and the
+follow-through, the specialists go deep on their one task, and you only talk to a handful of bots.
+
 ## How it works, in four pictures
 
 Orange outlines mark where you act. The longer story is in [docs/how-it-works.md](docs/how-it-works.md).
