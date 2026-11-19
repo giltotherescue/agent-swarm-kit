@@ -5,7 +5,9 @@ For flow charts and states, see [how-it-works-technical.md](how-it-works-technic
 
 ## Who does what
 
-![You talk to your Grok Bots. They hand big jobs to the worker and get the results back.](images/who-does-what.png)
+![Four columns: you, the Chief of Staff, one project bot per project, and the worker that runs Claude Code or Codex.](images/who-does-what.png)
+
+![Who does what, step by step, as swimlanes.](images/who-does-what-steps.png)
 
 You talk to your Grok Bots: a Chief of Staff plus one bot per project. They plan, draft and keep
 track. The worker is a rented server that does the long or hard jobs with Claude or Codex, and
@@ -13,7 +15,9 @@ sends the result back to the bot that asked.
 
 ## A request's journey
 
-![A request goes from you, to a bot that plans it, to the worker that does it, and back to you as a finished result.](images/request-journey.png)
+![You ask, the bot plans, the worker does it, you review a draft pull request.](images/request-journey.png)
+
+![Request journey, step by step, as swimlanes.](images/request-journey-steps.png)
 
 You ask your website bot to refresh the pricing page. The bot writes up the job, the worker does it
 with Claude or Codex, and the result goes straight back to that same bot. The bot checks it and
@@ -22,7 +26,9 @@ or asks you if only you can decide. More in [results-routing.md](results-routing
 
 ## Where decisions land
 
-![Bots drop decisions on one Waiting on you list, you decide, and a weekly goals meeting keeps the bots moving.](images/decisions-and-goals.png)
+![Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line, and a weekly goals meeting sets 1 to 3 goals per project.](images/decisions-and-goals.png)
+
+![Decisions and goals, step by step, as swimlanes.](images/decisions-and-goals-steps.png)
 
 Anything that needs you goes on one "Waiting on you" list, and the Chief of Staff sends it to you as
 one short message each morning. Once a week the Chief of Staff runs a goals meeting: what each
@@ -32,7 +38,9 @@ checks its goals daily and stays quiet unless a goal is at risk. More in
 
 ## Which tool when
 
-![Four cards: Connectors, treg, Worker and Executor.](images/which-tool-when.png)
+![Four routes: the bot itself, Grok Bot connectors, treg, and the worker.](images/which-tool-when.png)
+
+![Which tool when, step by step, as swimlanes.](images/which-tool-when-steps.png)
 
 Grok Bot connectors for your own accounts. treg for paid data without a subscription, and for some
 of your private tools like Search Console and Google Ads. The worker for all coding and anything

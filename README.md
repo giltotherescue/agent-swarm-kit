@@ -24,26 +24,38 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 
 ## How it works, in four pictures
 
-<table>
-<tr>
-<td width="50%"><a href="docs/images/who-does-what.png"><img src="docs/images/who-does-what.png" width="440" alt="You talk to your Grok Bots. They hand big jobs to the worker and get the results back."></a></td>
-<td><b>Who does what.</b> You chat with your Grok Bots: a Chief of Staff and one bot per project. The worker does the long, hard jobs with Claude or Codex and sends results back.</td>
-</tr>
-<tr>
-<td width="50%"><a href="docs/images/request-journey.png"><img src="docs/images/request-journey.png" width="440" alt="A request goes from you, to a bot that plans it, to the worker that does it, and back to you as a finished result."></a></td>
-<td><b>A request's journey.</b> You ask, the bot writes up the job, the worker does it, and the bot checks the result and sends you one message with a link.</td>
-</tr>
-<tr>
-<td width="50%"><a href="docs/images/decisions-and-goals.png"><img src="docs/images/decisions-and-goals.png" width="440" alt="Bots drop decisions on one Waiting on you list, you decide, and a weekly goals meeting keeps the bots moving."></a></td>
-<td><b>Where decisions land.</b> Everything that needs you goes on one "Waiting on you" list, sent each morning. A weekly goals meeting sets one to three goals per project.</td>
-</tr>
-<tr>
-<td width="50%"><a href="docs/images/which-tool-when.png"><img src="docs/images/which-tool-when.png" width="440" alt="Four cards: Connectors, treg, Worker and Executor."></a></td>
-<td><b>Which tool when.</b> Connectors for your accounts, treg for paid data, the worker for coding and long jobs, Executor only later. <a href="#which-tool-when-short-version">Short version below</a>.</td>
-</tr>
-</table>
+Each topic has a short version and a step-by-step version; orange outlines mark the only places you
+act, and [docs/how-it-works.md](docs/how-it-works.md) tells the longer story.
 
-The longer story behind each picture is in [docs/how-it-works.md](docs/how-it-works.md).
+### Who does what
+
+<img src="docs/images/who-does-what.png" width="800" alt="Four columns: you, the Chief of Staff, one project bot per project, and the worker that runs Claude Code or Codex.">
+
+![A normal day in swimlanes: the morning list, your one-line reply, the project bot queues a task, the worker does it, a draft PR, and the result goes straight back to the bot that asked.](docs/images/who-does-what-steps.png)
+
+You talk to your bots; they hand code and long jobs to the worker, and the result comes straight back to the bot that asked.
+
+### A request's journey
+
+<img src="docs/images/request-journey.png" width="800" alt="You ask, the bot plans, the worker does it, you review a draft pull request.">
+
+![A request's journey in swimlanes: ask, brief, queue, claim, work, publish, draft PR, notify, check, merge, with a dashed loop for when the model gets stuck.](docs/images/request-journey-steps.png)
+
+Task states run queued, running, done; the dashed cards only happen when the model stops with a question.
+
+### Where decisions land
+
+<img src="docs/images/decisions-and-goals.png" width="800" alt="Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line, and a weekly goals meeting sets 1 to 3 goals per project.">
+
+![Where decisions land in swimlanes: items are filed during the day, sent as one morning list, answered by you, and routed back to the bot or task that asked; the weekly goals meeting runs once a week.](docs/images/decisions-and-goals-steps.png)
+
+### Which tool when
+
+<img src="docs/images/which-tool-when.png" width="800" alt="Four routes: the bot itself, Grok Bot connectors, treg, and the worker.">
+
+![Which tool when in swimlanes: the bot asks whether it is code or long, then whether it uses your own account, then whether it needs paid data, and otherwise does it itself.](docs/images/which-tool-when-steps.png)
+
+More detail in the [short version below](#which-tool-when-short-version) and [docs/which-tool-when.md](docs/which-tool-when.md).
 
 ## What you need
 

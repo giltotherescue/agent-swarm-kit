@@ -4,7 +4,7 @@ Your bots can get work done in five ways. This page says which one to reach for,
 in doubt: quick things stay with the bot, and anything that is coding or takes a while goes to the
 worker.
 
-![Four cards: Connectors, treg, Worker and Executor.](images/which-tool-when.png)
+![Four routes: the bot itself, Grok Bot connectors, treg, and the worker.](images/which-tool-when.png)
 
 ## The short answer
 

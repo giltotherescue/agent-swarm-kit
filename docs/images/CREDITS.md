@@ -1,14 +1,14 @@
 # Image credits
 
-The four README diagrams (`who-does-what.png`, `request-journey.png`,
-`decisions-and-goals.png`, `which-tool-when.png`) are built by
+The eight README diagrams (`who-does-what`, `request-journey`, `decisions-and-goals` and
+`which-tool-when`, each as `<name>.png` and `<name>-steps.png`) are built by
 [`src/build.py`](src/build.py).
 
 ## Illustration
-All illustration in `src/scenes/` was generated with Codex image generation (`codex-image`) from
-the prompts in `src/prompts/`. That includes the arrows, connectors and empty label tags. The scenes
-contain no words and no logos. The build script only fills the empty tags and sockets with real
-typography and the vector marks below.
+The objects in the illustration strips (`src/strips/`) were generated with Codex image generation
+(`codex-image`) from the prompts in `src/prompts/`. They contain no words and no logos. All text,
+cards, lanes and arrows are drawn by the build script with real type, together with the vector marks
+below.
 
 ## Logos
 Logos are used only to label which part of the system is which. They are rendered in a single
