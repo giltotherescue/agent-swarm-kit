@@ -1,0 +1,5 @@
+A left-to-right process pipeline with four stations along one orange track line with arrowheads between stations; each station has a small empty circular badge above it and one wide empty label tag beneath it.
+Station 1: a phone in a wireframe hand, with one outgoing chat bubble outline.
+Station 2: a hexagonal assistant module beside an isometric job-spec sheet (lines and checkboxes, no writing) with a pen; a small stack of notes.
+Station 3: a detailed isometric server rack with a slender robotic arm, two floating terminal windows with abstract code lines, gears, orange status lights; two small empty square sockets on the rack front (for badges). Above station 3, a small question-mark speech bubble with a thin dashed orange arrow looping back to station 2 (a side loop).
+Station 4: an isometric result card with a large orange check mark and a small chain-link icon, with a long dashed orange return arrow curving back along the bottom of the image to the phone at station 1.
