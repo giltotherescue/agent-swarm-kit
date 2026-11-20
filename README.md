@@ -20,6 +20,7 @@ does the long, heavy jobs for them on the Claude and ChatGPT subscriptions you a
 [What is in the box](#what-is-in-the-box) ·
 [Docs](#docs) ·
 [The rules](#the-rules-in-one-breath) ·
+[Send feedback](#send-feedback) ·
 [Version](#version)
 
 ## What you get
@@ -329,6 +330,13 @@ Bots plan, the worker works. Results go to the bot that owns the task. Nothing g
 deleted, and no money is spent without your yes; another bot's yes does not count. Secrets never go in
 chat. Bots stay quiet unless something changed. Anything for you lands on one list, and dropping an item
 from it is fine.
+
+## Send feedback
+
+If you or your agent (Grok Bot, Claude or Codex) hit a problem, find a bug or a confusing doc, or have an
+idea to make the kit better, email gilhildebrand@mail.grokbot.com. It helps to include the kit version
+(from the [VERSION](VERSION) file), what you were doing, what you expected, what happened, and the exact
+error text. Never include passwords, tokens, API keys or sign-in codes; redact them before you send.
 
 ## Version
 
