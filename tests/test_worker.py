@@ -31,6 +31,9 @@ if grep -q "Here is the answer" "$4"; then
 else
   printf '## Summary\nStatus: blocked\n' > REPORT.md
   printf 'blocked\nWhich color?\n' > AGENT_STATUS
+  if grep -qx 'Activity log: yes' "$4"; then
+    printf '%s\n' '{"kind":"blocked","summary":"Waiting for a color"}' > .task-context/activity-log.json
+  fi
 fi
 """
 
@@ -119,6 +122,19 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(t["state"], "done", t)
         self.assertIn("Painted it Use green", self.admin("GET", f"/tasks/{tid}/report"))
         self.assertEqual(t["artifacts"], ["chart.txt"])
+
+    def test_worker_records_activity_for_an_opted_in_task_once(self):
+        self.admin("PUT", "/projects/fence", {})
+        task = self.admin("POST", "/tasks", {"project": "fence", "owner": "web",
+                                              "prompt": "Paint the fence\nActivity log: yes"})["task"]
+        self.assertEqual(self.run_one()["state"], "waiting")
+        route = "/activity-log?project=fence"
+        entries = self.admin("GET", route)["entries"]
+        self.assertEqual([(entry["bot"], entry["kind"], entry["summary"]) for entry in entries],
+                         [("web", "blocked", "Waiting for a color")])
+        self.admin("POST", f"/tasks/{task['id']}/answer", {"answer": "Use green"})
+        self.assertEqual(self.run_one()["state"], "done")
+        self.assertEqual(self.admin("GET", route)["entries"], entries)
 
     def test_answer_on_another_worker_starts_a_new_session(self):
         tid = self.admin("POST", "/tasks", {"prompt": "Paint the fence", "owner": "web"})["task"]["id"]
@@ -216,6 +232,7 @@ class RepoWorkerTest(WorkerTest):
         return sorted(r.stdout.split()) if r.returncode == 0 else None
 
     test_question_answer_resume = None
+    test_worker_records_activity_for_an_opted_in_task_once = None
     test_answer_on_another_worker_starts_a_new_session = None
     test_script_task = None
 

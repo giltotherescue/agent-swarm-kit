@@ -32,8 +32,9 @@ or asks you if only you can decide. More in [results-routing.md](results-routing
 
 ![Where decisions land in swimlanes: items are filed during the day, sent as one morning list, answered by you, and routed back to the bot or task that asked; the weekly goals meeting runs once a week.](images/decisions-and-goals-steps.png)
 
-Anything that needs you goes on one "Waiting on you" list, and the Chief of Staff sends it to you as
-one short message each morning. Once a week the Chief of Staff runs a goals meeting: what each
+Anything that needs you goes on one "Waiting on you" list. The Chief of Staff sends one short morning
+note for new asks and [delegated calls](delegated-decisions.md) you can overrule. No change means no note.
+Once a week the Chief of Staff runs a goals meeting: what each
 project got done, and one to three clear goals for next week. Between meetings each project bot
 checks its goals daily and stays quiet unless a goal is at risk. More in
 [approvals.md](approvals.md) and [goals-and-heartbeat.md](goals-and-heartbeat.md).

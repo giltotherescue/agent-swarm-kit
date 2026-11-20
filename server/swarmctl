@@ -39,12 +39,16 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
-VERSION = "0.3.1"
+VERSION = "0.6.0"
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DRAIN_FILE = os.environ.get("SWARM_DRAIN_FILE", "/var/lib/swarm-runner/drain")
 STATE_FILE = os.environ.get("SWARM_STATE_FILE", "/var/lib/swarm-runner/runner-state.json")
@@ -204,6 +208,112 @@ def log_query(a):
     if a.days:
         q["since"] = int(time.time() - 86400 * a.days)
     return urllib.parse.urlencode({k: v for k, v in q.items() if v != ""})
+
+
+ACTIVITY_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}/(?:decisions\.md|log/[0-9]{4}-[0-9]{2}\.md)")
+ACTIVITY_BEGIN = b"<!-- activity-log:begin -->"
+ACTIVITY_END = b"<!-- activity-log:end -->"
+
+
+def merge_activity_decisions(current, generated):
+    def markers(text, marker):
+        return list(re.finditer(rb"(?m)^" + re.escape(marker) + rb"(?=\r?$)", text))
+
+    new_start, new_end = markers(generated, ACTIVITY_BEGIN), markers(generated, ACTIVITY_END)
+    if (len(new_start) != 1 or len(new_end) != 1 or new_start[0].start() != 0 or
+            not generated.endswith(ACTIVITY_END + b"\n")):
+        raise ValueError("invalid generated decisions block")
+    starts, ends = markers(current, ACTIVITY_BEGIN), markers(current, ACTIVITY_END)
+    if not starts and not ends:
+        return current + (b"\n\n" if current and not current.endswith(b"\n\n") else b"") + generated
+    if len(starts) != 1 or len(ends) != 1 or starts[0].start() >= ends[0].start():
+        raise ValueError("decisions file must have one ordered pair of activity markers")
+    prior = {line for line in current[starts[0].start():ends[0].end()].splitlines() if line.startswith(b"- ")}
+    if not prior.issubset(generated.splitlines()):
+        raise ValueError("generated decisions are append-only; use a fresh snapshot")
+    return current[:starts[0].start()] + generated[:-1] + current[ends[0].end():]
+
+
+def activity_path(root, relative):
+    if not ACTIVITY_PATH.fullmatch(relative):
+        raise ValueError("invalid activity export path")
+    path = root / relative
+    if any(part.is_symlink() for part in (path, *path.parents) if root in part.parents):
+        raise ValueError("refusing an export path with symlinks")
+    return path
+
+
+def write_activity_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
+        staged = Path(tmp) / path.name
+        staged.write_bytes(data)
+        staged.replace(path)
+
+
+def apply_activity(a):
+    root = Path(a.dir).expanduser().resolve()
+    if not root.is_dir():
+        sys.exit("swarmctl: --dir must name an existing folder")
+    try:
+        payload = json.loads(read_prompt(a.snapshot))
+        snapshots = payload if isinstance(payload, list) else [payload]
+        changes, seen = {}, set()
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("files"), dict):
+                raise ValueError("expected an activity snapshot or a list of snapshots")
+            for relative, text in snapshot["files"].items():
+                path = activity_path(root, relative)
+                if path in seen or not isinstance(text, str):
+                    raise ValueError("each snapshot file must appear once and contain text")
+                seen.add(path)
+                current = path.read_bytes() if path.exists() else b""
+                data = text.encode()
+                if path.name == "decisions.md":
+                    data = merge_activity_decisions(current, data)
+                elif current.startswith(data):
+                    continue  # already has this snapshot (or a newer one)
+                elif not data.startswith(current):
+                    raise ValueError("monthly activity files are append-only; use a fresh snapshot")
+                if current != data:
+                    changes[path] = data
+        for path, data in changes.items():
+            write_activity_file(path, data)
+            print(path.relative_to(root))
+    except (OSError, ValueError) as exc:
+        sys.exit(f"swarmctl: could not apply snapshot: {exc}")
+
+
+def cmd_activity(a):
+    if a.action == "add":
+        body = dict(project=a.project, kind=a.kind, decider=a.decider, summary=a.summary, link=a.link,
+                    dedupe_key=a.key, overrules=a.overrules, lasting=a.lasting)
+        return show(call("POST", "/activity-log", body))
+    if a.action == "list":
+        query = {k: v for k, v in dict(project=a.project, limit=a.limit, kind=a.kind, decider=a.decider).items() if v is not None}
+        result = call("GET", "/activity-log?" + urllib.parse.urlencode(query))
+        if a.json:
+            return show(result)
+        for entry in result["entries"]:
+            print(entry["line"])
+        return
+    if a.action == "published":
+        return show(call("POST", "/activity-log/published", dict(project=a.project, through=a.through)))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}", a.project):
+        sys.exit("swarmctl: project must be a registered project name")
+    if a.nightly:
+        query = urllib.parse.urlencode({k: v for k, v in dict(project=a.project, after=a.after).items() if v is not None})
+        result = call("GET", "/activity-log/snapshot?" + query)
+        if result["files"]:
+            show(result)
+        return
+    if a.after is not None:
+        sys.exit("swarmctl: --after needs --nightly")
+    month = a.month or datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m")
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month):
+        sys.exit("swarmctl: month must be YYYY-MM")
+    query = urllib.parse.urlencode(dict(project=a.project, month=month))
+    sys.stdout.buffer.write(call("GET", "/activity-log/export?" + query, raw=True))
 
 
 def cmd_log(a):
@@ -523,6 +633,32 @@ def main():
     lg.add_argument("--days", type=float, help="only the last N days"); lg.add_argument("--limit")
     lg.add_argument("--out", help="export: write to this file"); lg.add_argument("--dir", help="export: one file per project in this folder")
     lg.add_argument("--json", action="store_true"); lg.set_defaults(fn=cmd_log)
+
+    alog = sub.add_parser("activity-log", help="add, list or export a project's short activity feed")
+    actions = alog.add_subparsers(dest="action", required=True)
+    add = actions.add_parser("add", help="append one line")
+    add.add_argument("project"); add.add_argument("summary")
+    add.add_argument("--kind", required=True, choices=("activity", "shipped", "blocked", "decision"))
+    add.add_argument("--decider", choices=("owner", "delegated", "bot"), help="required for a decision")
+    add.add_argument("--link"); add.add_argument("--key"); add.add_argument("--overrules", type=int)
+    add.add_argument("--lasting", action="store_true", help="include a project-changing decision in the memory snapshot")
+    recent = actions.add_parser("list", help="show recent entries")
+    recent.add_argument("project"); recent.add_argument("--limit", type=int, default=20)
+    recent.add_argument("--kind", choices=("activity", "shipped", "blocked", "decision"))
+    recent.add_argument("--decider", choices=("owner", "delegated", "bot"))
+    recent.add_argument("--json", action="store_true")
+    export = actions.add_parser("export", help="print a month as Markdown, or --nightly changes as JSON")
+    export.add_argument("project")
+    period = export.add_mutually_exclusive_group()
+    period.add_argument("--month"); period.add_argument("--nightly", action="store_true", help="emit changed files as JSON")
+    export.add_argument("--after", type=int, help="nightly: start after this entry ID instead of the saved position")
+    done = actions.add_parser("published", help="save the nightly export position after a verified push")
+    done.add_argument("project"); done.add_argument("through", type=int, help="the snapshot's through ID")
+    alog.set_defaults(fn=cmd_activity)
+    apply = actions.add_parser("apply", help="apply a nightly snapshot offline without replacing manual decisions")
+    apply.add_argument("snapshot", help="snapshot file, or - for stdin")
+    apply.add_argument("--dir", required=True, help="memory repo checkout")
+    apply.set_defaults(fn=apply_activity)
 
     nt = sub.add_parser("notices", help="recent deliveries to bot inboxes (admin or chief)")
     nt.set_defaults(fn=lambda a: show(call("GET", "/notices")))

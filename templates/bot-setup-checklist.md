@@ -53,6 +53,11 @@ Never ask for a secret in chat. The owner puts secrets in the bot's secret stora
         echo "Write REPORT.md that says hello. Status done." | swarmctl enqueue --owner BOT-ID --report-only -
 
     Confirm the result arrives in your inbox.
-11. **[bot]** Write the result of each step in your project brief under "Connectors and apps", then tell
+11. **[bot]** On day one, log a real setup result in your project (the Chief of Staff can use
+    `cross-project`). Without a worker, use a short memory note.
+
+        swarmctl activity-log add PROJECT --kind activity "Verified the results inbox" --key day-one-inbox
+
+12. **[bot]** Write the result of each step in your project brief under "Connectors and apps", then tell
     the owner in one short message: your bot id, that results reach you directly, any step that failed,
     and your one "Never touches" line so the owner can correct it.

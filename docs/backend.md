@@ -29,6 +29,7 @@ A background loop runs every few seconds. It:
 | `items` | The Waiting on you list |
 | `notices` | The delivery outbox. One row per event per bot, with a unique key so nothing is queued twice |
 | `log_entries` | The project log (0.3.0): one append-only, typed history per project: items (status and version), decisions, feedback, learnings, rule changes, activity and results. See [project-log.md](project-log.md) |
+| `activity_log` | Append-only short feed: ID, project, bot, kind, decider, summary, link, overruled ID, lasting flag, dedupe key, and creation time. The nightly export position per project is in `meta` |
 
 Task states: `queued`, `running`, `waiting`, `done`, `failed`, `cancelled`. A waiting task has `waiting_on` set to `owner` (the bot that queued it) or `human`.
 
@@ -90,6 +91,11 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/log` | yes | yes | yes | no | yes | Add a project log entry. Bot: projects it is bound to. Task token: its own task's project |
 | GET | `/log` | yes | yes | yes | no | no | Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only |
 | GET | `/log/export` | yes | yes | yes | no | no | One project's log as a Markdown digest. Bot: its bound projects only |
+| POST | `/activity-log` | yes | yes | yes | no | yes | Append one activity entry. Bot: bound projects only. Task: own project with opt-in |
+| GET | `/activity-log` | yes | yes | yes | no | no | Read recent activity (`project`, `limit`, `bot`, `kind`, `decider`, `since`). Bot: bound projects only |
+| GET | `/activity-log/export` | yes | yes | yes | no | no | Export a Central Time month (`project`, `month`) as Markdown |
+| GET | `/activity-log/snapshot` | yes | yes | yes | no | no | Nightly activity files changed since the last published entry (`project`, `after` overrides it) |
+| POST | `/activity-log/published` | yes | yes | no | no | no | Save the nightly export position (`project`, `through`) after a verified push |
 | GET | `/log/items` | yes | yes | yes | no | no | Current state of each item (deliverable) in a project. Bot: bound projects only |
 | GET | `/log/rules` | yes | yes | yes | no | no | A project's standing rules, rule changes waiting for review, and the changelog (`format=md` for the rules doc) |
 | GET | `/log/brief` | yes | yes | yes | no | no | Read before drafting: standing rules plus the last 14 days of feedback, as Markdown |
@@ -97,10 +103,18 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).
 
+`POST /activity-log` takes `{project, kind, decider?, summary, link?, dedupe_key?, lasting?, overrules?}`.
+`project` is a registered project or `cross-project`. A `decision` needs a `decider` (`owner`, `delegated`
+or `bot`). The same `dedupe_key` from the same bot within 24 hours returns the first entry. The response
+is `{entry, duplicate}`. Listing returns `{entries}`, oldest first, `limit` 1 to 1000 (default 20).
+Snapshot returns `{after, through, files}`; `after` defaults to the saved position from
+`POST /activity-log/published`, and `files` is empty when nothing changed. See the
+[activity and decisions guide](activity-and-decisions.md) for write permissions and export setup.
+
 Rules a project bot meets:
 
 - It can queue repo tasks only for projects that list it (`swarmctl project set NAME --bot BOT_ID`), and only for that project's repos. With no project it can queue only tasks with no repo, like research or writing.
-- `push_main` (pushing straight to the main branch) is refused unless the project has `allow_push_main`.
+- `push_main` (pushing straight to the main branch) is refused unless the project has `allow_push_main` and still lists the target repo.
 - It can have at most `SWARM_MAX_OPEN_TASKS_PER_OWNER` (100) open tasks.
 
 `swarmctl` wraps all of these. Run `swarmctl --help` and `swarmctl SUBCOMMAND --help`.
@@ -156,7 +170,8 @@ Some people want tracking to keep working while the worker is down for maintenan
 **This kit ships the on-worker backend only. The Cloudflare version is a design, not built and not tested.** The design:
 
 1. The same routes, permission table and JSON shapes, so `swarmctl` and bots do not change. Only `SWARM_URL` changes.
-2. D1 uses the same tables as the `SCHEMA` in `swarm_backend.py`.
+2. D1 uses the same tables as `SCHEMA_TABLES` in `swarm_backend.py`, including `activity_log` and its
+   per-project export cursor. Match the five `/activity-log` routes and their roles and response shapes.
 3. A Cron Trigger every minute does what the background loop does.
 4. Files go to R2 (Cloudflare's file storage).
 5. Tokens are Worker secrets, and trigger keys are encrypted secrets, never plain table columns. The runner connects out over https with the worker token, so the worker needs no inbound exposure at all.

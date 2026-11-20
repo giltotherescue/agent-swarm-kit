@@ -10,6 +10,10 @@ This page sets a short, sane default for what bots and workers may do on their o
 
 Everything else: just do it. Research, drafting, planning, coding on a branch, opening a draft PR (pull request), running tests, filing a decision for you. No asking first.
 
+A [delegated decision](delegated-decisions.md) is not permission for any owner-only action. The Chief
+of Staff cannot use it to spend, publish, send outside the swarm, touch production data or secrets,
+change priorities, override `Needs owner`, or merge or deploy beyond an existing grant.
+
 ## How to ask
 
 When a bot needs a yes, it asks one question with its recommended answer, so you can reply "yes" or pick another option. It batches questions instead of dripping them. It also files the ask on the Waiting on you list so it does not get lost in chat:
@@ -28,7 +32,8 @@ Each [project brief](../templates/project-bot-brief.md) has a Permissions sectio
 
 - "May post to the company's own social accounts from the approved content calendar."
 - "May reply to support tickets that match a saved answer."
-- "May push to main on the docs repo." Turn it on for that project with `swarmctl project set docs --allow-push-main`, then queue with `--push-main`. It is off by default and refused for projects that have not opted in.
+- "May push docs to main on the memory repo without a PR." Set up a [dedicated memory project](activity-and-decisions.md#nightly-export-to-the-memory-repo)
+  listing only that repo, enable `--allow-push-main`, and queue with `--push-main`. Keep code repos on draft PRs.
 
 Also write exactly one "Never touches" line: what this bot refuses even if asked (other projects' repos, production data, named secrets). The bot repeats it back to you on day one so you can correct it. Paste that line into worker briefs when the work is near any of it.
 

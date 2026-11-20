@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
 MAX_ARTIFACT = 25 * 1024 * 1024
@@ -221,8 +221,10 @@ def cmd_run(p, task, name, timeout, scope, require_scope, memory, cpu, agent_env
     if not os.path.isdir(wd):
         die("work folder is missing")
     env = clean_env(task, timeout, agent_env)
-    if os.path.lexists(os.path.join(wd, "AGENT_STATUS")):
-        os.remove(os.path.join(wd, "AGENT_STATUS"))  # every launch must write a fresh status
+    for relative in ("AGENT_STATUS", ".task-context/activity-log.json"):
+        path = os.path.join(wd, relative)
+        if os.path.lexists(path):
+            os.remove(path)
     cmd = [timeout_command(env["PATH"]), "--kill-after=30", str(int(timeout))] + command
     if scope:
         if user_systemd(env):
@@ -301,11 +303,12 @@ def cmd_collect(p, task, name):
     make_handoff_dir(out)
     summary = {"files": {}}
     for src, dst in (("REPORT.md", "REPORT.md"), ("AGENT_STATUS", "AGENT_STATUS"), ("PR_DESCRIPTION.md", "PR_DESCRIPTION.md"),
-                     ("CHECKPOINT.md", "CHECKPOINT.md"),
+                     ("CHECKPOINT.md", "CHECKPOINT.md"), (".task-context/activity-log.json", "activity-log.json"),
                      (".task-context/session-claude", "session-claude"), (".task-context/session-codex", "session-codex"),
                      (".task-context/session", "session")):
         path = os.path.join(wd, src)
-        if os.path.lexists(path) and not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= MAX_ARTIFACT:
+        limit = 4096 if dst == "activity-log.json" else MAX_ARTIFACT
+        if os.path.lexists(path) and not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= limit:
             if copy_in(path, os.path.join(out, dst)):
                 summary["files"][dst] = int(os.lstat(path).st_mtime)
     # Artifacts: regular files only, unique flat names, every omission listed.

@@ -64,7 +64,7 @@ flowchart LR
 
     pb -->|"a decision for you"| list
     job -->|"a question only you can answer"| list
-    cos -->|"one message each morning"| you
+    cos -->|"one morning note if there are new asks or delegated calls"| you
     list --> cos
     you -->|"your answer"| cos
     cos -->|"passes it back so work continues"| pb

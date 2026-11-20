@@ -1,5 +1,8 @@
 # Project log
 
+For short shipped, blocked and decision lines, use the separate [activity feed](activity-and-decisions.md).
+This page covers the detailed project log. Its weekly digest is separate from the nightly memory export.
+
 Every project gets a simple history: what was made, who approved it, what you decided, what you said,
 and what the bots learned from it. Projects with code have git history; this gives the same memory to
 projects without a repo, like marketing, sales or a newsletter. It is built into the backend.

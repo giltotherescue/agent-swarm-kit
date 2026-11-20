@@ -108,7 +108,13 @@ One trusted owner (you) runs the swarm on a dedicated worker. One task cannot re
 
 ## Memory belongs to the owner bot
 
-The worker never writes to memory, project briefs or decision logs. It reports "Facts worth keeping" and the owner bot decides what, if anything, to keep in its brief. This keeps one clear owner for every lasting fact.
+Ordinary worker tasks report "Facts worth keeping". The owner bot decides what belongs in its brief.
+Bots can queue a docs-only task to commit straight to `main` in the separate memory repo with the
+owner's grant. Code repos still use draft pull requests. No secrets go in memory.
+
+The database holds the [short activity feed](activity-and-decisions.md). A nightly export copies it
+and lasting decisions into the memory repo. The [Chief of Staff can answer small questions](delegated-decisions.md)
+without granting approval. The owner can overrule those calls.
 
 ## Where to go next
 

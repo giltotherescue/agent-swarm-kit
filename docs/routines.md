@@ -4,7 +4,9 @@ This doc explains the few recurring jobs that keep a swarm healthy without you w
 
 ## The rule for every routine
 
-Every routine has a **pass/fail check** that its own bot runs. A passing run sends no message. You only hear about failures and decisions. Write the check at the same time as the routine, and put both in the project brief ([../templates/project-bot-brief.md](../templates/project-bot-brief.md)).
+Every routine starts with a **cheap check**. Look for a new event or a change since the last run.
+If nothing changed, stop. Send nothing and log nothing. Put the check and the routine in the
+[project brief](../templates/project-bot-brief.md).
 
 A good check is concrete: "the sitemap returns 200 and lists at least 60 pages", not "the site looks fine".
 
@@ -38,10 +40,16 @@ If you make a folder by hand on the worker, put it in `/home/agent/work/scratch/
 | Weekly kit improvement note | Chief of Staff, optional | Weekly | Turns patterns in failures into concrete suggestions |
 | Weekly goals meeting | Chief of Staff | Weekly, a fixed slot | Scores last week, sets 1 to 3 checkable goals per project. See [goals-and-heartbeat.md](goals-and-heartbeat.md) |
 | Daily work heartbeat | Every project bot | Daily | Checks its goals are moving; silent when on track, one Waiting on you item when a goal is at risk |
+| Missed-question sweep | Chief of Staff | Each work heartbeat | Checks open asks and recent questions; delegates or files new asks once |
+| Memory export | Chief of Staff | Nightly | Queues one docs-only task only when the [activity feed changed](activity-and-decisions.md#nightly-export-to-the-memory-repo) |
 
 ### Morning decision batch
 
-The Waiting on you list (`GET /waiting?status=due`) holds every open decision and every task waiting on the human. The Chief of Staff reads it once a day and sends one numbered message. You reply in one line, for example "1 yes, 2 drop, 3 snooze". "Drop" means "don't need it": the bot stops work on that ask and must not file it again. Dropping is guilt-free. That is the point of the list. You can also go through the list by voice with the Chief of Staff in the Grok Bot app; see [the morning review call](how-it-works.md#the-morning-review-call).
+The Chief of Staff checks `GET /waiting?status=due` and the new delegated calls. It sends one message
+for items newly due and calls not yet reported. If neither changed, it sends nothing. Reply in one
+line, for example "1 yes, 2 drop, 3 snooze" or "overrule #ENTRY-ID: use the full checklist". Dropping
+stops work on that ask and the bot must not file it again. See the [morning review call](how-it-works.md#the-morning-review-call)
+and [delegation note format](delegated-decisions.md#answer-log-tell-the-owner).
 
 ### Weekly goals meeting and daily work heartbeat
 
@@ -49,7 +57,7 @@ The goals meeting gives every project one to three goals a week, each with a "Do
 confirmed. The work heartbeat is each project bot checking those goals once a day. It is not the
 worker's machine heartbeat (a plain network check-in every 30 seconds while a task runs, which uses no
 model and no tokens, with the task put back in the queue after 10 minutes of silence). Both are explained in [goals-and-heartbeat.md](goals-and-heartbeat.md).
-The project log ([project-log.md](project-log.md)) is what they both read.
+Both read the [project log](project-log.md) and use the [activity feed](activity-and-decisions.md) for new decisions.
 
 ### Nightly memory cleanup
 

@@ -7,7 +7,7 @@ goals and stays quiet unless something is stuck.
 ![Bots file decisions on one Waiting on you list, the Chief of Staff sends one morning message, you reply in one line or talk it through on a voice call, and a weekly goals meeting sets 1 to 3 goals per project.](images/decisions-and-goals.png)
 
 The copy-paste prompts are in [../templates/routine-prompts.md](../templates/routine-prompts.md)
-(prompts 6 and 7). The goals file format is in [../templates/goals.md](../templates/goals.md).
+(goals and heartbeat prompts). The goals file format is in [../templates/goals.md](../templates/goals.md).
 
 ## Two different heartbeats
 
@@ -46,8 +46,8 @@ you about 10 minutes, and most of that is reading.
 4. **You confirm.** You get one message with all projects. You reply "yes", or change a goal in plain
    words ("drop the TikTok one, add a pricing test"). Your reply is the only approval that counts.
 5. **Write it down.** The Chief of Staff writes the confirmed goals into the goals file, sends each
-   project bot its own goals, and adds one `decision` entry per project to the project log, so the
-   history shows what was agreed and when.
+   project bot its own goals, and adds one owner decision (`--kind decision --decider owner`) per project to the activity feed.
+   Mark a goal change lasting. Keep the detailed decision in the project log too.
 
 ### What makes a good goal
 
@@ -92,13 +92,13 @@ little each day, so keep it tight.
 
 ### What the bot checks
 
-1. **Is each goal moving?** Look at the project log and task results since yesterday. Something
+1. **Cheap check first.** Look only at recent task and project log changes. If nothing changed and
+   no goal check is due, stop. Send nothing and log nothing.
+2. **Is each goal moving?** Look at the project log and task results since yesterday. Something
    happened toward the goal, or work is queued or running for it.
-2. **What is blocked?** A task waiting on an answer, a missing login, a failed task.
-3. **What did I decide?** Any choice it made on its own yesterday that the human might care about
-   gets one `decision` entry in the project log (for example "used the blue banner, the red one
-   failed contrast checks").
-4. **Read the brief** (`swarmctl log brief PROJECT`: the standing rules plus the last 14 days of
+3. **What is blocked?** A task waiting on an answer, a missing login, a failed task.
+4. **What did I decide?** Log each new bot choice once as a decision (`--decider bot`) in the activity feed.
+5. **Read the brief** (`swarmctl log brief PROJECT`: the standing rules plus the last 14 days of
    feedback) before planning new work, so the same note never has to be given twice.
 
 ### What the bot does next
@@ -112,6 +112,26 @@ little each day, so keep it tight.
 
 So on a normal day you hear nothing at all, and on a bad day you get one clear decision in the morning
 list.
+
+## Chief of Staff heartbeat: missed questions
+
+On each heartbeat, first read the open Waiting on you items and check project bot chats for unanswered
+questions newer than the last sweep. Use chat IDs or timestamps with message IDs. If neither check
+finds a change, stop without a message or a log entry.
+
+Skip questions already answered, delegated, listed or dropped. Answer new small questions under the
+[delegation rule](delegated-decisions.md). Tell the project bot, log a delegated decision, and put the
+call in the next morning note once. File the rest once on Waiting on you with a stable question key
+and a recommendation. Save the sweep position after handling what you found, so a retry can pick up
+missed work. If chat search is not available, check only new unread threads or ask project bots to
+route questions to your inbox. Do not claim you checked a source you could not read.
+
+## Nightly activity export
+
+Check the backend's activity feed since the last published entry ID per project. If there is nothing
+new, queue nothing and send nothing. Otherwise queue one docs-only task to update the monthly feed and
+the generated block in `decisions.md` in the memory repo. Follow the
+[nightly export steps](activity-and-decisions.md#nightly-export-to-the-memory-repo). Do not log the export.
 
 ## Where goals live
 

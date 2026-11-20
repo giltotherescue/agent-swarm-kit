@@ -12,8 +12,8 @@ the owner (the Chief of Staff sends them; see templates/goals.md). Below them, i
 what the owner wants in the next few months.
 
 Daily work heartbeat (prompt 7 in templates/routine-prompts.md): once a day, check each goal is moving.
-On track or fixable: keep working and send nothing. At risk or needs a decision: file one Waiting on you
-item with a recommendation.
+On track or fixable: keep working and send nothing. Send small questions to the Chief of Staff. File
+one Waiting on you item with a recommendation for anything the owner must decide.
 
 ## People and roles
 Who is involved, what they own, how to reach them. Include other bots that touch this project.
@@ -58,17 +58,27 @@ There is exactly one "Never touches" line. On day one the bot repeats it back to
 message ("I will never touch: ...") so the owner can correct it.
 
 ## Routines and their checks
-Each recurring job: when it runs, what it does, and its pass/fail check. A passing run sends no message.
+Each recurring job: when it runs and its cheap first check. No change means no message or log entry.
 
-## Memory, decisions and the project log
-This project's history lives in the project log (docs/project-log.md): `swarmctl log list PROJECT`.
-Log each deliverable as an `item` with its status and version, choices as `decision` (with `by` and the
-answer), the owner's comments as `feedback` (with `by`), and work done as `activity`. Feedback becomes a
-pending learning; propose a `rule` from a lasting one and let the owner approve it. Task results and the
-owner's answers are logged automatically.
+## Docs, memory and logging
+Memory repo and project folder: ORG/MEMORY-REPO, PROJECT/. Queue docs-only updates with `--push-main`
+on the dedicated memory project. Keep code in draft PRs. No secrets or personal data.
+
+Log a real change: `swarmctl activity-log add PROJECT --kind KIND "SUMMARY" --key EVENT-ID`.
+Use `activity`, `shipped`, `blocked`, or `decision --decider bot`. Send actual owner decisions to the Chief of Staff
+to record. Add `--lasting` for a change in how the project works. No change, no entry.
+Read recent lines: `swarmctl activity-log list PROJECT`.
+Nightly export updates `log/YYYY-MM.md` and the marked block of `decisions.md`. Per date:
+`Owner decided`, `Delegated by Chief of Staff`, `Project bot calls`. Never edit old decisions.
+
+Needs owner (the Chief of Staff must never decide these): LIST PROJECT-SPECIFIC LIMITS.
+Delegation: default / off / EXACT OWNER-APPROVED EXCEPTIONS. See docs/delegated-decisions.md.
+
+The detailed project log still holds items, feedback, learnings and rules. Task results and owner
+answers go there automatically. Use docs/project-log.md.
 **Before drafting new work, read the brief: `swarmctl log brief PROJECT`** (the standing rules plus the
 last 14 days of feedback) and follow it.
-Without a worker, keep the log as a note in memory instead. Where other notes and the task list live:
+Without a worker, use short memory notes instead. Other notes and task list: LOCATION.
 
 ## Open decisions
-Questions waiting on the owner, each with a recommended answer. Also filed on the Waiting on you list.
+Questions waiting on the owner, each with a recommended answer. File each once on Waiting on you.

@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
@@ -692,6 +692,8 @@ class Runner(threading.Thread):
         if code in (124, 137):
             return "failed", dict(extra, outcome="timeout", error=f"the run hit its time limit ({self.timeout} seconds) and was stopped")
         if word == "blocked":
+            if fresh("activity-log.json"):
+                self.record_activity(blocked=True)
             return "waiting", dict(extra, question=detail or "The agent stopped with a question but did not write it down.")
         if word in ("done", "next"):
             if code != 0:
@@ -706,12 +708,27 @@ class Runner(threading.Thread):
                 return "failed", dict(extra, outcome="publish_failed", error=pub["publish_error"])
             if word == "next":
                 return "next", dict(extra, next_step=detail)
+            if fresh("activity-log.json"):
+                self.record_activity()
             if self.task.get("chain") and fresh("CHECKPOINT.md"):
                 cp = safe_read(self.outbox, "CHECKPOINT.md", 200_000)
                 if cp and cp.strip():
                     extra["checkpoint"] = cp.decode(errors="replace")
             return "done", extra
         return "failed", dict(extra, outcome="no_status", error=f"agent exited {code} without a valid AGENT_STATUS")
+
+    def record_activity(self, blocked=False):
+        task = self.task
+        if not task.get("project") or task.get("untrusted") or "Activity log: yes" not in task["prompt"].splitlines():
+            return
+        try:
+            data = safe_read(self.outbox, "activity-log.json", 4096)
+            body = json.loads(data or b"")
+            if not isinstance(body, dict) or blocked and body.get("kind") != "blocked":
+                raise ValueError
+            http("POST", "/activity-log", self.tok, body, timeout=5)
+        except (ValueError, OSError):
+            self.warnings.append("the activity entry was not recorded; ask the task owner bot to check it")
 
     def publish(self, bundle):
         t = self.task

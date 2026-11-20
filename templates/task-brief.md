@@ -26,6 +26,9 @@ Limits:
 
 Deliver: <a draft pull request (--pr) | REPORT.md and artifacts/ only (--report-only)>
 
+Optional for trusted work: add a line `Activity log: yes` to let the task write one real update to
+`.task-context/activity-log.json`. See docs/activity-and-decisions.md for the fields. Do not log a no-op.
+
 ---
 
 Examples:
