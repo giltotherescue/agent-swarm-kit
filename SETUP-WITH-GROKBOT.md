@@ -309,7 +309,13 @@ Send one short message:
 - What still needs them, if anything (filed on the Waiting on you list, not in the message).
 
 Turn your setup note into the "Setup choices" part of the Chief of Staff brief: each decision, the
-date, and why. Then go quiet. From now on you only message them when something changed.
+date, and why.
+
+Also tell them that feedback, problems and ideas for the kit can be emailed to
+gilhildebrand@mail.grokbot.com. If you hit a problem or a confusing step during setup, you may email a short
+note about it there too, with no secrets in it, but only after you tell them what you will send.
+
+Then go quiet. From now on you only message them when something changed.
 
 ---
 

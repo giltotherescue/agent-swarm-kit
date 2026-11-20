@@ -165,3 +165,6 @@ Walk the bot through [../templates/bot-setup-checklist.md](../templates/bot-setu
 - **`stopped smoke test failed`:** nothing was locked down. Read `/var/lib/agent-swarm/firstboot/smoke.out`, fix, then `sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh`.
 - **`lockdown skipped: Tailscale never connected`:** public SSH is still open. Approve the machine (the link is in `/var/lib/agent-swarm/firstboot/tailscale-login-url`), then `sudo bash /opt/agent-swarm-kit/current/scripts/setup-worker.sh --lockdown --yes --admin-user NAME`.
 - **No status file at all:** cloud-init did not start the unit. `systemctl status swarm-firstboot` and `cloud-init status --long`.
+
+If this page does not solve your problem, email gilhildebrand@mail.grokbot.com with the kit version, what
+happened and the exact error text, with any secrets removed.
