@@ -141,4 +141,27 @@ Walk the bot through [../templates/bot-setup-checklist.md](../templates/bot-setu
 ## The model CLIs are logged out
 
 - **Sign:** every task fails fast, and `agent-stderr.log` mentions login or authentication.
-- **Fix:** log in again as the agent user: `sudo -iu agent claude` then `/login`, and `sudo -iu agent codex login --device-auth`. Then requeue the failed tasks.
+- **Fix:** sign in again: `sudo swarmctl login claude` and `sudo swarmctl login codex` (or by hand: `sudo -iu agent claude` then `/login`, and `sudo -iu agent codex login --device-auth`). If `CLAUDE_CODE_OAUTH_TOKEN` is in `/etc/agent-swarm/agent.env` it wins over a saved `/login`, so renew that token with `sudo swarmctl login claude`. The token lasts a year. Then requeue the failed tasks.
+
+## Sign-in
+
+### Codex says the code is wrong, expired or not allowed
+- **Sign:** `sudo swarmctl login codex` printed a link and a code, but the page rejects the code, or says device-code sign-in is not enabled.
+- **Cause:** device-code login is a setting. A personal ChatGPT account turns it on in ChatGPT's security settings. In a workspace, an admin turns it on in the workspace permissions. Without it the code is rejected. Codes also expire after 15 minutes.
+- **Fix:** turn the setting on, then run `sudo swarmctl login codex --cancel` and `sudo swarmctl login codex` for a fresh code. Fallback: sign in on a computer with a browser and copy `~/.codex/auth.json` to the `agent` user's `~/.codex/` on the worker (mode 600).
+
+### `swarmctl login claude` waits for a code
+- **What is expected:** `claude setup-token` prints a link. After you sign in, the browser page shows a code that must go back to the program. Give the code to the bot through the secret request form and it runs `swarmctl login claude --finish` with the code on standard input. A person can do the same by hand: `echo -n THE-CODE | sudo swarmctl login claude --finish`.
+- **"No Claude sign-in is waiting":** the earlier one timed out (20 minutes). Start again with `sudo swarmctl login claude`.
+- **"no token was found in its output":** the sign-in finished but the output had an unexpected shape. Make the token on your own computer with `claude setup-token` and send it through the secret form, then `sudo swarmctl login claude --token-stdin`.
+- **Plan:** `claude setup-token` needs a Pro, Max, Ultra, Team or Enterprise plan.
+- **`claude --bare` ignores the token.** Bare mode reads only `ANTHROPIC_API_KEY` or an `apiKeyHelper`.
+
+### `swarmctl login github` ends with "setup-git failed"
+- **Check:** `sudo -u swarm-runner -H gh auth status`. If it says logged in, run `sudo -u swarm-runner -H gh auth setup-git` yourself.
+
+### First boot (cloud-init) did not finish
+- **Check:** `cat /var/lib/agent-swarm/firstboot/status` and `sudo tail -n 50 /var/log/agent-swarm-firstboot.log`. The last line is `finished` or `stopped REASON`.
+- **`stopped smoke test failed`:** nothing was locked down. Read `/var/lib/agent-swarm/firstboot/smoke.out`, fix, then `sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh`.
+- **`lockdown skipped: Tailscale never connected`:** public SSH is still open. Approve the machine (the link is in `/var/lib/agent-swarm/firstboot/tailscale-login-url`), then `sudo bash /opt/agent-swarm-kit/current/scripts/setup-worker.sh --lockdown --yes --admin-user NAME`.
+- **No status file at all:** cloud-init did not start the unit. `systemctl status swarm-firstboot` and `cloud-init status --long`.

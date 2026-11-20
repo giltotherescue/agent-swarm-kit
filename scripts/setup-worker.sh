@@ -31,6 +31,8 @@
 #   --force-os             run on an Ubuntu version other than 22.04 or 24.04
 #   --harden               only run the SSH and firewall hardening step (public SSH stays open)
 #   --lockdown             only run the lockdown step: SSH reachable over Tailscale only
+#   --yes                  never ask a question (for cloud-init and bots). Skips the "did you test SSH" prompts.
+#                          Lockdown with --yes still refuses unless Tailscale is connected and has an address.
 #
 # Safe to run again: a second run is an upgrade. It never prints a token. Long installer output goes to
 # /var/log/agent-swarm-setup.log; the screen shows the "==>" steps.
@@ -61,6 +63,7 @@ SWAP_GB=4
 MAX_WAIT=3600
 FORCE_OS=0
 ONLY=""
+ASSUME_YES=0
 INCOMPLETE=()
 HARDENED="no"
 # apt and the package locks. A brand new cloud server often installs packages at first boot (cloud-init,
@@ -271,8 +274,9 @@ require_admin() {  # require_admin FLAG : make (if --admin-user) and check the a
   echo "    Admin account: $ADMIN_USER (sudo, SSH key)"
 }
 
-confirm() {  # confirm QUESTION : true only for an exact "yes" (reads stdin, so it also works when piped)
+confirm() {  # confirm QUESTION : true only for an exact "yes" (reads stdin, so it also works when piped); --yes says yes
   local ok=""
+  if (( ASSUME_YES )); then echo "    $1 yes (--yes)"; return 0; fi
   read -r -p "$1 (yes/no) " ok || true
   [[ "$ok" == yes ]]
 }
@@ -370,6 +374,10 @@ lockdown() {
   command -v tailscale >/dev/null \
     || die "Tailscale is not installed. Install it with: sudo bash $0 --tailscale later   (then join, then lock down)"
   tailscale status >/dev/null 2>&1 || die "Tailscale is not connected. Join first: sudo tailscale up --ssh"
+  # With --yes nobody proves SSH works, so at least insist that this machine really has a tailnet address.
+  if (( ASSUME_YES )) && [[ -z "$(tailscale ip -4 2>/dev/null | head -n 1)" ]]; then
+    die "Tailscale has no address for this machine yet, so lockdown with --yes refuses. Wait for it to join, then run again."
+  fi
   cat <<MSG
 Before continuing, prove you can reach this box over Tailscale from another device, as $ADMIN_USER:
   ssh $ADMIN_USER@<this-machine's-tailscale-name>     and then   sudo -v
@@ -522,7 +530,8 @@ parse_args() {
       --force-os) FORCE_OS=1; shift;;
       --harden) ONLY=harden; shift;;
       --lockdown) ONLY=lockdown; shift;;
-      -h|--help) sed -n '2,36p' "$0"; exit 0;;
+      --yes|--non-interactive) ASSUME_YES=1; shift;;
+      -h|--help) sed -n '2,38p' "$0"; exit 0;;
       *) die "unknown option: $1";;
     esac
   done
@@ -663,7 +672,10 @@ EOF
   say "Settings and tokens in $CONF_DIR"
   install -d -m 755 "$CONF_DIR"
   [[ -f "$CONF_DIR/swarm.env" ]] || install -m 644 "$REL/config/swarm.env.example" "$CONF_DIR/swarm.env"
-  [[ -f "$CONF_DIR/agent.env" ]] || install -m 644 /dev/null "$CONF_DIR/agent.env"
+  # agent.env holds extras for tasks (a proxy address, the Claude token from "swarmctl login claude"). Root owns it,
+  # the agent group reads it, nobody else does (0.5.0: it was world-readable before).
+  [[ -f "$CONF_DIR/agent.env" ]] || install -m 640 /dev/null "$CONF_DIR/agent.env"
+  chown root:"$AGENT_USER" "$CONF_DIR/agent.env"; chmod 640 "$CONF_DIR/agent.env"
   install -d -o swarm -g swarm -m 700 "$CONF_DIR/bot-keys"
   make_token() {  # make_token FILE OWNER:GROUP MODE [rotate] ; keeps an existing token unless asked to rotate
     if [[ ! -s "$1" || "${4:-}" == rotate ]]; then
@@ -778,13 +790,12 @@ Security right now:
   - Tailscale: $TS_STATE
 
 Next steps (details in docs/worker-setup.md):
-  1. Log in the model CLIs as the agent user, with your own subscriptions:
-       sudo -iu $AGENT_USER claude        (then type /login)
-       sudo -iu $AGENT_USER codex login --device-auth
-  2. Log in GitHub for the runner (it pushes and opens PRs; agents never get this login).
-     Use a fine-grained token limited to the swarm's repos:
-       sudo -u $RUNNER_USER -H gh auth login
-       sudo -u $RUNNER_USER -H gh auth setup-git
+  1. Sign in the model CLIs and GitHub. Each command starts the sign-in and prints only a link and a code to open in a browser:
+       sudo swarmctl login codex
+       sudo swarmctl login claude        (the browser then shows a code; send it with: swarmctl login claude --finish)
+       sudo swarmctl login github        (the runner's login: it pushes and opens PRs; agents never get it)
+     Details and the by-hand way: docs/worker-setup.md, step 7.
+  2. Codex needs device-code login turned on in ChatGPT Security Settings first (docs/troubleshooting.md).
   3. Start the worker and check everything (on a new box expect 2 WARN: GitHub and Tailscale, until you do them):
        sudo systemctl start swarm-worker
        sudo bash $KIT_ROOT/current/scripts/smoke-test.sh

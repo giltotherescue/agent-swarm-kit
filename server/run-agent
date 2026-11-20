@@ -13,6 +13,10 @@ rm -f "$CTX/session-$PROVIDER"
 OUT="$CTX/agent-output.jsonl"; ERR="$CTX/agent-stderr.log"
 cd "$WORKDIR" || exit 2
 
+# GNU timeout. On a Mac without GNU coreutils first on the PATH it is Homebrew's gtimeout.
+TIMEOUT_BIN=timeout
+command -v timeout >/dev/null 2>&1 || { command -v gtimeout >/dev/null 2>&1 && TIMEOUT_BIN=gtimeout; }
+
 LIMIT_RE='(usage limit|rate limit|rate_limit|too many requests|429|quota exceeded|limit reached|hit your limit)'
 
 case "$PROVIDER" in
@@ -20,7 +24,7 @@ case "$PROVIDER" in
     args=(-p --permission-mode bypassPermissions --output-format stream-json --verbose)
     [[ "$MODEL" != default ]] && args+=(--model "$MODEL")
     [[ -n "$RESUME" ]] && args+=(--resume "$RESUME")
-    timeout --kill-after=30 "$TIMEOUT" claude "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
+    "$TIMEOUT_BIN" --kill-after=30 "$TIMEOUT" claude "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
     code=$?
     sid=$(grep -o '"session_id":"[^"]*"' "$OUT" | head -1 | cut -d'"' -f4)
     ;;
@@ -28,7 +32,7 @@ case "$PROVIDER" in
     args=(exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C "$WORKDIR")
     [[ "$MODEL" != default ]] && args+=(-m "$MODEL")
     if [[ -n "$RESUME" ]]; then args+=(resume "$RESUME" -); else args+=(-); fi
-    timeout --kill-after=30 "$TIMEOUT" codex "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
+    "$TIMEOUT_BIN" --kill-after=30 "$TIMEOUT" codex "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
     code=$?
     sid=$(python3 -I - "$OUT" <<'PY'
 import json

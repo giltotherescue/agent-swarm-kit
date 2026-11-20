@@ -120,21 +120,27 @@ More on each one: [optional services](docs/optional-services.md) and [which tool
 
 ### Where to run the worker
 
-The worker can be a rented cloud server or a computer in your home. Both work the same once set up.
+The worker can be a rented cloud server, a computer in your home, or (new, simpler, less isolated) a spare Mac.
 
-| | ☁️ Cloud server | 🏠 Computer at home |
-| --- | --- | --- |
-| **Always on** | Yes, built for it | Yes, if you turn off sleep (and, on a laptop, sleep when the lid closes) |
-| **Power and internet cuts** | Not your problem | A cut stops the worker. Set it to turn back on after a power cut (a BIOS setting) |
-| **Power bill** | Included in the price | Small for a mini PC, a bit more for an old laptop |
-| **Reaching it from anywhere** | Tailscale | Tailscale, so there is nothing to set up on your router |
-| **Setup** | Click to create, about an hour | Install Ubuntu first, then the same steps |
-| **Cost** | Monthly fee (below) | Free if you already own it, or a one-time purchase |
-| **Best for** | Most people | You have a spare computer, or want no monthly bill |
+| | ☁️ Cloud server | 🏠 Computer at home | 🍎 Spare Mac (optional) |
+| --- | --- | --- | --- |
+| **Always on** | Yes, built for it | Yes, if you turn off sleep (and, on a laptop, sleep when the lid closes) | Yes, if it never sleeps and logs in by itself |
+| **Power and internet cuts** | Not your problem | A cut stops the worker. Set it to turn back on after a power cut (a BIOS setting) | A cut stops it; set it to start up after a power cut |
+| **Power bill** | Included in the price | Small for a mini PC, a bit more for an old laptop | Small for a Mac mini |
+| **Reaching it from anywhere** | Tailscale | Tailscale, so there is nothing to set up on your router | Tailscale |
+| **Setup** | Your bot builds it for you ([cloud-init](docs/cloud-init.md)) | Install Ubuntu first, then the same steps | One script, no `sudo` |
+| **Cost** | Monthly fee (below) | Free if you already own it, or a one-time purchase | Free if you already own it |
+| **Best for** | Most people | You have a spare computer, or want no monthly bill | A spare Mac you keep nothing private on |
 
-**Operating system:** the kit is tested on Ubuntu 24.04. **macOS is not supported today**: the setup
-script stops on anything other than Ubuntu. So for a home worker, put Ubuntu 24.04 on an old laptop or
-a mini PC. A Mac mini can't run the kit directly (running Ubuntu in a virtual machine on it is untested).
+**Operating system.** The Ubuntu path (cloud server or home computer) is the tested, fully isolated one: Ubuntu
+24.04 with separate users for the jobs, the runner and the backend, and limits on each job.
+
+**A spare Mac is an option, with a trade-off.** `scripts/setup-macos.sh` runs a worker as one user with Homebrew
+and launchd, with no `sudo`. The price is isolation: there are **no separate users and no memory or CPU caps**,
+jobs run as you and can read everything you can (including your GitHub login), and the hardening and lockdown
+steps do not apply. Use a Mac that does nothing else, not your everyday laptop. Read
+[docs/macos-worker.md](docs/macos-worker.md), which also says plainly what was tested (on Linux only) and what was not
+(a real Mac). A Mac also works as a second worker next to an Ubuntu one ([multi-worker](docs/multi-worker.md)).
 
 **Cloud servers.** Any provider with Ubuntu works. Start with 4 CPUs and 8 GB of memory
 ([sizing](docs/sizing-and-sandboxes.md)). Prices are from each provider's own pricing page, checked on
@@ -155,7 +161,7 @@ a mini PC. A Mac mini can't run the kit directly (running Ubuntu in a virtual ma
 | --- | --- | --- |
 | An old laptop you no longer use | Free, and its battery rides out short power cuts | Turn off sleep on lid close; older ones can be slow or loud |
 | A new mini PC, like a [Beelink](https://www.bee-link.com) or an Intel NUC | Small, quiet, low power | Pick one with at least 8 GB of memory and 256 GB of disk |
-| A [Mac mini](https://www.apple.com/mac-mini/) | Small, quiet, low power | macOS is not supported (see above); not a good pick today |
+| A [Mac mini](https://www.apple.com/mac-mini/) | Small, quiet, low power | Works with the [Mac installer](docs/macos-worker.md), with less isolation (see above). Fine as a spare, not as your daily Mac |
 
 ## Set it up with your Grok Bot (recommended)
 
@@ -167,7 +173,10 @@ a mini PC. A Mac mini can't run the kit directly (running Ubuntu in a virtual ma
 
 The bot never asks you to paste a password or key into chat (it uses Grok Bot's secret request form),
 and it asks before anything that costs money, like renting a server. Plan on about an hour without a
-worker, or an afternoon with one.
+worker, or a bit longer with one: **with a worker the bot builds the server itself** through your cloud
+provider's API and sets it up over Tailscale. You never open a terminal, SSH in or type `sudo`. You only
+approve things in a browser: a provider token form, the Tailscale approval, and each sign-in (open a link,
+maybe type a code). How it works: [docs/cloud-init.md](docs/cloud-init.md).
 
 ## Which tool when (short version)
 
@@ -196,9 +205,9 @@ to be redone.
 4. Read [docs/grokbot-only.md](docs/grokbot-only.md) for what works, what does not, and how to add a
    worker later.
 
-### Path B: Grok Bot plus a worker (about half a day)
+### Path B: Grok Bot plus a worker, by hand (about half a day)
 
-You will type commands on the server. The CLI (command line interface, a program you run by typing) for
+This is the manual fallback; the guided path above does it for you ([cloud-init](docs/cloud-init.md)). You will type commands on the server. The CLI (command line interface, a program you run by typing) for
 the swarm is called `swarmctl`. A token is a long random password that a bot or program uses to prove who
 it is. Tailscale is a private network that links your own devices, so nothing has to be open to the
 whole internet.
@@ -228,10 +237,9 @@ whole internet.
    everything is in place):
 
    ```bash
-   sudo -iu agent claude            # then /login
-   sudo -iu agent codex login --device-auth
-   sudo -u swarm-runner -H gh auth login
-   sudo -u swarm-runner -H gh auth setup-git
+   sudo swarmctl login codex        # prints a link and a code to open in your browser
+   sudo swarmctl login claude       # prints a link; the browser then shows a code, send it with --finish
+   sudo swarmctl login github       # prints a link and a code (the runner's login)
    sudo systemctl start swarm-worker
    sudo bash scripts/smoke-test.sh
    ```
@@ -250,8 +258,11 @@ whole internet.
 by running setup again, the project log, time limits and chains (with a stand-in for the model), and the
 task and cleanup flow. Version 0.3.1 fixes the five small defects that run found. Not yet tested on a real
 server: joining Tailscale (so the real lockdown, Tailscale Serve and Tailscale SSH), real Claude and Codex
-logins and model tasks, GitHub login and repo pushes, and bot notify delivery. Run
-`scripts/smoke-test.sh` after setup and tell us what fails.
+logins and model tasks, GitHub login and repo pushes, and bot notify delivery. Version 0.5.0 adds the
+cloud-init build, the `swarmctl login` helper and the Mac worker; each has tests with stand-ins, and none has
+been run on a real new server or a real Mac yet (what was and was not tested is listed in
+[cloud-init](docs/cloud-init.md#tested-and-not), [macos-worker](docs/macos-worker.md#tested-and-not) and the
+[changelog](CHANGELOG.md)). Run `scripts/smoke-test.sh` after setup and tell us what fails.
 
 ## Trust model
 
@@ -271,8 +282,8 @@ Details are in [secrets](docs/secrets.md).
 | --- | --- |
 | [docs/](docs/) | How everything works and how to set it up |
 | [templates/](templates/) | Bot instructions, project brief, setup checklist, routine prompts, model routing table, review prompt, task brief |
-| [server/](server/) | The task tracker, the worker, `swarmctl`, cleanup, encrypted bundle sync and `with-secrets`, service files |
-| [scripts/](scripts/) | Setup script for a fresh server, smoke test, backup, disk alert, secret scanner, restart when idle |
+| [server/](server/) | The task tracker, the worker, `swarmctl`, cleanup, encrypted bundle sync and `with-secrets`, service files, the sign-in helper and the Mac launchd wrapper |
+| [scripts/](scripts/) | Setup script for a fresh server, the cloud-init renderer and first-boot script, the Mac installer, smoke test, backup, disk alert, secret scanner, restart when idle |
 | [config/swarm.env.example](config/swarm.env.example) | The one settings file, with placeholders only |
 | [tests/](tests/) | Tests: `python3 -m unittest discover -s tests` |
 
@@ -291,7 +302,9 @@ Start with the concepts, then follow your path.
 - [Project log](docs/project-log.md): items with status and version, decisions, feedback, and a short rules doc per project.
 - [Long-running jobs](docs/long-running-jobs.md): jobs that run for days, as a chain of short cycles.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
-- [Worker server setup](docs/worker-setup.md): any provider, Tailscale, and the security baseline.
+- [Zero-touch server (cloud-init)](docs/cloud-init.md): the bot builds the worker; you only approve in a browser.
+- [Worker server setup](docs/worker-setup.md): the by-hand path: any provider, Tailscale, and the security baseline.
+- [A Mac as a worker](docs/macos-worker.md): optional, simpler, less isolated.
 - [Sizing and sandboxes](docs/sizing-and-sandboxes.md): how big a server, and when to offload tests.
 - [How it works, in four pictures](docs/how-it-works.md): the long version of the README diagrams.
 - [How it works, technical](docs/how-it-works-technical.md): flow charts and states for developers.
@@ -302,7 +315,7 @@ Start with the concepts, then follow your path.
 - [Secrets](docs/secrets.md): set up encrypted bundles, use `with-secrets`, and rotate or recover keys.
 - [Usage and cost](docs/usage-and-cost.md): keep bots quiet and spend low.
 - [Optional services](docs/optional-services.md): GitHub, Tailscale, treg, Executor, email inboxes, the
-  multi-subscription proxy.
+  multi-subscription proxy and its web panel.
 - [Routines](docs/routines.md): morning decisions, nightly memory cleanup, result handling.
 - [First week](docs/first-week.md): one task end to end.
 - [Updating the kit](docs/updating-the-kit.md): pull improvements and send yours back.

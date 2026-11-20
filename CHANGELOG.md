@@ -4,6 +4,30 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.5.0 (2026-11-20)
+
+Setup with nobody typing: the bot builds the server, and every sign-in is "open this link".
+
+- **Bot-built server.** `scripts/render-cloud-init.py` fills in `scripts/cloud-init.yaml` (user data for DigitalOcean, and other providers
+  that take cloud-init). At first boot `scripts/firstboot.sh` runs `setup-worker.sh --yes --admin-user`, joins Tailscale (a one-use key, or a
+  saved login link), prepares encrypted secrets (`scripts/setup-secrets.sh`: SOPS, age, a worker age key and a read-only deploy key, public halves
+  only), starts the worker, runs the smoke test, then closes public SSH once Tailscale is connected (or leaves that to the bot with
+  `--lockdown bot`). `setup-worker.sh` gains `--yes`. New: [docs/cloud-init.md](docs/cloud-init.md). `SETUP-WITH-GROKBOT.md` is rewritten so the bot does the work and the owner only approves things in a browser. The manual path stays in `docs/worker-setup.md`.
+- **Browser-only sign-ins.** `sudo swarmctl login codex|claude|github` starts the sign-in in the background and prints only the link and code.
+  Codex uses `codex login --device-auth` (device-code login must be on in ChatGPT Security Settings). Claude uses `claude setup-token` and saves the
+  one-year token as `CLAUDE_CODE_OAUTH_TOKEN` in `/etc/agent-swarm/agent.env`, never printed (`--bare` ignores it). GitHub uses `gh auth login --web`,
+  then `gh auth setup-git`, for the runner user. `/etc/agent-swarm/agent.env` is now mode 640, root and group `agent` (was 644).
+- **macOS worker (optional).** `scripts/setup-macos.sh`: one user, Homebrew, launchd agents for the runner, a secrets sync every 10 minutes, daily cleanup
+  and optionally the backend. No `sudo`. Less isolated than Ubuntu: no separate users, no per-job limits. The runner reads `vm_stat` for free memory and
+  tasks get Homebrew on their PATH (Linux behavior is unchanged). New: [docs/macos-worker.md](docs/macos-worker.md); `docs/multi-worker.md` has a Mac example.
+- **CLIProxyAPI panel (optional, advanced).** `scripts/setup-cliproxy.sh` installs the proxy on `127.0.0.1` with the management key from a file, and a small gate
+  that lets only the panel and its API through, for `tailscale serve`. Add several Codex and Claude accounts in the browser, with the paste-the-callback step.
+  Never restart the proxy while tasks run: `swarmctl restart-when-idle --also cliproxyapi`.
+- **Tested and not.** Tests use stand-ins for the provider, Tailscale, systemd and launchd. Run for real: the sign-in helper's background flow with a
+  pseudo-terminal, a single-user backend, runner and script task through the Mac launchd wrapper, the real CLIProxyAPI 8.0.79 with the panel in a browser
+  (through the gate). **Not run:** creating a real server, the real first boot, joining Tailscale, automatic lockdown, `tailscale serve`, a real Mac, and a full
+  sign-in with a real Codex, Claude or GitHub account.
+
 ## 0.4.0 (2026-11-20)
 
 - Set up SOPS and age with every worker. Keep separate runtime and admin bundles, back up a recovery key,

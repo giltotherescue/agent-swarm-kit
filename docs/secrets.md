@@ -29,6 +29,7 @@ Mode 600 means only the owner can read and write the file. Mode 640 adds read ac
 | A bot's trigger key (proves a notice came from your backend) | `/etc/agent-swarm/bot-keys/BOT_ID.key` (600, folder 700) | `swarm` only. The database keeps only a short fingerprint |
 | GitHub login | under `/var/lib/swarm-runner` (`gh auth login` as `swarm-runner`) | `swarm-runner` only |
 | Claude Code and Codex logins | under `/home/agent` | the `agent` user |
+| Claude long-lived token (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` in `/etc/agent-swarm/agent.env` (640, owner root, group `agent`) | root and the `agent` group; it is in every task's environment, so tasks can use it. Written by `swarmctl login claude`, never printed |
 | Shared keys for tasks | Encrypted `runtime/` bundles; local `~/.config/swarm-secrets/cache.json` (600) | the `agent` user, so every task. See below |
 
 The [setup script](../scripts/setup-worker.sh) creates the admin and worker tokens this way and never prints them. The [settings file](../config/swarm.env.example) holds paths to token files, never the tokens themselves.
@@ -87,6 +88,10 @@ The full route-by-route table is in [backend.md](backend.md#who-can-call-what), 
    Commit and push only `.sops.yaml` and encrypted bundle files. Use the same command with an `admin/`
    path for an owner-only bundle. Keep the admin token, runner token and bot trigger keys in their
    protected service files; do not put them in a runtime bundle. If you back them up here, use `admin/`.
+   A worker built with [cloud-init](cloud-init.md) already has SOPS, age, its own age key and a read-only deploy key
+   (`scripts/setup-secrets.sh --prepare`); only the public halves are saved, in `/var/lib/agent-swarm/firstboot/`. Add the age public key to
+   `.sops.yaml`, add the deploy key to the secrets repo with write access off, then run `sudo bash scripts/setup-secrets.sh --link SECRETS_REPO_URL`
+   instead of step 5 below.
 5. As `agent` on the worker, clone the secrets repo into `~/.config/swarm-secrets/repo` using a dedicated
    read-only Git credential for that repo. Use one that works without a prompt or a desktop SSH agent,
    since the service does not inherit your login session. Write the

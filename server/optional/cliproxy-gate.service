@@ -1,0 +1,19 @@
+[Unit]
+Description=Gate in front of the CLIProxyAPI panel (panel and management API only)
+After=cliproxyapi.service
+
+[Service]
+Type=simple
+User=cliproxy
+Group=cliproxy
+Environment=GATE_LISTEN=127.0.0.1:8318
+Environment=GATE_UPSTREAM=127.0.0.1:8317
+ExecStart=/usr/bin/python3 -I /opt/cliproxyapi/gate/cliproxy-gate.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
