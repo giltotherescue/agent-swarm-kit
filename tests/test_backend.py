@@ -9,6 +9,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
 import swarm_backend as sb  # noqa: E402
@@ -212,6 +213,37 @@ class BackendTest(unittest.TestCase):
         self.req("POST", "/tasks", {"prompt": "x", "open_pr": True}, tok=self.web, expect=400)
         self.req("POST", "/tasks", {"prompt": "x", "repo": "a/b", "open_pr": True, "untrusted_input": True}, tok=self.web, expect=400)
         self.req("POST", "/tasks", {"prompt": "x", "repo": "a/b", "push": True, "report_only": True}, tok=self.web, expect=400)
+
+    def test_failure_escalation_latches_before_notification_and_skips_resolved(self):
+        failed = {}
+        for label in ("unresolved", "superseded", "dismissed", "related-only"):
+            tid = self.req("POST", "/tasks", {"prompt": f"escalation case {label}"}, tok=self.web)["task"]["id"]
+            self.work(tid, "failed")
+            failed[label] = tid
+        follow = self.req("POST", "/tasks", {"prompt": "Take over", "follow_up": failed["superseded"]}, tok=self.web)["task"]
+        self.work(follow["id"], "done")
+        related = self.req("POST", "/tasks", {"prompt": "Related only", "parent_id": failed["related-only"]}, tok=self.web)["task"]
+        self.work(related["id"], "done")
+        resolved = self.req("POST", f"/tasks/{failed['dismissed']}/cancel", {}, tok=self.web)["task"]
+        self.assertEqual(resolved["state"], "failed")
+        self.assertIsNotNone(resolved["failure_resolved_at"])
+        failure = self.api.alert
+
+        def notify(key, *args, **kwargs):
+            if key == f"task-failed:{failed['unresolved']}":
+                raise RuntimeError("notice unavailable")
+            return failure(key, *args, **kwargs)
+
+        with patch.object(self.api, "alert", side_effect=notify) as alert:
+            self.api.escalate()
+            self.api.escalate()
+        for label in ("unresolved", "related-only", "superseded", "dismissed"):
+            key = f"task-failed:{failed[label]}"
+            self.assertEqual(sum(call.args[0] == key for call in alert.call_args_list),
+                             int(label in ("unresolved", "related-only")))
+        self.assertTrue(self.api.s.one("SELECT 1 FROM notices WHERE event_id = ? AND target = 'chief'",
+                                       f"alert:task-failed:{failed['related-only']}"))
+        self.deliver()
 
     def test_bot_cannot_promote_itself(self):
         self.req("PUT", "/bots/web", {"role": "chief"}, tok=self.web, expect=403)

@@ -3,6 +3,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -68,6 +70,97 @@ class WithSecretsTest(unittest.TestCase):
         self.assertIn("line 1", r.stderr)
         self.assertNotIn("secret-xyz", r.stderr)
         self.assertIn("usage", self.run_ws("real", "true").stderr)
+
+
+@unittest.skipUnless(shutil.which("sops") and shutil.which("age-keygen"), "SOPS and age required")
+class EncryptedSecretsTest(unittest.TestCase):
+    def test_runtime_only_and_atomic_refresh(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            base = home / ".config" / "swarm-secrets"
+            base.mkdir(parents=True, mode=0o700)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("SOPS_")}
+            env.update(HOME=temp, GIT_CONFIG_NOSYSTEM="1")
+
+            def run(*command, data=None, check=True, extra_env=None):
+                return subprocess.run(command, env=dict(env, **(extra_env or {})), input=data,
+                                      capture_output=True, check=check)
+
+            sync = home / "swarm-sync-secrets"
+            sync.symlink_to(Path(SERVER) / "with-secrets")
+            run(sync, "--if-configured")
+            worker_key, owner_key = base / "age.key", home / "owner.key"
+            run("age-keygen", "-o", worker_key)
+            run("age-keygen", "-o", owner_key)
+            worker_public = run("age-keygen", "-y", worker_key).stdout.decode().strip()
+            owner_public = run("age-keygen", "-y", owner_key).stdout.decode().strip()
+            source = home / "source"
+            run("git", "init", "-q", "-b", "main", source)
+            git = ("git", "-C", source)
+            for scope in ("runtime", "admin"):
+                (source / scope).mkdir()
+            sample = os.urandom(16).hex()
+
+            def encrypt(scope, recipient):
+                data = json.dumps({"EXAMPLE_ENV": sample}).encode()
+                return run("sops", "encrypt", "--age", recipient, "--input-type", "json", "--output-type", "json",
+                           "--filename-override", f"{scope}/tools.json", "/dev/stdin", data=data).stdout
+
+            (source / "runtime" / "tools.json").write_bytes(encrypt("runtime", worker_public))
+            admin = encrypt("admin", owner_public)
+            (source / "admin" / "tools.json").write_bytes(admin)
+            run(*git, "add", ".")
+            run(*git, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "encrypted")
+            run("git", "clone", "-q", source, base / "repo")
+            manifest = base / "runtime-bundles"
+            manifest.write_text("tools\n")
+            manifest.chmod(0o600)
+            result = run(sync)
+            self.assertNotIn(sample.encode(), result.stdout + result.stderr)
+            cache = base / "cache.json"
+            self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+            original = cache.read_bytes()
+            wrapper = Path(SERVER) / "with-secrets"
+            self.assertEqual(run(wrapper, "--check", "tools").stdout.strip(), b"tools: EXAMPLE_ENV")
+            self.assertEqual(run(wrapper, "tools", "--", "printenv", "EXAMPLE_ENV").stdout.strip(), sample.encode())
+            self.assertNotEqual(run("sops", "decrypt", "--input-type", "json", "/dev/stdin", data=admin, check=False,
+                                    extra_env={"SOPS_AGE_KEY_FILE": str(worker_key)}).returncode, 0)
+            (source / "runtime" / "tools.json").write_bytes(encrypt("runtime", owner_public))
+            run(*git, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "wrong recipient")
+            result = run(sync, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(sample.encode(), result.stdout + result.stderr)
+            self.assertEqual(cache.read_bytes(), original)
+            manifest.write_text("")
+            run(sync)
+            self.assertNotEqual(run(wrapper, "--check", "tools", check=False).returncode, 0)
+
+
+class CodexVerdictTest(unittest.TestCase):
+    def run_codex(self, event_types, exit_code):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            codex = folder / "codex"
+            codex.write_text('#!/bin/sh\ncat\nexit "$MOCK_EXIT"\n')
+            codex.chmod(0o700)
+            prompt = folder / "prompt"
+            events = [{"type": "thread.started", "thread_id": "test-thread"}]
+            events.extend({"type": kind, "item": {"type": "error"}} for kind in event_types)
+            prompt.write_text("\n".join(map(json.dumps, events)) + "\n")
+            result = subprocess.run([Path(SERVER) / "run-agent", "codex", "default", folder, prompt],
+                                    env=dict(os.environ, PATH=f"{folder}:{os.environ['PATH']}", MOCK_EXIT=str(exit_code)),
+                                    capture_output=True)
+            self.assertEqual((folder / ".task-context" / "session-codex").read_text().strip(), "test-thread")
+            return result.returncode
+
+    def test_completed_turn_overrides_warnings_and_cli_exit(self):
+        self.assertEqual(self.run_codex(["turn.started", "error", "item.completed", "turn.completed"], 1), 0)
+
+    def test_failed_or_incomplete_turn_is_not_success(self):
+        self.assertNotEqual(self.run_codex(["turn.started", "turn.failed"], 0), 0)
+        self.assertNotEqual(self.run_codex(["turn.started", "item.completed"], 0), 0)
+        self.assertNotEqual(self.run_codex(["turn.completed", "error"], 0), 0)
+        self.assertEqual(self.run_codex(["turn.completed"], 124), 124)
 
 
 class CheckSecretsTest(unittest.TestCase):

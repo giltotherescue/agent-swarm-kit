@@ -221,7 +221,8 @@ whole internet.
    15 minutes) until you open the link it prints and approve the server. That is fine if you are at the
    screen. With `--tailscale later` nothing waits; you join afterwards with `sudo tailscale up --ssh`.
    `--no-tailscale` skips Tailscale fully, but then public SSH can never be closed (step 7).
-5. When the script has finished, log in to Claude Code and Codex as the `agent` user (the user that runs
+5. When the script has finished, [set up encrypted secrets](docs/secrets.md#set-up-the-encrypted-repo)
+   even if you only have one worker. Then log in to Claude Code and Codex as the `agent` user (the user that runs
    the AI jobs), and GitHub as the `swarm-runner` user (the user that pushes code; the jobs themselves
    never get your GitHub login). Then start the worker and run the smoke test (a quick check that
    everything is in place):
@@ -270,7 +271,7 @@ Details are in [secrets](docs/secrets.md).
 | --- | --- |
 | [docs/](docs/) | How everything works and how to set it up |
 | [templates/](templates/) | Bot instructions, project brief, setup checklist, routine prompts, model routing table, review prompt, task brief |
-| [server/](server/) | The task tracker, the worker, the `swarmctl` command line, cleanup, the `with-secrets` helper, service files |
+| [server/](server/) | The task tracker, the worker, `swarmctl`, cleanup, encrypted bundle sync and `with-secrets`, service files |
 | [scripts/](scripts/) | Setup script for a fresh server, smoke test, backup, disk alert, secret scanner, restart when idle |
 | [config/swarm.env.example](config/swarm.env.example) | The one settings file, with placeholders only |
 | [tests/](tests/) | Tests: `python3 -m unittest discover -s tests` |
@@ -298,7 +299,7 @@ Start with the concepts, then follow your path.
 - [Results routing](docs/results-routing.md): straight to the owner bot, with a fallback.
 - [Model routing](docs/model-routing.md): which model for which job.
 - [Approvals](docs/approvals.md): a light default you can loosen.
-- [Secrets](docs/secrets.md): the trust model, where keys live, and the `with-secrets` helper.
+- [Secrets](docs/secrets.md): set up encrypted bundles, use `with-secrets`, and rotate or recover keys.
 - [Usage and cost](docs/usage-and-cost.md): keep bots quiet and spend low.
 - [Optional services](docs/optional-services.md): GitHub, Tailscale, treg, Executor, email inboxes, the
   multi-subscription proxy.

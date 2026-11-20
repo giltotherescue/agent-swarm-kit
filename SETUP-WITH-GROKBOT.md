@@ -235,10 +235,14 @@ lines of output (never any secret). In short:
    `sudo -iu agent codex login --device-auth`, and approve in their browser. GitHub: they run
    `sudo -u swarm-runner -H gh auth login`. You never see these codes.
 4. Join Tailscale: `sudo tailscale up --ssh`, then approve the server in the Tailscale page.
-5. Start the worker and check it: `sudo systemctl start swarm-worker`, then
+5. Set up [encrypted secrets](docs/secrets.md#set-up-the-encrypted-repo) with them, even for one worker.
+   Have them make the owner, worker and recovery keys, save the recovery key in their password manager,
+   then sync a runtime bundle and check names with `with-secrets --check tools`. Do not ask for any of
+   the private keys or bundle values; the secret-request-form rules above still apply.
+6. Start the worker and check it: `sudo systemctl start swarm-worker`, then
    `sudo bash scripts/smoke-test.sh`. Expect "0 failed". Up to 2 warnings (GitHub, Tailscale) are normal
    until those are done.
-6. Close public SSH once they can log in over Tailscale: `sudo bash scripts/setup-worker.sh --lockdown`.
+7. Close public SSH once they can log in over Tailscale: `sudo bash scripts/setup-worker.sh --lockdown`.
 
 ## Step 12. Connect each bot to the worker (worker only)
 

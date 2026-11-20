@@ -12,6 +12,10 @@ Each step says who does it:
 
 Never ask for a secret in chat. The owner puts secrets in the bot's secret storage or connector settings.
 
+0. **[owner, server admin]** Before the first worker starts, set up the shared [encrypted secrets repo](../docs/secrets.md#set-up-the-encrypted-repo).
+   Keep the recovery key in the owner's password manager and sync the worker's runtime bundles. This is
+   once per worker, not once per bot. Confirm with `with-secrets --check tools` as `agent`; never ask to
+   see a key value. For bot credentials, keep using the secret-request form.
 1. **[bot]** Pick your bot id. Short, lowercase, no spaces, for example `website-bot`. Write it in your
    project brief.
 2. **[owner, laptop]** Make the bot's inbox: create a webhook-triggered routine in the bot's settings.

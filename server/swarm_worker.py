@@ -34,10 +34,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
+PROJECTS = os.environ.get("SWARM_WORKER_PROJECTS")
 WORK = os.path.expanduser(os.environ.get("SWARM_WORK_DIR", "~/work"))
 HANDOFF = os.path.expanduser(os.environ.get("SWARM_HANDOFF_DIR", "~/.local/share/swarm/handoff"))
 RUNNER_DIR = os.path.expanduser(os.environ.get("SWARM_RUNNER_DIR", "~/.local/share/swarm/runner"))
@@ -268,11 +269,12 @@ def build_prompt(task, mode="start", note=None):
     else:
         publish = "Commit your work on the current branch. Nothing is pushed for this task."
     resumed = mode == "resume"
+    continuation = "Continue the task from where you stopped." if resumed else "Use the earlier context to continue the task."
     if task.get("pending_answer"):
         text = ("You were waiting on a question. Here is the answer:\n\n" + task["pending_answer"] +
-                "\n\nContinue the task from where you stopped.")
+                "\n\n" + continuation)
     elif task.get("outcome") in ("next", "limit", "lost") and task.get("attempts", 1) > 1:
-        text = "Continue this task from where you stopped." + (f" Next step: {task['next_step']}" if task.get("next_step") else "")
+        text = continuation + (f" Next step: {task['next_step']}" if task.get("next_step") else "")
     elif task.get("follow_up") and resumed:
         text = "Follow-up request from the owner. Continue in this folder:\n\n" + task["prompt"]
     elif task.get("follow_up"):
@@ -516,27 +518,32 @@ class Runner(threading.Thread):
 
         # Which folder and which session?
         provider, model, session = t["provider"], t["model"], None
-        resume_wanted = False
-        if t.get("follow_up") and parent.get("workdir") and parent.get("session_provider") in (None, t["provider"]) \
+        resume_wanted = bool(t.get("session_id") or t.get("attempts", 1) > 1 or (parent and not t.get("chain")))
+        worker = t.get("lease_worker") or NAME
+        moved = t.get("workspace_host") not in (None, worker)
+        if t.get("follow_up") and parent.get("workdir") and parent.get("workspace_host") in (None, worker) \
+                and parent.get("session_provider") in (None, t["provider"]) \
                 and self.agent("exists", parent["workdir"], check=False).returncode == 0:
             self.workname = parent["workdir"]
             if not t.get("chain"):  # a chain cycle reuses the folder but starts a fresh session; the checkpoint carries state
                 session = parent.get("session_id")
                 model = parent.get("session_model") or model
-                resume_wanted = True
-        elif t.get("workdir"):
+        elif t.get("workdir") and not moved:
             self.workname = t["workdir"]
             if t.get("session_id"):
                 provider = t.get("session_provider") or provider
                 model = t.get("session_model") or model
                 session = t["session_id"]
-            resume_wanted = bool(t.get("session_id")) or t.get("attempts", 1) > 1
         folder_exists = self.agent("exists", self.workname, check=False).returncode == 0
+        if moved and folder_exists:
+            self.workname = f"{t['id'][:62]}-{self.claim_id}"
+            folder_exists = False
         note = None
-        if resume_wanted and not folder_exists:
+        if not folder_exists:
             session = None
-            note = ("Note from the worker: the saved folder and session from the earlier run are not on this worker any more. "
-                    "You are starting fresh with the full brief and every earlier answer. Say this in REPORT.md under Handoff.")
+        if resume_wanted and not session:
+            note = ("Note from the worker: this run is starting a new model session, not resuming the earlier one. "
+                    "Use the supplied brief and previous context. Say this in REPORT.md under Handoff.")
 
         restore_needed = False
         if t.get("repo") and not folder_exists:
@@ -841,7 +848,10 @@ def main():
         task = None
         try:
             if healthy():
-                task = api("POST", "/worker/claim", {"worker": NAME}).get("task")
+                claim = {"worker": NAME}
+                if PROJECTS is not None:
+                    claim["projects"] = [project.strip() for project in PROJECTS.split(",") if project.strip()]
+                task = api("POST", "/worker/claim", claim).get("task")
             else:
                 api("POST", "/worker/claim", {"worker": NAME, "draining": True})
         except (urllib.error.URLError, OSError, ValueError) as e:

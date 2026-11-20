@@ -30,7 +30,35 @@ case "$PROVIDER" in
     if [[ -n "$RESUME" ]]; then args+=(resume "$RESUME" -); else args+=(-); fi
     timeout --kill-after=30 "$TIMEOUT" codex "${args[@]}" < "$PROMPT" > "$OUT" 2> "$ERR"
     code=$?
-    sid=$(grep -o '"thread_id":"[^"]*"' "$OUT" | head -1 | cut -d'"' -f4)
+    sid=$(python3 -I - "$OUT" <<'PY'
+import json
+import sys
+
+session = ""
+terminal = None
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "thread.started" and isinstance(event.get("thread_id"), str):
+            session = event["thread_id"]
+        elif kind == "turn.started":
+            terminal = None
+        elif kind in ("turn.completed", "turn.failed", "error"):
+            terminal = kind
+print(session)
+sys.exit(0 if terminal == "turn.completed" else 1)
+PY
+    )
+    verdict=$?
+    if [[ $code -ne 124 && $code -ne 137 ]]; then
+      if [[ $verdict -eq 0 ]]; then code=0; elif [[ $code -eq 0 ]]; then code=1; fi
+    fi
     ;;
   *) echo "provider must be claude or codex" >&2; exit 2;;
 esac

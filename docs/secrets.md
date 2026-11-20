@@ -1,6 +1,8 @@
 # Secrets
 
-This page says where keys and tokens live, who can read them, and what to do if one leaks. The short version: secrets live in files with tight permissions, bots refer to them by path, and nobody ever pastes a secret into chat.
+Set up encrypted bundles even with one worker. Keep them in a separate repo, give each machine its own
+key, and keep a recovery key in your password manager. Bots refer to bundles by name. Nobody ever
+pastes a secret into chat.
 
 ## Trust model
 
@@ -27,7 +29,7 @@ Mode 600 means only the owner can read and write the file. Mode 640 adds read ac
 | A bot's trigger key (proves a notice came from your backend) | `/etc/agent-swarm/bot-keys/BOT_ID.key` (600, folder 700) | `swarm` only. The database keeps only a short fingerprint |
 | GitHub login | under `/var/lib/swarm-runner` (`gh auth login` as `swarm-runner`) | `swarm-runner` only |
 | Claude Code and Codex logins | under `/home/agent` | the `agent` user |
-| Shared keys for tasks | `/home/agent/.config/agent-secrets/NAME.env` (600) | the `agent` user, so every task. See below |
+| Shared keys for tasks | Encrypted `runtime/` bundles; local `~/.config/swarm-secrets/cache.json` (600) | the `agent` user, so every task. See below |
 
 The [setup script](../scripts/setup-worker.sh) creates the admin and worker tokens this way and never prints them. The [settings file](../config/swarm.env.example) holds paths to token files, never the tokens themselves.
 
@@ -43,24 +45,99 @@ The [setup script](../scripts/setup-worker.sh) creates the admin and worker toke
 
 The full route-by-route table is in [backend.md](backend.md#who-can-call-what), and a test keeps it in step with the code.
 
-## Shared keys for tasks: with-secrets
+## Set up the encrypted repo
 
-Some tasks need a key that many tasks share, like a text-to-speech or search API key. Do not put it in a brief, a repo or the `agent` user's shell profile. Use `with-secrets`, which loads the key into the environment of **one command only**:
-
-1. As root on the worker, create the file with the key in it:
+1. Install [SOPS](https://getsops.io/) and [age](https://github.com/FiloSottile/age) on your own computer
+   and on the worker. On the worker, put the executables on the service's path (`/usr/local/bin` or `/usr/bin`).
+2. On your own computer, run the commands below. They make a private key and show only its public half.
+   On the worker, run the same commands in a shell started with `sudo -iu agent`. Never copy a machine's
+   private key to another machine. Separately make a recovery identity with `age-keygen -o RECOVERY_FILE`
+   in a private directory outside the repo. Save that private key in your password manager, get its public
+   key with `age-keygen -y RECOVERY_FILE`, then remove the local recovery file. Do not put it on a worker.
 
    ```bash
-   sudo -u agent install -d -m 700 /home/agent/.config/agent-secrets
-   sudo -u agent sh -c 'umask 077; cat > /home/agent/.config/agent-secrets/voice.env'
-   # type or paste:  VOICE_API_KEY=...   then press Ctrl-D
+   umask 077
+   install -d -m 700 ~/.config/swarm-secrets
+   age-keygen -o ~/.config/swarm-secrets/age.key
+   age-keygen -y ~/.config/swarm-secrets/age.key
    ```
 
-2. Check it without showing the value: `sudo -u agent with-secrets --check voice` prints `voice: VOICE_API_KEY`.
-3. In a brief, tell the agent how to use it: "Run the script with `with-secrets voice -- python3 make_audio.py`."
+3. On your computer, make a separate private Git repo. Make `runtime/` for bundles allowed on workers and
+   `admin/` for bundles only you can decrypt. Put this `.sops.yaml` at the repo root. Replace the labels
+   with **public** age recipients, not private keys. Give a bundle its own rule above the scope rule if it
+   needs a narrower set of recipients. SOPS uses the first matching rule.
 
-The file must be a normal file (not a link), owned by `agent`, with mode 600. Otherwise `with-secrets` refuses and says why. It never prints a value, and a missing file is a clear error.
+   ```yaml
+   creation_rules:
+     - path_regex: '^runtime/[^/]+\.json$'
+       age: OWNER_PUBLIC_KEY,RECOVERY_PUBLIC_KEY,WORKER_PUBLIC_KEY
+     - path_regex: '^admin/[^/]+\.json$'
+       age: OWNER_PUBLIC_KEY,RECOVERY_PUBLIC_KEY
+   ```
 
-**Honest limit:** every task runs as `agent`, so every task can run `with-secrets` and read every key in that folder. Only add keys that are fine for any task to use. Prefer restricted keys with spending caps, and rotate them now and then.
+4. From the secrets repo root, make an encrypted `tools` bundle to test setup. It can start empty. This
+   creates only ciphertext on disk. Do not use `>` on an existing bundle; it would truncate it.
+
+   ```bash
+   mkdir -p runtime admin
+   printf '{}\n' | sops encrypt --input-type json --output-type json \
+     --filename-override runtime/tools.json /dev/stdin > runtime/tools.json
+   ```
+
+   Commit and push only `.sops.yaml` and encrypted bundle files. Use the same command with an `admin/`
+   path for an owner-only bundle. Keep the admin token, runner token and bot trigger keys in their
+   protected service files; do not put them in a runtime bundle. If you back them up here, use `admin/`.
+5. As `agent` on the worker, clone the secrets repo into `~/.config/swarm-secrets/repo` using a dedicated
+   read-only Git credential for that repo. Use one that works without a prompt or a desktop SSH agent,
+   since the service does not inherit your login session. Write the
+   runtime bundle names you want on this machine, one per line, then sync:
+
+   ```bash
+   umask 077
+   git clone SECRETS_REPO_URL ~/.config/swarm-secrets/repo
+   printf '%s\n' tools > ~/.config/swarm-secrets/runtime-bundles
+   swarm-sync-secrets
+   with-secrets --check tools
+   ```
+
+The worker service runs the same sync before it starts. A sync pulls with fast-forward only, decrypts
+only the named `runtime/` files, and replaces the private cache only if all of them succeed. An error
+keeps the old cache but stops startup; fix the checkout, Git access, recipient list or bundle before
+starting the service again. Run `sudo -iu agent swarm-sync-secrets` after an edit if you do not want to
+restart the worker. Don't put the cache or machine keys in backups, Git, or a shared folder.
+
+## Add a secret once
+
+On your own computer, set `SOPS_AGE_KEY_FILE` to your private age key **path** and run
+`sops edit runtime/tools.json` from the secrets repo. Use a trusted local editor with backups and swap
+files disabled. Add a JSON property whose name is the environment variable and whose value is a string.
+Save, then commit the encrypted change and push. Sync each worker that uses the bundle. In a brief, say
+“Run it with `with-secrets tools -- COMMAND`.” `with-secrets --check tools` lists names only. The wrapper
+loads values for the command and its children; do not run a command that prints its environment.
+
+**Honest limit:** every task runs as `agent` and can use every secret that the worker key can decrypt,
+even ones you leave out of the cache list. The age recipients, not the cache list or directory name,
+are the access control. Use restricted keys with spending caps and keep admin recipients off workers.
+
+## Add a machine, rotate, or recover
+
+- **Add a machine:** make its own key there. Add its public recipient to the matching runtime rules, not
+  to `admin/`. Run `sops updatekeys PATH` once per affected bundle, commit and push, then set up its
+  read-only checkout and cache list as above.
+- **Rotate a service secret:** replace it at the provider, edit the bundle once, push and sync, verify
+  the consumer works, and revoke the old value. If the old secret leaked, revoke it right away.
+- **Replace a machine key:** add the replacement recipient and test it before removing the old one.
+  On removal, run `sops updatekeys PATH` and then `sops rotate -i PATH` for every affected bundle,
+  commit, push and re-sync. Remove the old machine's Git access and cache. Old Git commits stay
+  readable with an old key, so revoke and replace any service secrets the retired key could read.
+- **Recover:** on a trusted owner computer, restore the password manager's recovery identity to a
+  temporary mode-600 file. Set `SOPS_AGE_KEY_FILE` to that path. Create a new owner key, replace the lost
+  public recipient in the rules, and run `sops updatekeys PATH` on all affected bundles. Test with the
+  new owner key before removing the temporary file. If a key might have leaked, rotate as above.
+
+Upgrading from plain files? Old `with-secrets` calls keep working until you configure `runtime-bundles`.
+Move the values into encrypted bundles with `sops edit`, sync and verify, then remove the old `.env`
+files (and retire any plaintext backups). The wrapper does not fall back to those files after migration.
 
 ## Honest limits
 

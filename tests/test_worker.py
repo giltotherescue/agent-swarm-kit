@@ -20,7 +20,11 @@ cd "$3"
 mkdir -p artifacts .task-context
 echo "sess-123" > .task-context/session
 if grep -q "Here is the answer" "$4"; then
-  [[ "$5" == "sess-123" ]] || { echo "expected resume of sess-123, got '$5'"; exit 3; }
+  if grep -q 'starting a new model session' "$4"; then
+    [[ -z "$5" ]] && grep -q 'Paint the fence' "$4" || exit 3
+  else
+    [[ "$5" == "sess-123" ]] || { echo "expected resume of sess-123, got '$5'"; exit 3; }
+  fi
   printf '## Summary\nStatus: done\n\nPainted it %s.\n' "$(grep -o 'Use [a-z]*' "$4")" > REPORT.md
   echo chart > artifacts/chart.txt
   echo done > AGENT_STATUS
@@ -95,8 +99,8 @@ class WorkerTest(unittest.TestCase):
             data = resp.read()
             return json.loads(data) if resp.headers.get_content_type() == "application/json" else data.decode()
 
-    def run_one(self):
-        task = self.w.api("POST", "/worker/claim", {"worker": "test"})["task"]
+    def run_one(self, worker="test"):
+        task = self.w.api("POST", "/worker/claim", {"worker": worker})["task"]
         sem = threading.BoundedSemaphore(1)
         sem.acquire()
         self.w.Runner(task, sem).run()
@@ -115,6 +119,17 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(t["state"], "done", t)
         self.assertIn("Painted it Use green", self.admin("GET", f"/tasks/{tid}/report"))
         self.assertEqual(t["artifacts"], ["chart.txt"])
+
+    def test_answer_on_another_worker_starts_a_new_session(self):
+        tid = self.admin("POST", "/tasks", {"prompt": "Paint the fence", "owner": "web"})["task"]["id"]
+        original = self.run_one()
+        self.assertEqual(original["state"], "waiting")
+        self.w.api("POST", "/worker/claim", {"worker": "test", "draining": True})
+        self.admin("POST", f"/tasks/{tid}/answer", {"answer": "Use green"})
+        result = self.run_one("second-worker")
+        self.assertEqual(result["state"], "done", result)
+        self.assertEqual(result["workspace_host"], "second-worker")
+        self.assertNotEqual(result["workdir"], original["workdir"])
 
     def test_chain_cycles_hand_on_a_checkpoint_with_a_fresh_session(self):
         chain_agent = os.path.join(self.tmp, "chain-agent")
@@ -200,7 +215,8 @@ class RepoWorkerTest(WorkerTest):
         r = subprocess.run(["git", "-C", self.bare, "ls-tree", "--name-only", branch], capture_output=True, text=True)
         return sorted(r.stdout.split()) if r.returncode == 0 else None
 
-    test_question_answer_resume = None  # inherited setup only; these two run in WorkerTest
+    test_question_answer_resume = None
+    test_answer_on_another_worker_starts_a_new_session = None
     test_script_task = None
 
     def test_push_then_follow_up_resumes_the_parent_folder(self):

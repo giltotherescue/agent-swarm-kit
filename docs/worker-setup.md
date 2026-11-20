@@ -163,6 +163,9 @@ If you logged in GitHub as `agent` before, log it out: `sudo -iu agent gh auth l
 
 ## 7. Start the worker
 
+First [set up encrypted secrets](secrets.md#set-up-the-encrypted-repo) and run the first sync as `agent`.
+Do this even if you only run one worker. Do not paste values into chat or the setup script.
+
 ```bash
 sudo systemctl start swarm-worker
 sudo swarmctl status
@@ -261,6 +264,7 @@ Each line has a command to check it. The smoke test checks most of them for you.
 | The runner can start only `agent-exec` as `agent` | `sudo cat /etc/sudoers.d/swarm-runner` |
 | `agent` cannot read any token | `sudo -u agent cat /var/lib/swarm-runner/worker.token` and `sudo -u agent cat /etc/agent-swarm/admin.token` both fail |
 | `agent` has no GitHub login | `sudo -iu agent gh auth status` says not logged in |
+| Encrypted runtime bundle is available without opening its values | `sudo -iu agent with-secrets --check tools` |
 | Backend runs as its own `swarm` user | `systemctl show -p User swarm-backend` |
 | Automatic security updates | `systemctl is-enabled unattended-upgrades` |
 | Services restart on crash and on reboot | `systemctl is-enabled swarm-backend swarm-worker` and `systemctl show -p Restart swarm-backend` |

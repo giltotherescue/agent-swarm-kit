@@ -4,6 +4,16 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.4.0 (2026-11-20)
+
+- Set up SOPS and age with every worker. Keep separate runtime and admin bundles, back up a recovery key,
+  and sync the selected runtime bundles at worker startup. `with-secrets` loads them for one command.
+- Optional: name extra workers, pin tasks, or give each worker a project allowlist. Expired claims cannot
+  finish or upload results after another worker takes over.
+- Escalate an unresolved failed task once. Dismiss it or queue a follow-up to keep it from escalating.
+- Use Codex turn events to tell a failed run from an item-level warning. Tell the agent when a follow-up
+  or retry starts a new model session instead of resuming one.
+
 ## 0.3.1 (2026-11-18)
 
 Fix release from the fresh-server install test of 0.3.0. **0.3.0 passed a clean install on a fresh

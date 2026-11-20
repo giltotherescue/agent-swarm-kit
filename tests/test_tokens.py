@@ -1,6 +1,7 @@
 """Task-scoped tokens and claim fencing (must-fix 1, Astra 11, 12, 14, CoS 1)."""
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from helpers import ADMIN, WORKER, Backend
 
@@ -108,6 +109,36 @@ class TaskTokenTest(unittest.TestCase):
         self.b.api.reap()
         self.assertEqual(self.b.req("GET", f"/tasks/{tid}")["task"]["state"], "queued")
         self.assert_dead(c)
+
+    def test_reclaimed_task_fences_old_worker_and_has_one_claim_winner(self):
+        tid = self.queue("reclaim race", project="site")
+        old = self.b.claim("old-worker")
+        self.b.api.s.run("UPDATE tasks SET lease_until = 1 WHERE id = ?", tid)
+        self.b.api.reap()
+        self.b.api.s.run("UPDATE tasks SET not_before = 0 WHERE id = ?", tid)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winners = [claim for claim in pool.map(self.b.claim, ("first-worker", "second-worker")) if claim]
+        self.assertEqual(len(winners), 1)
+        self.assertNotEqual(winners[0]["claim_id"], old["claim_id"])
+        self.assert_dead(old)
+        self.assertEqual(self.b.finish(old, "done")[0], 409)
+        self.assertEqual(self.b.finish(winners[0], "done")[0], 200)
+
+    def test_pin_and_allowlist_must_both_match(self):
+        pinned = self.queue("pinned site", project="site", target_worker="build")
+        generic = self.queue("generic store", project="store")
+        def claim(name, projects):
+            return self.b.req("POST", "/worker/claim", {"worker": name, "projects": projects}, tok=WORKER)["task"]
+        self.assertIsNone(claim("build", []))
+        self.assertIsNone(claim("other", ["site"]))
+        self.assertEqual(claim("build", ["store"])["id"], generic)
+        task = claim("build", ["site"])
+        self.assertEqual(task["id"], pinned)
+        self.assertEqual(self.b.finish(task, "done")[0], 200)
+        follow = self.b.req("POST", "/tasks", {"prompt": "continue pinned work", "follow_up": pinned})["task"]
+        self.assertEqual(follow["target_worker"], "build")
+        self.assertIsNone(self.b.claim("other"))
+        self.assertEqual(self.b.claim("build")["id"], follow["id"])
 
     def test_token_dies_when_lease_runs_out_even_before_reap(self):
         tid = self.queue("slow me")
