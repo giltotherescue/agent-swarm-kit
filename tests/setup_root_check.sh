@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Root-only checks for scripts/setup-worker.sh: lockdown refusal on a root-only box, --admin-user, --harden.
+# Root-only checks for scripts/setup-worker.sh: lockdown refusal on a root-only box, --admin-user, --harden,
+# and clearing root's forced password change.
 # Run ONLY in a throwaway Ubuntu container or VM (test_setup_script.py starts it in Docker): it makes users,
 # writes /etc/ssh and replaces tailscale, ufw, sshd, systemctl and apt-get with stubs. It puts all of that back
 # when it exits, pass or fail, and refuses (exit 2, nothing changed) on a box that already has a usable admin.
@@ -31,7 +32,9 @@ for f in "${SAVED_FILES[@]}"; do
   if [[ -e "$f" || -L "$f" ]]; then mkdir -p "$SAVE$(dirname "$f")"; cp -a "$f" "$SAVE$f"; fi
 done
 ALICE_EXISTED=0; id alice >/dev/null 2>&1 && ALICE_EXISTED=1
+ROOT_LASTCHG=$(getent shadow root | cut -d: -f3)   # check 9 changes it; put back with chage
 restore() {
+  if [[ -n "$ROOT_LASTCHG" ]]; then chage -d "$ROOT_LASTCHG" root; else chage -d -1 root; fi 2>/dev/null || true
   for f in "${SAVED_FILES[@]}"; do
     rm -f "$f"
     if [[ -e "$SAVE$f" || -L "$SAVE$f" ]]; then cp -a "$SAVE$f" "$f"; fi
@@ -145,6 +148,16 @@ echo "== 8. --harden with a ready admin but no proof of login (no sudo caller, a
 rc=$(echo no | run --harden)
 [[ "$rc" == 0 ]] || fail "--harden exited $rc"
 [[ -e /etc/ssh/sshd_config.d/00-swarm-hardening.conf ]] && fail "root login was turned off without proof the admin can log in"
+echo "ok"
+
+echo "== 9. Root's forced password change (stock DigitalOcean image) is cleared without setting a password"
+chage -d 0 root || fail "could not mark root's password as must-change"
+pw_before=$(getent shadow root | cut -d: -f2)
+SWARM_SETUP_LIB=1 bash -c 'source "$1"; ASSUME_YES=1; LOG=/dev/null; clear_root_forced_password_change' _ "$SETUP" > /tmp/out 2>&1 \
+  || fail "clear_root_forced_password_change failed"
+[[ "$(getent shadow root | cut -d: -f3)" != 0 ]] || fail "root's password is still marked must-change"
+[[ "$(getent shadow root | cut -d: -f2)" == "$pw_before" ]] || fail "root's password field changed"
+chage -l root | grep -qi 'must be changed' && fail "chage -l root still says the password must be changed"
 echo "ok"
 
 echo "SETUP ROOT CHECK OK"

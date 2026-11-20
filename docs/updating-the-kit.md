@@ -105,6 +105,13 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.6.1
+
+Re-run setup as above. Nothing changes in the database and no setting is required. If you never got SOPS
+on a worker built by cloud-init, run `sudo bash /opt/agent-swarm-kit/current/scripts/setup-secrets.sh --prepare`
+again after the upgrade. To pin work to a worker by name, set `SWARM_WORKER_NAME` as shown in
+`config/swarm.env.example` ([multi-worker.md](multi-worker.md)).
+
 ## Upgrading to 0.6.0
 
 The backend adds the activity table on startup. Existing project log entries stay where they are.

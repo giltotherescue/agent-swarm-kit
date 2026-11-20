@@ -28,6 +28,14 @@ as_agent() {
   if [[ -n "${SECRETS_AS_SELF:-}" ]]; then "$@"; else sudo -u "$AGENT_USER" -H "$@"; fi
 }
 
+# sops_sum_line SUMS NAME: print the checksum line for NAME from the release's checksums file, renamed to "sops"
+# so "sha256sum -c" checks the file we saved. The file has "HASH  NAME" (two spaces, or " *NAME" in binary mode).
+# Before 0.6.1 a sed kept one of those spaces, so sha256sum looked for " sops" and every install failed
+# (install test 5, defect 2). No match prints nothing, and "sha256sum -c" then fails, so nothing is installed.
+sops_sum_line() {
+  awk -v name="$2" '($2 == name || $2 == "*" name) && length($1) == 64 && $1 ~ /^[0-9a-f]+$/ { print $1 "  sops"; exit }' "$1"
+}
+
 install_tools() {
   [[ -n "${SECRETS_SKIP_INSTALL:-}" ]] && return 0
   if ! command -v age-keygen >/dev/null 2>&1; then
@@ -41,7 +49,7 @@ install_tools() {
     tmp=$(mktemp -d); base="https://github.com/getsops/sops/releases/download/v$SOPS_VERSION"
     curl -fsSL -o "$tmp/sops" "$base/sops-v$SOPS_VERSION.linux.$arch" || die "could not download SOPS"
     curl -fsSL -o "$tmp/sums" "$base/sops-v$SOPS_VERSION.checksums.txt" || die "could not download the SOPS checksums"
-    (cd "$tmp" && grep " sops-v$SOPS_VERSION.linux.$arch\$" sums | sed "s/ sops-v.*/  sops/" | sha256sum -c - >/dev/null) \
+    (cd "$tmp" && sops_sum_line sums "sops-v$SOPS_VERSION.linux.$arch" | sha256sum -c - >/dev/null) \
       || die "the SOPS download does not match its published checksum; nothing installed"
     install -m 755 "$tmp/sops" /usr/local/bin/sops
     rm -rf "$tmp"
