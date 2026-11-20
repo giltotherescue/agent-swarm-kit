@@ -4,10 +4,11 @@
 #   swarm-launchd backend   the task backend (only if you chose --with-backend)
 #   swarm-launchd sync      pull and decrypt the runtime secret bundles (every 10 minutes)
 #   swarm-launchd cleanup   remove old finished task folders (daily)
+#   swarm-launchd orchestrator NAME   the supervisor for one orchestrator (docs/orchestrators.md)
 # launchd has no EnvironmentFile, so this loads ~/.config/agent-swarm/swarm.env itself, puts Homebrew and GNU
 # coreutils first on PATH (the runner needs GNU `timeout`), and starts the real program. It never prints a value.
 set -euo pipefail
-role="${1:?role: worker, backend, sync or cleanup}"
+role="${1:?role: worker, backend, sync, cleanup or orchestrator NAME}"
 export HOME="${HOME:-$(cd ~ && pwd)}"
 CONF="${SWARM_MAC_CONF:-$HOME/.config/agent-swarm}"
 KIT="${SWARM_MAC_KIT:-$HOME/.local/share/agent-swarm-kit/current}"
@@ -23,5 +24,6 @@ case "$role" in
   backend) exec "$PY" "$KIT/server/swarm_backend.py";;
   sync) exec "$HOME/.local/bin/swarm-sync-secrets" --if-configured;;
   cleanup) exec "$PY" "$KIT/server/swarm_cleanup.py";;
+  orchestrator) exec "$PY" "$KIT/server/swarm_orchestrator.py" "${2:?orchestrator name}";;
   *) echo "swarm-launchd: unknown role $role" >&2; exit 2;;
 esac

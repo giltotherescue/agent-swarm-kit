@@ -4,6 +4,27 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.7.0 (2026-11-20)
+
+- Add orchestrators: one Claude Code session that stays up for days in tmux on one pinned worker, for the rare
+  product-level agent that cannot be a chain. A chain stays the default ([docs/orchestrators.md](docs/orchestrators.md)).
+- Each orchestrator has its own supervisor (`swarm-orchestrator@NAME` systemd unit, or a launchd agent on a Mac
+  with `setup-macos.sh --orchestrator NAME`), outside the runner: no task slot, and runner restarts, updates and
+  cleanup leave the session alone. A supervisor restart adopts the running session.
+- Heartbeat every 30 seconds with state, pid, tmux session, restart count, last exit and a secret-scanned
+  terminal tail. No heartbeat for 10 minutes: `unreachable`, and the owner bot is told.
+- Crash restarts with backoff (5 seconds doubling to 5 minutes, reset after 10 healthy minutes), resuming the
+  saved Claude session or starting fresh from `CHECKPOINT.md`. 5 crashes in 30 minutes: `crash-loop`, the owner
+  bot is told, and an admin restarts it. Every start, stop, crash and restart is an event.
+- `swarmctl orchestrator list|status|create|set|start|stop|restart|delete|logs|message` and the matching API.
+  Graceful stop sends a wrap-up message first. Messages are typed in one at a time when the agent is idle.
+- Secret bundles by name only, loaded through `with-secrets`; a brief or message that looks like a secret is
+  refused. Optional Agent Relay registration under a fixed name (`SWARM_RELAY_REGISTER_CMD`); its output is
+  never kept. An orchestrator can only be pinned to a worker whose project allowlist takes its project.
+- **Tested and not.** Tests run the real backend, supervisor, agent-exec and tmux with stand-ins for Claude Code,
+  `with-secrets` and Relay. **Not run:** a real Claude session, real Relay, the systemd unit and user scope on a
+  real server, and launchd on a real Mac.
+
 ## 0.6.1 (2026-11-20)
 
 Fixes from the fresh-server install test of 0.6.0 on DigitalOcean Ubuntu 24.04 (install test 5).

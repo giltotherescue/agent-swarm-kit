@@ -18,6 +18,14 @@ Usage (all paths are passed by the runner; sudo removes the caller's environment
   agent-exec --work DIR --handoff DIR cleanup TASK
   agent-exec --work DIR --handoff DIR exists WORKNAME
   agent-exec --work DIR --handoff DIR exec WORKNAME [--agent-env FILE] -- COMMAND ARGS...
+Orchestrators (WORK/orchestrators/NAME, tmux socket and session orch-NAME; see docs/orchestrators.md):
+  agent-exec --work DIR --handoff DIR orch-prepare NAME [--origin URL]
+  agent-exec --work DIR --handoff DIR orch-start NAME [--agent-env FILE] [--secrets A,B] [--with-secrets PATH]
+             [--relay-name X] [--scope] -- COMMAND ARGS...
+  agent-exec --work DIR --handoff DIR orch-status NAME [--lines N] [--sessions-dir DIR]
+  agent-exec --work DIR --handoff DIR orch-send NAME        (types inbox/orch-NAME/message.md, then Enter)
+  agent-exec --work DIR --handoff DIR orch-kill NAME
+  agent-exec --work DIR --handoff DIR orch-relay NAME --relay-name X [--agent-env FILE] -- COMMAND ARGS...
 Output is JSON on stdout for prepare and collect. No secrets are ever printed.
 """
 import json
@@ -31,7 +39,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
 MAX_ARTIFACT = 25 * 1024 * 1024
@@ -408,6 +416,179 @@ def cmd_cleanup(p, task):
     return 0
 
 
+# ---------- orchestrators: one long-lived agent session in tmux per name ----------
+# The folder is WORK/orchestrators/NAME (task cleanup skips it). Each orchestrator has its own tmux server
+# (socket swarm-orch-NAME) and, when the agent has a systemd user manager, its own scope swarm-orch-NAME-*.scope,
+# so neither a runner restart (stop-all only stops swarm-task-*) nor a supervisor restart touches the session.
+ORCH_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+
+
+def orch_name(name):
+    if not ORCH_RE.fullmatch(name or ""):
+        die(f"bad orchestrator name: {name!r}")
+    return name
+
+
+def orch_wd(p, name):
+    return os.path.join(p.work, "orchestrators", orch_name(name))
+
+
+def orch_inbox(p, name):
+    return os.path.join(p.handoff, "inbox", "orch-" + orch_name(name))
+
+
+def tmux(name, *args, env=None, check=False, **kw):
+    r = subprocess.run(["tmux", "-L", f"swarm-orch-{name}"] + list(args), env=env or clean_env(), capture_output=True, text=True, **kw)
+    if check and r.returncode != 0:
+        die(f"tmux {args[0]} failed: {(r.stderr or r.stdout).strip()[-300:]}", 3)
+    return r
+
+
+def orch_alive(name):
+    return tmux(name, "has-session", "-t", f"orch-{name}").returncode == 0
+
+
+def cmd_orch_prepare(p, name, origin):
+    """Make the folder once (cloned from the runner's bundle when there is a repo) and copy in the brief and prompts."""
+    wd, inbox = orch_wd(p, name), orch_inbox(p, name)
+    state = "existing" if os.path.isdir(wd) else "fresh"
+    if state == "fresh":
+        os.makedirs(os.path.dirname(wd), exist_ok=True)
+        bundle = os.path.join(inbox, "repo.bundle")
+        if os.path.isfile(bundle):
+            git(os.path.dirname(wd), "clone", "--quiet", bundle, wd)
+            if origin:
+                git(wd, "remote", "set-url", "origin", origin)
+        else:
+            os.makedirs(wd)
+    ctx = os.path.join(wd, ".orchestrator")
+    os.makedirs(ctx, exist_ok=True)
+    for f in ("brief.md", "start.md", "resume.md", "stop.md"):
+        if os.path.isfile(os.path.join(inbox, f)):
+            dst = os.path.join(ctx, f)
+            if os.path.lexists(dst):
+                os.remove(dst)
+            copy_in(os.path.join(inbox, f), dst)
+    with open(os.path.join(ctx, "tmux.conf"), "w") as fh:
+        # remain-on-exit keeps a finished pane so the supervisor can read the exit status before it cleans up.
+        fh.write("set -g remain-on-exit on\nset -g history-limit 5000\nset -g status off\n")
+    if os.path.isdir(os.path.join(wd, ".git")):
+        exclude = os.path.join(wd, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        have = open(exclude).read() if os.path.exists(exclude) else ""
+        with open(exclude, "a") as fh:
+            for pat in (".orchestrator/", "CHECKPOINT.md", "HANDOVER.md"):
+                if pat not in have.split("\n"):
+                    fh.write(pat + "\n")
+    print(json.dumps({"state": state, "folder": wd}))
+
+
+def orch_env(name, agent_env, relay_name):
+    env = clean_env(agent_env=agent_env)
+    env.update(TERM="xterm-256color", SWARM_ORCHESTRATOR=name)
+    if relay_name:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,63}", relay_name):
+            die("bad relay name")
+        env["SWARM_RELAY_AGENT_NAME"] = relay_name
+    return env
+
+
+def cmd_orch_start(p, name, agent_env, bundles, with_secrets, relay_name, scope, command):
+    wd = orch_wd(p, name)
+    if not os.path.isdir(wd):
+        die("orchestrator folder is missing; run orch-prepare first")
+    if orch_alive(name):
+        die(f"orch-{name} is already running", 4)
+    env = orch_env(name, agent_env, relay_name)
+    names = [b for b in (bundles or "").split(",") if b]
+    if names:
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", b) for b in names):
+            die("bad secret bundle name")
+        ws = with_secrets or shutil.which("with-secrets", path=env["PATH"]) or os.path.join(os.path.dirname(os.path.realpath(__file__)), "with-secrets")
+        # Names only: with-secrets refuses a bundle this worker has not synced (admin bundles never are). Output is dropped.
+        if subprocess.run([ws, "--check"] + names, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            die("a secret bundle is not available on this worker: " + ", ".join(names), 5)
+        command = [ws] + names + ["--"] + command
+    cmd = ["tmux", "-L", f"swarm-orch-{name}", "-f", os.path.join(wd, ".orchestrator", "tmux.conf"),
+           "new-session", "-d", "-s", f"orch-{name}", "-x", "220", "-y", "50", "-c", wd, "--"] + command
+    if scope and user_systemd(env):
+        cmd = ["systemd-run", "--user", "--scope", "--quiet", f"--unit=swarm-orch-{name}-{int(time.time())}",
+               "--slice=swarm-orchestrators.slice"] + cmd
+    r = subprocess.run(cmd, cwd=wd, env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"tmux did not start: {(r.stderr or r.stdout).strip()[-300:]}", 3)
+    pid = tmux(name, "list-panes", "-t", f"orch-{name}", "-F", "#{pane_pid}", env=env).stdout.strip()
+    print(json.dumps({"started": True, "pid": int(pid) if pid.isdigit() else None}))
+
+
+def claude_session(wd, sessions_dir=None):
+    """Claude Code keeps each session as ~/.claude/projects/<folder with every other character as ->/<session id>.jsonl."""
+    base = sessions_dir or os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".claude", "projects")
+    d = os.path.join(base, re.sub(r"[^A-Za-z0-9]", "-", wd))
+    try:
+        files = [(os.lstat(os.path.join(d, f)).st_mtime, f[:-6]) for f in os.listdir(d) if f.endswith(".jsonl")]
+    except OSError:
+        return None
+    files = [x for x in files if re.fullmatch(r"[A-Za-z0-9_-]{1,100}", x[1])]
+    return max(files)[1] if files else None
+
+
+def cmd_orch_status(p, name, lines, sessions_dir):
+    wd = orch_wd(p, name)
+    out = {"alive": orch_alive(name), "dead": False, "exit": None, "pid": None, "tail": None,
+           "session_id": claude_session(wd, sessions_dir), "checkpoint_at": None}
+    ck = os.path.join(wd, "CHECKPOINT.md")
+    if os.path.isfile(ck) and not os.path.islink(ck):
+        out["checkpoint_at"] = int(os.lstat(ck).st_mtime)
+    if out["alive"]:
+        info = tmux(name, "list-panes", "-t", f"orch-{name}", "-F", "#{pane_pid} #{pane_dead} #{pane_dead_status}").stdout.split()
+        if info:
+            out["pid"] = int(info[0]) if info[0].isdigit() else None
+            out["dead"] = len(info) > 1 and info[1] == "1"
+            out["exit"] = int(info[2]) if len(info) > 2 and info[2].lstrip("-").isdigit() else None
+        if lines:
+            out["tail"] = tmux(name, "capture-pane", "-p", "-J", "-t", f"orch-{name}", "-S", f"-{int(lines)}").stdout
+    print(json.dumps(out))
+
+
+def cmd_orch_send(p, name):
+    """Type the text in the inbox's message.md into the session, then press Enter."""
+    src = os.path.join(orch_inbox(p, name), "message.md")
+    if not orch_alive(name):
+        die(f"orch-{name} is not running", 4)
+    try:
+        fd = os.open(src, os.O_RDONLY | NOFOLLOW)
+    except OSError:
+        die("no message.md in the inbox")
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+        text = fh.read(20000)
+    tmux(name, "load-buffer", "-b", "swarm-msg", "-", input=text, check=True)
+    tmux(name, "paste-buffer", "-d", "-p", "-b", "swarm-msg", "-t", f"orch-{name}", check=True)
+    time.sleep(0.5)
+    tmux(name, "send-keys", "-t", f"orch-{name}", "Enter", check=True)
+    print(json.dumps({"sent": len(text)}))
+
+
+def cmd_orch_kill(p, name):
+    orch_name(name)
+    env = clean_env()
+    tmux(name, "kill-server")
+    if user_systemd(env):
+        subprocess.run(["systemctl", "--user", "stop", f"swarm-orch-{name}-*.scope"], env=env, capture_output=True)
+    print(json.dumps({"alive": orch_alive(name)}))
+
+
+def cmd_orch_relay(p, name, agent_env, relay_name, command):
+    """Run the Relay registration command for this fixed name. Its output may hold a token, so none of it is kept."""
+    wd = orch_wd(p, name)
+    env = orch_env(name, agent_env, relay_name)
+    try:
+        return subprocess.run(command, cwd=wd if os.path.isdir(wd) else p.work, env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 127
+
+
 def main(argv):
     work = handoff = None
     while argv and argv[0].startswith("--"):
@@ -453,6 +634,19 @@ def main(argv):
         return cmd_cleanup(p, positional[0])
     elif cmd == "exists" and len(positional) == 1:
         return 0 if os.path.isdir(p.wd(positional[0])) else 1
+    elif cmd == "orch-prepare" and len(positional) == 1:
+        cmd_orch_prepare(p, positional[0], opts.get("--origin"))
+    elif cmd == "orch-start" and len(positional) == 1 and command:
+        cmd_orch_start(p, positional[0], opts.get("--agent-env"), opts.get("--secrets"), opts.get("--with-secrets"),
+                       opts.get("--relay-name"), opts.get("--scope", False), command)
+    elif cmd == "orch-status" and len(positional) == 1:
+        cmd_orch_status(p, positional[0], int(opts.get("--lines") or 0), opts.get("--sessions-dir"))
+    elif cmd == "orch-send" and len(positional) == 1:
+        cmd_orch_send(p, positional[0])
+    elif cmd == "orch-kill" and len(positional) == 1:
+        cmd_orch_kill(p, positional[0])
+    elif cmd == "orch-relay" and len(positional) == 1 and command:
+        return cmd_orch_relay(p, positional[0], opts.get("--agent-env"), opts.get("--relay-name"), command)
     elif cmd == "exec" and len(positional) == 1 and command:
         wd = p.wd(positional[0]) if positional[0] != "." else p.work
         return subprocess.run(command, cwd=wd, env=clean_env(agent_env=opts.get("--agent-env"))).returncode

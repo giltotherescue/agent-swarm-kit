@@ -46,7 +46,7 @@ SLIM = float(os.environ.get("SWARM_SLIM_AFTER_DAYS", "1"))
 SCRATCH = float(os.environ.get("SWARM_SCRATCH_DAYS", "14"))
 BACKUP_KEEP = float(os.environ.get("SWARM_BACKUP_KEEP_DAYS", "30"))
 BULKY = ("node_modules", "vendor", ".venv", "venv", ".next", "dist", "build", "target", ".cache", ".turbo")
-SKIP = ("tmp", ".swarm-pids")
+SKIP = ("tmp", ".swarm-pids", "orchestrators")  # orchestrators: long-lived folders, never task folders
 DAY = 86400
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 

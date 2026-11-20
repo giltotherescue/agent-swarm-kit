@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
