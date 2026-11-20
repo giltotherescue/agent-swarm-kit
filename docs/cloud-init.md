@@ -32,7 +32,9 @@ bot ── reaches the box over Tailscale SSH ──> logins, secrets repo, bots
 ```
 
 Progress is one line per step in `/var/lib/agent-swarm/firstboot/status`. It ends with `finished` or
-`stopped REASON`. The full log is `/var/log/agent-swarm-firstboot.log`.
+`stopped REASON`. The full log is `/var/log/agent-swarm-firstboot.log`. A reboot before the end does not leave it
+hanging (0.7.1): during the Tailscale wait it resumes at the next boot (`resumed ...`, with a fresh login link),
+and during any other step it writes `stopped` with the command to run first boot again.
 
 ## What the bot needs from you
 

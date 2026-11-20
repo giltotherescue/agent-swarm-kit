@@ -4,6 +4,41 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.7.1 (2026-11-20)
+
+Fixes from the fresh-server install test of 0.7.0 on DigitalOcean Ubuntu 24.04 (install test 6).
+
+- **An orchestrator at Claude's sign-in screen reported `running` and had messages typed into it.** The
+  supervisor now reads the screen. Claude Code's first-run screens (theme picker, security notes, folder
+  trust) get Enter, at most 3 times each. A sign-in screen, an expired-token message or the bypass-permissions
+  warning that stays up for 10 seconds ends the session: new state `needs-login`, `last_exit` says
+  "run sudo swarmctl login claude on worker W, then swarmctl orchestrator start NAME", the owner bot is told once,
+  `swarmctl status` warns, and queued messages wait in the backend. Nothing is typed into those screens, not
+  even the stop wrap-up. It does not restart (also not after a supervisor restart) until an admin starts it.
+- Before each start the supervisor checks that Claude has a sign-in for the agent user (new
+  `agent-exec orch-check`: a token, key or proxy in `agent.env`, an `apiKeyHelper`, or a saved `/login`) and
+  refuses with the same `needs-login` message when there is none. On a Mac with no token it cannot see the
+  Keychain, so it starts and relies on the screen check.
+- OAuth and device sign-in links are hidden in the uploaded terminal tail, by the supervisor and the backend.
+- `orchestrator delete` is refused while the session is still running or stopping ("wait until status shows
+  stopped"). A supervisor that is stopped while its record is deleted or should be stopped ends the session
+  instead of leaving it, and logs the `systemctl disable --now swarm-orchestrator@NAME` line to run.
+  docs/orchestrators.md says to disable the unit after a delete.
+- **First boot never finished after a reboot during the Tailscale wait.** `firstboot.sh` now enables
+  `swarm-firstboot-resume.service` while it runs. After a reboot during the wait it asks Tailscale for a fresh
+  login link, waits again and locks down; after a reboot in any other step it writes `stopped` with the command
+  to run. The status file always ends with `finished` or `stopped`, and the unit removes itself.
+- Less journal noise: the sudoers rule no longer logs each `agent-exec` call or opens a PAM session for it
+  (three journal lines per call, every 5 seconds per orchestrator), and the supervisor polls every 10 seconds.
+  A sudo too old for `log_allowed` keeps the plain rule. On a reboot the supervisor says the machine is
+  shutting down instead of "the session is left running".
+- Setup's "Next steps" and the smoke test now show where to send problems and ideas:
+  gilhildebrand@mail.grokbot.com.
+- **Tested and not.** Tests run a stand-in Claude that shows the theme picker, the security notes and the
+  sign-in menu, a run with no sign-in, the delete guard, a supervisor stopped mid-stop, and the firstboot resume
+  with stand-ins. **Not run:** a real Claude Code session at these screens, the new sudoers line under a real
+  `visudo`, and a real reboot.
+
 ## 0.7.0 (2026-11-20)
 
 - Add orchestrators: one Claude Code session that stays up for days in tmux on one pinned worker, for the rare

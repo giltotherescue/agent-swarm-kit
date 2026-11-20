@@ -53,6 +53,16 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
 - **Heartbeat.** Every 30 seconds the supervisor reports to the backend. This runs no model and uses no
   tokens. If nothing arrives for 10 minutes while it should run, the backend marks it `unreachable` and
   notifies the owner bot once (the Chief of Staff when there is no owner bot).
+- **Sign-in and first-run screens (0.7.1).** Before a start the supervisor checks that Claude has a sign-in
+  for the agent user (`CLAUDE_CODE_OAUTH_TOKEN` or another key or proxy in `agent.env`, an `apiKeyHelper`, or a
+  saved `/login`). Without one it does not start Claude. While the session runs it reads the bottom of the
+  screen. Claude Code's first-run screens (the theme picker, the security notes, the folder trust question)
+  get Enter, which accepts the default, at most 3 times each ("first-run" event). A sign-in screen
+  ("Select login method", "Paste code here", "Please run /login", an expired token) or the bypass-permissions
+  warning that stays up for 10 seconds ends the session at once. Nothing is ever typed into those screens:
+  queued messages and the stop wrap-up wait. The state becomes `needs-login`, `last_exit` says what to run, and
+  the owner bot is told once. It does not restart, even after a supervisor restart, until you sign in
+  (`sudo swarmctl login claude` on the worker) and run `swarmctl orchestrator start NAME`.
 - **Checkpoint.** The first prompt and the standing rules tell the agent to keep `CHECKPOINT.md` in its folder
   current, so even a crash with no session to resume loses little.
 - **Events.** Every start, stop, crash, restart, crash loop, adoption, Relay registration, message delivery and
@@ -60,7 +70,8 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
 
 States: `stopped`, `starting`, `running`, `restarting` (waiting out the pause), `stopping` (wrap-up),
 `crash-loop`, `blocked` (this worker may not run it, for example its project is not in
-`SWARM_WORKER_PROJECTS`), and `unreachable` (set by the backend when the heartbeat stops).
+`SWARM_WORKER_PROJECTS`), `needs-login` (Claude has no sign-in, or showed a sign-in or first-run screen it
+could not get past; see above), and `unreachable` (set by the backend when the heartbeat stops).
 
 ## Set one up
 
@@ -100,14 +111,22 @@ States: `stopped`, `starting`, `running`, `restarting` (waiting out the pause), 
 | `swarmctl orchestrator logs NAME --lines 200` | The last lines of its terminal (up to 500), uploaded with each heartbeat |
 | `swarmctl orchestrator message NAME "text"` | One message, typed into the session when the agent is idle |
 | `swarmctl orchestrator stop NAME` | Graceful stop: a wrap-up message, then the session ends when the agent goes quiet, or after 2 minutes |
-| `swarmctl orchestrator start NAME` | Set it to run. Also clears a crash loop |
-| `swarmctl orchestrator restart NAME` | Graceful stop, then start. Also clears a crash loop |
+| `swarmctl orchestrator start NAME` | Set it to run. Also clears a crash loop and `needs-login` |
+| `swarmctl orchestrator restart NAME` | Graceful stop, then start. Also clears a crash loop and `needs-login` |
 | `swarmctl orchestrator set NAME --brief new.md` | Change settings. They apply at the next start or restart |
-| `swarmctl orchestrator delete NAME` | Remove a stopped one. A deleted record never starts again |
+| `swarmctl orchestrator delete NAME` | Remove a stopped one. Refused while it still runs or is `stopping`: wait for `stopped`. A deleted record never starts again. Then disable its unit (below) |
 
 Creating, changing, starting, stopping, restarting and deleting need the **admin token**. The Chief of Staff
 and the owner bot can read status and logs and send messages; another project bot sees nothing.
-`swarmctl status` lists orchestrators and warns about any that are `unreachable`, `crash-loop` or `blocked`.
+`swarmctl status` lists orchestrators and warns about any that are `unreachable`, `crash-loop`, `blocked` or
+`needs-login`.
+
+**Removing one for good.** `swarmctl orchestrator stop NAME`, wait until `status` shows `stopped`, then
+`swarmctl orchestrator delete NAME`, then on the worker:
+`sudo systemctl disable --now swarm-orchestrator@NAME` (on a Mac: `setup-macos.sh --remove-orchestrator NAME`).
+The supervisor cannot disable its own unit. If it is still running when the record is deleted, it ends the
+session, and its log says the line to run. A supervisor that is stopped while its orchestrator should not run
+ends the session too, so disabling the unit never leaves an unseen Claude behind.
 
 Watching it live on the worker (read only, do not type into it unless you mean to):
 `sudo -u agent tmux -L swarm-orch-NAME attach -r -t orch-NAME`.
@@ -118,7 +137,9 @@ characters. The supervisor types it when the terminal has been quiet for 20 seco
 
 **Logs.** The supervisor sends the last 200 lines of the terminal with each heartbeat. Every line that
 matches the secret patterns the runner uses before a push (`config/secret-patterns.txt`) is replaced by
-`[line hidden: it looks like a secret]`, by the supervisor and again by the backend.
+`[line hidden: it looks like a secret]`, by the supervisor and again by the backend. Sign-in links (OAuth
+`authorize` links, device-login links) are replaced by `[sign-in link hidden]`, so a pending sign-in is never
+uploaded.
 
 ## What it can do
 
@@ -164,6 +185,10 @@ In `/etc/agent-swarm/swarm.env` (all optional):
 | `SWARM_ORCH_BACKOFF_START`, `SWARM_ORCH_BACKOFF_MAX` | 5, 300 | First and longest pause before a restart |
 | `SWARM_ORCH_CRASH_LIMIT`, `SWARM_ORCH_CRASH_WINDOW` | 5, 1800 | Crashes within this many seconds that make a crash loop |
 | `SWARM_ORCH_SCOPE` | `SWARM_TASK_SCOPE` (1) | Run the session in its own systemd user scope |
+| `SWARM_ORCH_POLL_SECONDS` | 10 | How often the supervisor looks at the session (was 5 before 0.7.1) |
+| `SWARM_ORCH_SCREEN_SECONDS` | 10 | How long a sign-in screen may stay up before the session is ended |
+| `SWARM_ORCH_LOGIN_MARKERS`, `SWARM_ORCH_BLOCK_MARKERS` | see `server/swarm_orchestrator.py` | Text (several separated by a vertical bar) that marks a sign-in screen or a screen it does not answer |
+| `SWARM_ORCH_LOGIN_CHECK` | 1 | 0 skips the sign-in check before a start (the screen check still runs) |
 
 API: `GET /orchestrators`, `POST /orchestrators`, `GET` and `PUT /orchestrators/NAME`,
 `POST /orchestrators/NAME/start|stop|restart|delete`, `GET /orchestrators/NAME/logs`,
@@ -175,10 +200,15 @@ Who may call what is in [backend.md](backend.md#who-can-call-what).
 - **Tested with stand-ins.** The tests run the real supervisor, agent-exec and tmux with a stand-in for Claude
   Code, for `with-secrets` and for the Relay command. They have not run a real Claude session for days, a
   real Relay registration, the systemd unit and user scope on a real server, or the launchd agent on a real Mac.
-- **First start on a new worker.** Claude Code in a terminal (not `-p`) can stop at a one-time screen, for
-  example to confirm bypass-permissions mode or to trust a new folder. Look at `swarmctl orchestrator logs NAME`
-  after the first start; if it waits there, attach once on the worker
-  (`sudo -u agent tmux -L swarm-orch-NAME attach -t orch-NAME`), accept, and detach (Ctrl-b d).
+- **First start on a new worker.** Claude Code in a terminal (not `-p`) shows one-time screens. The supervisor
+  answers the theme picker, the security notes and the folder trust question with Enter. It does not accept the
+  bypass-permissions warning by itself (Enter there means "No, exit"): if `needs-login` says it stopped at that
+  screen, accept it once by hand as the agent user (`sudo -iu agent claude --permission-mode bypassPermissions`,
+  pick "Yes, I accept", then `/exit`), then `swarmctl orchestrator start NAME`. The screen texts are matched as
+  Claude Code 2.1 shows them; they were checked against a real install for the theme picker and the sign-in
+  menu only.
+- **Sign-in screens are matched by text.** A sign-in phrase that the agent itself prints and leaves at the
+  bottom of an idle screen for 10 seconds would also stop it. Change the list with `SWARM_ORCH_LOGIN_MARKERS`.
 - **Idle detection is a guess.** "Quiet terminal and no `esc to interrupt`" is how Claude Code looks today. If
   that changes, set `SWARM_ORCH_BUSY_MARKERS` (separated by `|`).
 - **Workers share one token.** Pinning is by worker name, as for tasks ([multi-worker.md](multi-worker.md)):

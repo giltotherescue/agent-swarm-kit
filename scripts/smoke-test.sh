@@ -103,5 +103,7 @@ if [[ $RUN_TASK -eq 1 ]]; then
 fi
 
 echo
+# Keep the summary as the last line: firstboot copies it into its status file.
+echo "Problems or ideas: email gilhildebrand@mail.grokbot.com (kit version, what happened, the exact error; no secrets)."
 echo "smoke-test: $fails failed, $warns warnings"
 (( fails == 0 ))

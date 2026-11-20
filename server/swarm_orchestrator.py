@@ -15,13 +15,22 @@ state, the settings and at most one message. If the session ends while it should
 growing pause (5 seconds doubling to 5 minutes, back to 5 after 10 healthy minutes), resuming the saved Claude
 session when there is one. After 5 crashes in 30 minutes it stops trying and reports crash-loop; an admin restarts it.
 
+It never types into a sign-in screen. Before a start it checks that Claude has a sign-in for the agent user
+(agent-exec orch-check). While the session runs it reads the screen: Claude Code's first-run screens (the theme
+picker, the security notes, the folder trust question) get the key press that accepts the default, at most 3 times
+each. A sign-in screen (or a first-run screen it cannot answer, such as the bypass-permissions warning) that stays up
+for SWARM_ORCH_SCREEN_SECONDS ends the session and sets the state needs-login: the owner bot is told, queued messages
+wait in the backend, and nothing restarts until an admin runs `swarmctl orchestrator start NAME`.
+
 Settings (environment, defaults in brackets): the runner's SWARM_URL, SWARM_WORKER_NAME, SWARM_WORKER_TOKEN_FILE,
 SWARM_WORKER_PROJECTS, SWARM_AGENT_USER, SWARM_WORK_DIR, SWARM_HANDOFF_DIR, SWARM_RUNNER_DIR, SWARM_AGENT_ENV_FILE,
 plus SWARM_ORCH_CLAUDE [claude], SWARM_ORCH_SCOPE [SWARM_TASK_SCOPE or 1], SWARM_RELAY_REGISTER_CMD [empty: no Relay],
-SWARM_ORCH_HEARTBEAT_SECONDS [30], SWARM_ORCH_POLL_SECONDS [5], SWARM_ORCH_STOP_GRACE [120],
+SWARM_ORCH_HEARTBEAT_SECONDS [30], SWARM_ORCH_POLL_SECONDS [10], SWARM_ORCH_STOP_GRACE [120],
 SWARM_ORCH_IDLE_SECONDS [20], SWARM_ORCH_BUSY_MARKERS [esc to interrupt], SWARM_ORCH_BACKOFF_START [5],
 SWARM_ORCH_BACKOFF_MAX [300], SWARM_ORCH_HEALTHY_SECONDS [600], SWARM_ORCH_CRASH_LIMIT [5],
-SWARM_ORCH_CRASH_WINDOW [1800]. Tests also use SWARM_ORCH_WITH_SECRETS and SWARM_ORCH_SESSIONS_DIR.
+SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
+SWARM_ORCH_BLOCK_MARKERS (| separated, defaults below), SWARM_ORCH_LOGIN_CHECK [1]. Tests also use
+SWARM_ORCH_WITH_SECRETS, SWARM_ORCH_SESSIONS_DIR and SWARM_ORCH_CLAUDE_DIR.
 """
 import fcntl
 import json
@@ -51,7 +60,7 @@ def env_float(name, default):
 
 
 HEARTBEAT = env_float("SWARM_ORCH_HEARTBEAT_SECONDS", 30)
-POLL = env_float("SWARM_ORCH_POLL_SECONDS", 5)
+POLL = env_float("SWARM_ORCH_POLL_SECONDS", 10)
 STOP_GRACE = env_float("SWARM_ORCH_STOP_GRACE", 120)
 IDLE = env_float("SWARM_ORCH_IDLE_SECONDS", 20)
 TAIL_LINES = 200
@@ -63,6 +72,47 @@ RELAY_CMD = os.environ.get("SWARM_RELAY_REGISTER_CMD", "").strip()
 WITH_SECRETS = os.environ.get("SWARM_ORCH_WITH_SECRETS")
 SESSIONS_DIR = os.environ.get("SWARM_ORCH_SESSIONS_DIR")
 RESUME_FAIL_SECONDS = 60  # a resumed session that dies this fast is not resumed again
+CLAUDE_DIR = os.environ.get("SWARM_ORCH_CLAUDE_DIR")
+LOGIN_CHECK = os.environ.get("SWARM_ORCH_LOGIN_CHECK", "1") != "0"
+SCREEN_SECONDS = env_float("SWARM_ORCH_SCREEN_SECONDS", 10)   # a blocking screen must stay up this long
+SCREEN_LINES = 30                                             # only the bottom of the visible screen is read
+FIRST_RUN_TRIES = 3
+
+
+def markers(name, default):
+    return [m.strip() for m in os.environ.get(name, default).split("|") if m.strip()]
+
+
+# Claude Code's sign-in screens, and an expired or missing sign-in inside a session.
+LOGIN_MARKERS = markers("SWARM_ORCH_LOGIN_MARKERS", "Select login method|Paste code here|Please run /login|"
+                                                    "OAuth token has expired|Invalid API key")
+# Other screens the supervisor does not answer by itself (the default answer would exit Claude).
+BLOCK_MARKERS = markers("SWARM_ORCH_BLOCK_MARKERS", "Bypass Permissions mode")
+# First-run screens and the keys that accept their default: theme picker, security notes, folder trust.
+FIRST_RUN = [("the theme picker", "Choose the text style", ["Enter"]),
+             ("the security notes", "Security notes", ["Enter"]),
+             ("the folder trust question", "Do you trust the files in this folder", ["Enter"])]
+
+
+def classify(screen):
+    """What the bottom of the screen is waiting for: ("login", label), ("block", label), ("first-run", label, keys) or None."""
+    lines = [ln for ln in (screen or "").splitlines() if ln.strip()][-SCREEN_LINES:]
+    text = "\n".join(lines).lower()
+    for m in LOGIN_MARKERS:
+        if m.lower() in text:
+            return ("login", f"a Claude sign-in screen ({m!r})")
+    for m in BLOCK_MARKERS:
+        if m.lower() in text:
+            return ("block", f"a Claude first-run screen it does not answer ({m!r})")
+    for label, m, keys in FIRST_RUN:
+        if m.lower() in text:
+            return ("first-run", label, keys)
+    return None
+
+
+# A pending sign-in link must not be uploaded: anyone holding it while it is open can finish the sign-in.
+SIGNIN_URL = re.compile(r"https?://\S*(?:oauth|authorize|code_challenge|device|/login)\S*", re.I)
+SIGNIN_LINE = re.compile(r"code_challenge|redirect_uri=|response_type=code|[?&]state=", re.I)
 
 RULES = """
 Rules (from the swarm supervisor):
@@ -108,9 +158,17 @@ def log(*a):
 
 
 def scrub(text, patterns):
-    """Hide every line that looks like a secret, with the runner's own pattern list."""
-    return "\n".join("[line hidden: it looks like a secret]" if any(p.search(ln) for p in patterns) else ln
-                     for ln in (text or "").splitlines())
+    """Hide every line that looks like a secret, with the runner's own pattern list, and every sign-in link."""
+    out = []
+    for ln in (text or "").splitlines():
+        if any(p.search(ln) for p in patterns):
+            ln = "[line hidden: it looks like a secret]"
+        elif SIGNIN_LINE.search(ln):
+            ln = "[line hidden: part of a sign-in link]"
+        else:
+            ln = SIGNIN_URL.sub("[sign-in link hidden]", ln)
+        out.append(ln)
+    return "\n".join(out)
 
 
 class Supervisor:
@@ -127,7 +185,8 @@ class Supervisor:
         self.patterns = sw.secret_patterns()
         self.policy = RestartPolicy()
         self.saved = self.load()
-        self.state = "stopped"
+        # needs-login survives a supervisor restart, so a restart does not start (and report) it again
+        self.state = "needs-login" if self.saved.get("needs_login") else "stopped"
         self.desired = self.saved.get("desired")          # last answer from the backend; None until the first one
         self.deleted = False
         self.config = self.saved.get("config") or {}
@@ -146,7 +205,13 @@ class Supervisor:
         self.message = None             # {id, sender, text} waiting to be typed
         self.delivered = None           # message id typed, not yet acknowledged
         self.tail = ""
+        self.screen = ""
         self.tail_changed = time.time()
+        self.screen_seen = None         # (label, first seen) of a blocking screen
+        self.first_run_tries = {}
+        self.keys_sent_at = 0
+        self.screen_at_keys = None
+        self.told_deleted = False
         self.pid = None
         self.blocked = None
         self.blocked_code = None
@@ -167,6 +232,7 @@ class Supervisor:
     def save(self):
         data = {k: getattr(self, k) for k in ("desired", "config", "generation", "restart_generation", "last_exit",
                                               "restart_count", "started_at", "session_id")}
+        data["needs_login"] = self.state == "needs-login"
         tmp = self.state_file + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh)
@@ -227,6 +293,8 @@ class Supervisor:
                       409: "another supervisor is running it"}.get(e.code, f"HTTP {e.code}")
             if self.blocked != reason:
                 log(self.name, "backend refused the heartbeat:", reason)
+                if e.code == 404:
+                    log(self.name, f"record deleted; run: sudo systemctl disable --now swarm-orchestrator@{self.name}")
             self.blocked, self.blocked_code = reason, e.code
             if e.code in (403, 404):
                 self.desired, self.deleted = "stopped", e.code == 404
@@ -245,7 +313,7 @@ class Supervisor:
         if self.generation is None or r.get("generation", 0) > self.generation:
             if self.generation is not None:
                 self.policy.reset()      # an admin start or restart clears the crash count
-                if self.state == "crash-loop":
+                if self.state in ("crash-loop", "needs-login"):
                     self.state = "stopped"
             self.generation = r.get("generation", 0)
         if self.restart_generation is None:
@@ -254,7 +322,7 @@ class Supervisor:
             self.restart_generation = r.get("restart_generation", 0)
             if self.state in ("running", "starting"):
                 self.begin_stop("restart requested by an admin", then="start")
-            elif self.state in ("restarting", "crash-loop"):
+            elif self.state in ("restarting", "crash-loop", "needs-login"):
                 self.state, self.next_start = "stopped", 0
         msg = r.get("message")
         if msg and (not self.message or self.message["id"] != msg["id"]):
@@ -312,7 +380,10 @@ class Supervisor:
             self.last_exit = f"project {self.config.get('project')} is not in this worker's SWARM_WORKER_PROJECTS"
             self.event("blocked", self.last_exit)
             return
+        if not self.login_ok():
+            return
         self.state = "starting"
+        self.first_run_tries, self.screen_seen = {}, None
         try:
             self.prepare()
             self.register_relay()
@@ -344,6 +415,56 @@ class Supervisor:
         self.event("start", f"resumed session {self.session_id}" if self.resumed else "fresh session (reads CHECKPOINT.md)")
         self.save()
 
+    def login_ok(self):
+        """Preflight: refuse to start a session that would only show Claude's sign-in screen."""
+        if not LOGIN_CHECK:
+            return True
+        args = ["orch-check", self.name, "--agent-env", sw.AGENT_ENV_FILE] + (["--claude-dir", CLAUDE_DIR] if CLAUDE_DIR else [])
+        try:
+            info = json.loads(self.agent(*args, check=False, timeout=60).stdout or "{}")
+        except (ValueError, subprocess.SubprocessError, OSError):
+            return True   # an older agent-exec or a hiccup: the screen check still catches a sign-in screen
+        if info.get("logged_in") is False:
+            self.needs_login("Claude has no sign-in for the agent user", kill=False)
+            return False
+        return True
+
+    def needs_login(self, why, kill=True):
+        """End the session (never type into a sign-in screen) and wait for an admin. Messages stay queued."""
+        if kill:
+            self.agent("orch-kill", self.name, check=False)
+        self.pid, self.screen_seen = None, None
+        self.state = "needs-login"
+        self.last_exit = (f"{why}. Run: sudo swarmctl login claude on worker {sw.NAME}, "
+                          f"then: swarmctl orchestrator start {self.name}")[:300]
+        self.event("needs-login", self.last_exit)
+        self.save()
+        self.beat()
+
+    def watch_screen(self):
+        """Returns True while the screen waits for something other than the agent's work (nothing may be typed then)."""
+        kind = classify(self.screen)
+        if not kind:
+            self.screen_seen = None
+            return False
+        now_ = time.time()
+        if not self.screen_seen or self.screen_seen[0] != kind[1]:
+            self.screen_seen = (kind[1], now_)
+        if kind[0] == "first-run":
+            label, keys = kind[1], kind[2]
+            tries = self.first_run_tries.get(label, 0)
+            if tries < FIRST_RUN_TRIES and now_ - self.keys_sent_at >= 3:
+                sent = self.agent("orch-keys", self.name, *keys, check=False).returncode == 0
+                self.first_run_tries[label] = tries + 1
+                self.keys_sent_at, self.screen_at_keys = now_, self.screen
+                self.event("first-run", f"answered {label} with {'+'.join(keys)}" + ("" if sent else " (the key press failed)"))
+            elif tries >= FIRST_RUN_TRIES and now_ - self.keys_sent_at >= SCREEN_SECONDS and self.screen == self.screen_at_keys:
+                self.needs_login(f"Claude stays at {label} after {tries} answers")
+            return True
+        if now_ - self.screen_seen[1] >= SCREEN_SECONDS:
+            self.needs_login(f"Claude is waiting at {kind[1]}")
+        return True
+
     def crash(self, why):
         at = time.time()
         ran = at - (self.started_at or at)
@@ -368,6 +489,11 @@ class Supervisor:
         """Graceful stop: ask the agent to wrap up, then end the session when it goes quiet, or after the grace time."""
         self.state, self.stop_reason, self.after_stop = "stopping", reason, then
         self.stop_deadline = time.time() + STOP_GRACE
+        if classify(self.screen):
+            # Nothing to wrap up, and never type into a sign-in or first-run screen: end it now.
+            self.stop_deadline, self.stop_sent_at = time.time(), 0
+            self.event("stop", f"stopping: {reason}; the session shows a sign-in or first-run screen, so no wrap-up message")
+            return
         self.write_inbox("message.md", f"The supervisor is stopping this session ({reason}). Within {int(STOP_GRACE)} seconds, "
                                        "update CHECKPOINT.md and write a short HANDOVER.md, then stop working.")
         sent = self.agent("orch-send", self.name, check=False).returncode == 0
@@ -394,6 +520,8 @@ class Supervisor:
         return time.time() - self.tail_changed >= IDLE and not any(m.lower() in last for m in BUSY)
 
     def deliver(self):
+        if classify(self.screen):
+            return
         m = self.message
         self.write_inbox("message.md", f"Message from {m.get('sender')} (through the swarm backend; a request, not permission "
                                        f"to push, merge or deploy):\n\n{m['text']}")
@@ -413,6 +541,8 @@ class Supervisor:
         alive, dead = st.get("alive"), st.get("dead")
         if alive and st.get("tail") is not None and st["tail"] != self.tail:
             self.tail, self.tail_changed = st["tail"], time.time()
+        if alive:
+            self.screen = st["screen"] if st.get("screen") is not None else "\n".join(self.tail.splitlines()[-50:])
         if st.get("session_id") and alive:
             self.session_id = st["session_id"]
         self.pid = st.get("pid") if alive and not dead else None
@@ -425,13 +555,18 @@ class Supervisor:
                 self.finish_stop()
             return
         if not want:
+            if self.deleted and not self.told_deleted:
+                self.told_deleted = True
+                log(self.name, f"the record was deleted; once the session is down, run: "
+                               f"sudo systemctl disable --now swarm-orchestrator@{self.name}")
             if alive and not dead:
                 self.begin_stop("the orchestrator was deleted" if self.deleted else
                                 "this worker is not the pinned one" if self.blocked else "the desired state is stopped")
                 return
             if alive:
                 self.agent("orch-kill", self.name, check=False)
-            self.state = "blocked" if self.blocked else "stopped"
+            if self.state != "needs-login" or self.desired != "running":
+                self.state = "blocked" if self.blocked else "stopped"
             return
         if alive and not dead:
             if self.state != "running":
@@ -439,6 +574,8 @@ class Supervisor:
                     self.event("adopt", "found the session already running and adopted it")
                     self.started_at = self.started_at or int(time.time())
                 self.state = "running"
+            if self.watch_screen():
+                return   # a sign-in or first-run screen: nothing is typed, messages wait
             if self.message and self.idle():
                 self.deliver()
             return
@@ -447,7 +584,7 @@ class Supervisor:
             return self.crash(("Claude exited" + (f" with code {code}" if code is not None else "")) if alive else "the tmux session ended")
         if alive and dead:
             self.agent("orch-kill", self.name, check=False)
-        if self.state == "crash-loop" or (self.state == "blocked" and self.blocked_at_generation == self.generation):
+        if self.state in ("crash-loop", "needs-login") or (self.state == "blocked" and self.blocked_at_generation == self.generation):
             return
         if self.state == "restarting":
             if time.time() < self.next_start:
@@ -456,8 +593,21 @@ class Supervisor:
         self.start()
 
     def shutdown(self, *_):
-        """systemd or launchd stops the supervisor: the session keeps running; the next supervisor adopts it."""
-        self.event("supervisor", f"supervisor stopping; the session is left {'running' if self.state == 'running' else self.state}")
+        """systemd or launchd stops the supervisor: the session keeps running and the next supervisor adopts it,
+        unless the record is deleted or should be stopped, then the session ends with the supervisor."""
+        if self.deleted or self.desired == "stopped" or self.state in ("stopping", "needs-login"):
+            self.agent("orch-kill", self.name, check=False, timeout=60)
+            self.pid = None
+            why = "the orchestrator was deleted" if self.deleted else "it should not run"
+            self.state = "stopped" if self.state != "needs-login" else self.state
+            self.event("supervisor", f"supervisor stopping; the session was ended because {why}")
+            if self.deleted:
+                log(self.name, f"record deleted; run: sudo systemctl disable --now swarm-orchestrator@{self.name}")
+        elif machine_stopping():
+            self.event("supervisor", "supervisor stopping because the machine is shutting down; the session ends with it "
+                                     "and the supervisor starts it again after the boot")
+        else:
+            self.event("supervisor", f"supervisor stopping; the session is left {self.state} for the next supervisor to adopt")
         self.save()
         self.beat(release=True)
         sys.exit(0)
@@ -475,6 +625,15 @@ class Supervisor:
             except Exception as e:  # keep supervising
                 log(self.name, "error:", repr(e)[:300])
             time.sleep(POLL)
+
+
+def machine_stopping():
+    """True while systemd is shutting the machine down or rebooting (not for a plain service restart)."""
+    try:
+        r = subprocess.run(["systemctl", "is-system-running"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.stdout.strip() == "stopping"
 
 
 def main():

@@ -55,7 +55,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -219,8 +219,13 @@ RELAY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,80}$")
 ORCH_FIELDS = {"worker_id", "project", "repo", "owner_bot_id", "provider", "model", "brief", "secret_bundles", "relay_agent_name"}
-ORCH_STATES = ("stopped", "starting", "running", "restarting", "stopping", "crash-loop", "unreachable", "blocked")
-ORCH_EVENT_TYPES = ("start", "stop", "crash", "restart", "crash-loop", "adopt", "relay", "blocked", "supervisor")
+ORCH_STATES = ("stopped", "starting", "running", "restarting", "stopping", "crash-loop", "unreachable", "blocked", "needs-login")
+ORCH_EVENT_TYPES = ("start", "stop", "crash", "restart", "crash-loop", "adopt", "relay", "blocked", "supervisor", "needs-login",
+                    "first-run")
+ORCH_DELETABLE = ("stopped", "crash-loop", "blocked", "needs-login", "unreachable")   # states with no session to end
+# A pending sign-in link in a terminal tail: anyone holding it while it is open can finish the sign-in.
+SIGNIN_URL_RE = re.compile(r"https?://\S*(?:oauth|authorize|code_challenge|device|/login)\S*", re.I)
+SIGNIN_LINE_RE = re.compile(r"code_challenge|redirect_uri=|response_type=code|[?&]state=", re.I)
 ORCH_STALE_SECONDS = 600       # no heartbeat for this long: unreachable, and the owner is told
 ORCH_SUPERVISOR_LEASE = 90     # a second supervisor is refused while the first one reported this recently
 ORCH_BRIEF_MAX = 20000
@@ -2224,6 +2229,11 @@ class Backend:
     def scrub(self, text):
         return "\n".join("[line hidden: it looks like a secret]" if self.secret_hit(ln) else ln for ln in (text or "").splitlines())
 
+    def scrub_tail(self, text):
+        """A terminal tail: secrets as above, and every sign-in link (the supervisor hides them too)."""
+        return "\n".join("[line hidden: part of a sign-in link]" if SIGNIN_LINE_RE.search(ln) else
+                         SIGNIN_URL_RE.sub("[sign-in link hidden]", ln) for ln in self.scrub(text).splitlines())
+
     def orch_fields(self, b, cur=None):
         unknown = sorted(set(b) - ORCH_FIELDS - ({"name", "start"} if cur is None else set()))
         if unknown:
@@ -2332,6 +2342,11 @@ class Backend:
             elif action == "delete":
                 if r["desired"] == "running":
                     raise ApiError(409, f"stop it first: swarmctl orchestrator stop {name}")
+                # The session must be down first, or deleting the record and disabling the unit leaves it running unseen.
+                quiet = (r["last_heartbeat_at"] or 0) < now() - ORCH_STALE_SECONDS
+                if r["state"] not in ORCH_DELETABLE and not quiet:
+                    raise ApiError(409, f"orchestrator {name} is still {r['state']}; wait until swarmctl orchestrator status "
+                                        f"{name} shows stopped, then delete it")
                 self.s.run("UPDATE orchestrators SET deleted_at = ?, updated_at = ? WHERE name = ?", now(), now(), name)
                 self.s.run("DELETE FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL", name)
             self.orch_event(name, f"{action}-requested", "admin")
@@ -2412,7 +2427,7 @@ class Backend:
             if "last_exit" in b:
                 vals["last_exit"] = clean_text(b["last_exit"], 300, "last_exit")
             if isinstance(b.get("log_tail"), str):
-                vals["log_tail"] = self.scrub(b["log_tail"][-ORCH_TAIL_MAX:])
+                vals["log_tail"] = self.scrub_tail(b["log_tail"][-ORCH_TAIL_MAX:])
                 vals["log_tail_at"] = now()
             events = b.get("events") or []
             if not isinstance(events, list) or len(events) > 50:
@@ -2427,6 +2442,9 @@ class Backend:
             fresh = self.s.one("SELECT * FROM orchestrators WHERE name = ?", name)
             if r["state"] == "unreachable" and state != "unreachable":
                 self.orch_event(name, "recovered", "backend", f"the supervisor is reporting again ({state})")
+            if state == "needs-login" and r["state"] != "needs-login":
+                self.notify_orch(fresh, "needs-login", f"Orchestrator {name} on worker {worker} needs a Claude sign-in and was "
+                                                       f"stopped; queued messages wait. {fresh['last_exit'] or ''} ".strip())
             if state == "crash-loop" and r["state"] != "crash-loop":
                 self.notify_orch(fresh, "crash-loop", f"Orchestrator {name} crashed too often and was not restarted. "
                                                       f"Last exit: {fresh['last_exit'] or 'unknown'}. Restart it with: "
@@ -2494,7 +2512,7 @@ class Backend:
         out["orchestrators"] = [{k: o[k] for k in ("name", "state", "desired", "worker_id", "last_heartbeat_at", "restart_count")}
                                 for o in self.list_orchs(who)["orchestrators"]]
         for o in out["orchestrators"]:
-            if o["desired"] == "running" and o["state"] in ("unreachable", "crash-loop", "blocked"):
+            if o["desired"] == "running" and o["state"] in ("unreachable", "crash-loop", "blocked", "needs-login"):
                 out["warnings"].append(f"Orchestrator {o['name']} is {o['state']}. See: swarmctl orchestrator status {o['name']}")
         return out
 

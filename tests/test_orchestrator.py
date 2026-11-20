@@ -177,14 +177,36 @@ class OrchestratorApiTest(unittest.TestCase):
 
     def test_delete_needs_stop_and_a_deleted_record_never_runs(self):
         self.create(start=True)
+        beat(self.b, "steward", state="running")
         self.b.req("POST", "/orchestrators/steward/delete", expect=409)
         self.b.req("POST", "/orchestrators/steward/stop")
+        # Still stopping: the session is not down yet, so the record stays (0.7.1).
+        beat(self.b, "steward", state="stopping")
+        self.assertIn("still stopping", self.b.req("POST", "/orchestrators/steward/delete", expect=409)["error"])
+        beat(self.b, "steward", state="stopped")
         self.b.req("POST", "/orchestrators/steward/delete")
         self.b.req("GET", "/orchestrators/steward", expect=404)
         r = beat(self.b, "steward", state="running")
         self.assertEqual((r["desired"], r["deleted"], r["message"]), ("stopped", True, None))
         self.create()  # the name can be used again
         self.assertEqual(self.b.req("GET", "/orchestrators/steward")["orchestrator"]["desired"], "stopped")
+
+    def test_needs_login_tells_the_owner_once_warns_and_hides_sign_in_links(self):
+        self.create(start=True)
+        link = "https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code&code_challenge=XYZ&state=QQ"
+        beat(self.b, "steward", state="running", log_tail=f"Select login method:\n{link}\nsee https://example.com/x/oauth/cb ok")
+        logs = self.b.req("GET", "/orchestrators/steward/logs")["lines"]
+        self.assertNotIn("code_challenge", "\n".join(logs))
+        self.assertIn("see [sign-in link hidden] ok", logs)
+        for _ in range(2):
+            beat(self.b, "steward", state="needs-login", last_exit="Claude is waiting at a sign-in screen. Run: sudo swarmctl login claude",
+                 events=[{"type": "needs-login", "text": "sign-in screen"}, {"type": "first-run", "text": "theme"}])
+        sent = self.notices("needs-login")
+        self.assertEqual([n["notify_target"] for n in sent], ["app-bot"])
+        self.assertIn("sudo swarmctl login claude", sent[0]["text"])
+        self.assertTrue(any("needs-login" in w for w in self.b.req("GET", "/status")["warnings"]))
+        # Messages can still be queued; they wait.
+        self.b.req("POST", "/orchestrators/steward/messages", {"text": "later"}, tok=self.owner)
 
     def test_old_database_gains_the_tables(self):
         with tempfile.TemporaryDirectory() as target:
@@ -242,6 +264,22 @@ class OrchestratorCliTest(unittest.TestCase):
         self.assertNotEqual(self.ctl("status", check=False).returncode, 0)
 
 
+class ScreenTest(unittest.TestCase):
+    def test_classify_reads_only_the_bottom_of_the_screen(self):
+        self.assertEqual(so.classify("Welcome\n\n Select login method:\n 1. Claude account")[0], "login")
+        self.assertEqual(so.classify("Paste code here if prompted >")[0], "login")
+        self.assertEqual(so.classify("Choose the text style that looks best\n 1. Dark mode")[:3:2], ("first-run", ["Enter"]))
+        self.assertEqual(so.classify("Security notes:\n Press Enter to continue")[1], "the security notes")
+        self.assertEqual(so.classify("WARNING: Claude Code running in Bypass Permissions mode\n 1. No, exit")[0], "block")
+        self.assertIsNone(so.classify("> working on it\n  esc to interrupt"))
+        self.assertIsNone(so.classify("Select login method\n" + "work\n" * 40))
+
+    def test_scrub_hides_sign_in_links(self):
+        out = so.scrub("open https://claude.ai/oauth/authorize?client_id=a&code_challenge=b\n"
+                       "go to https://github.com/login/device now\nplain line", [])
+        self.assertEqual(out.splitlines(), ["[line hidden: part of a sign-in link]", "go to [sign-in link hidden] now", "plain line"])
+
+
 class RestartPolicyTest(unittest.TestCase):
     def test_backoff_doubles_to_the_cap_and_resets_after_a_healthy_run(self):
         p = so.RestartPolicy(start=5, cap=300, healthy=600, limit=100, window=1800)
@@ -281,6 +319,17 @@ mode = open(os.path.join(base, "mode")).read().strip() if os.path.exists(os.path
 if mode == "crash":
     time.sleep(0.2)
     sys.exit(3)
+if mode == "login":
+    # Like Claude Code with no sign-in: two first-run screens that take Enter, then the sign-in menu.
+    print("Choose the text style that looks best with your terminal\n 1. Dark mode\n 2. Light mode", flush=True)
+    note(event="input", text=sys.stdin.readline().rstrip("\n"))
+    print("\n" * 60 + "Security notes:\n 1. Claude can make mistakes\nPress Enter to continue", flush=True)
+    note(event="input", text=sys.stdin.readline().rstrip("\n"))
+    print("\n" * 60 + "Select login method:\n 1. Claude account with subscription\n 2. Anthropic Console account", flush=True)
+    print("https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code&code_challenge=XYZ&state=QQ", flush=True)
+    for line in sys.stdin:
+        note(event="input", text=line.rstrip("\n"))
+    sys.exit(0)
 print("fake claude ready", flush=True)
 for line in sys.stdin:
     note(event="input", text=line.rstrip("\n"))
@@ -318,7 +367,8 @@ class SupervisorTest(unittest.TestCase):
         self.fake.mkdir()
         self.name = "t" + os.urandom(4).hex()
         (self.tmp / "worker.token").write_text(WORKER)
-        (self.tmp / "agent.env").write_text(f"FAKE_DIR={self.fake}\n")
+        (self.tmp / "agent.env").write_text(f"FAKE_DIR={self.fake}\nCLAUDE_CODE_OAUTH_TOKEN=stand-in-not-a-token\n")
+        (self.tmp / "claude-home").mkdir()
         self.env = dict(os.environ, SWARM_URL=self.b.base, SWARM_WORKER_NAME="w1", SWARM_AGENT_USER="",
                         SWARM_WORKER_TOKEN_FILE=str(self.tmp / "worker.token"), SWARM_WORK_DIR=str(self.tmp / "work"),
                         SWARM_HANDOFF_DIR=str(self.tmp / "handoff"), SWARM_RUNNER_DIR=str(self.tmp / "runner"),
@@ -327,6 +377,7 @@ class SupervisorTest(unittest.TestCase):
                         SWARM_ORCH_WITH_SECRETS=write_exe(self.tmp / "fake-with-secrets", FAKE_WITH_SECRETS),
                         SWARM_RELAY_REGISTER_CMD=write_exe(self.tmp / "fake-relay", FAKE_RELAY) + " {name}",
                         SWARM_ORCH_SESSIONS_DIR=str(self.fake / "sessions"), SWARM_ORCH_SCOPE="0",
+                        SWARM_ORCH_CLAUDE_DIR=str(self.tmp / "claude-home"), SWARM_ORCH_SCREEN_SECONDS="1",
                         SWARM_ORCH_HEARTBEAT_SECONDS="1", SWARM_ORCH_POLL_SECONDS="0.3", SWARM_ORCH_IDLE_SECONDS="1",
                         SWARM_ORCH_STOP_GRACE="6", SWARM_ORCH_BACKOFF_START="0.5", SWARM_ORCH_BACKOFF_MAX="2",
                         SWARM_ORCH_CRASH_LIMIT="5", SWARM_ORCH_CRASH_WINDOW="1800")
@@ -432,6 +483,63 @@ class SupervisorTest(unittest.TestCase):
         # Nothing the stand-ins printed as a token reached the backend.
         dump = json.dumps([self.b.api.s.q(f"SELECT * FROM {t}") for t in ("orchestrators", "orchestrator_events")])
         self.assertNotIn(FAKE_TOKEN, dump)
+
+    def test_login_screen_is_never_typed_into(self):
+        """0.7.1, install test 6: first-run screens get Enter; the sign-in menu stops the session and holds messages."""
+        (self.fake / "mode").write_text("login")
+        self.b.req("POST", "/orchestrators", dict(name=self.name, worker_id="w1", project="app", owner_bot_id="app-bot",
+                                                  brief="Improve.", start=True))
+        self.supervise()
+        self.wait("started", lambda: self.lines())
+        self.b.req("POST", f"/orchestrators/{self.name}/messages", {"text": "Check the signup page"}, tok=self.owner)
+        rec = self.wait("needs-login", lambda: (r := self.record())["orchestrator"]["state"] == "needs-login" and r)
+        self.assertIn("sudo swarmctl login claude on worker w1", rec["orchestrator"]["last_exit"])
+        self.assertIn("first-run", [e["type"] for e in rec["events"]])
+        self.assertFalse(self.alive())
+        typed = [ln["text"] for ln in self.lines() if ln["event"] == "input"]
+        self.assertEqual(typed, ["", ""], "only the two Enter presses for the theme and security screens")
+        self.assertIsNotNone(rec["pending_message"], "the message waits in the backend")
+        payloads = [json.loads(r["payload"]) for r in self.b.api.s.q("SELECT payload FROM notices")]
+        self.assertEqual([p["notify_target"] for p in payloads if p.get("kind") == "needs-login"], ["app-bot"])
+        dump = json.dumps(self.b.api.s.q("SELECT * FROM orchestrators"))
+        self.assertNotIn("code_challenge", dump)
+        # It stays down, even across a supervisor restart, until an admin starts it again.
+        self.procs[0].send_signal(signal.SIGTERM)
+        self.procs[0].wait(10)
+        self.supervise()
+        time.sleep(3)
+        self.assertEqual(len([ln for ln in self.lines() if ln["event"] == "start"]), 1)
+        self.assertEqual(self.record()["orchestrator"]["state"], "needs-login")
+        (self.fake / "mode").write_text("")
+        self.b.req("POST", f"/orchestrators/{self.name}/start")
+        self.wait("running again", lambda: self.record()["orchestrator"]["state"] == "running")
+        self.wait("message typed after the sign-in", lambda: any(ln.get("text") == "Check the signup page" for ln in self.lines()))
+
+    def test_no_sign_in_refuses_before_the_first_start(self):
+        (self.tmp / "agent.env").write_text(f"FAKE_DIR={self.fake}\n")
+        self.b.req("POST", "/orchestrators", dict(name=self.name, worker_id="w1", project="app", owner_bot_id="app-bot",
+                                                  brief="Improve.", start=True))
+        self.supervise()
+        rec = self.wait("needs-login", lambda: (r := self.record())["orchestrator"]["state"] == "needs-login" and r)
+        self.assertIn("no sign-in", rec["orchestrator"]["last_exit"])
+        time.sleep(2)
+        self.assertEqual(self.lines(), [])
+        (self.tmp / "claude-home" / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+        self.b.req("POST", f"/orchestrators/{self.name}/start")
+        self.wait("running after the sign-in", lambda: self.record()["orchestrator"]["state"] == "running")
+
+    def test_supervisor_shutdown_ends_a_session_that_should_stop(self):
+        self.b.req("POST", "/orchestrators", dict(name=self.name, worker_id="w1", project="app", brief="Improve.", start=True))
+        self.env["SWARM_ORCH_STOP_GRACE"] = "600"   # the graceful stop stays in "stopping" for this test
+        sup = self.supervise()
+        self.wait("running", lambda: self.record()["orchestrator"]["state"] == "running")
+        self.b.req("POST", f"/orchestrators/{self.name}/stop")
+        self.wait("stopping", lambda: self.record()["orchestrator"]["state"] == "stopping")
+        self.b.req("POST", f"/orchestrators/{self.name}/delete", expect=409)
+        sup.send_signal(signal.SIGTERM)
+        sup.wait(20)
+        self.assertFalse(self.alive(), "the session must not outlive its supervisor once it should stop")
+        self.b.req("POST", f"/orchestrators/{self.name}/delete")
 
     def test_crash_loop_stops_restarting_until_an_admin_restarts(self):
         (self.fake / "mode").write_text("crash")
