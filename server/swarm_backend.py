@@ -144,6 +144,17 @@ CREATE TABLE IF NOT EXISTS activity_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, bot TEXT NOT NULL, kind TEXT NOT NULL,
   decider TEXT, summary TEXT NOT NULL, link TEXT, overrules INTEGER, lasting INTEGER NOT NULL DEFAULT 0,
   dedupe_key TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS orchestrators(
+  name TEXT PRIMARY KEY, worker_id TEXT NOT NULL, project TEXT NOT NULL, repo TEXT, owner_bot_id TEXT,
+  provider TEXT NOT NULL DEFAULT 'claude', model TEXT, brief TEXT NOT NULL, secret_bundles TEXT NOT NULL DEFAULT '[]',
+  relay_agent_name TEXT, desired TEXT NOT NULL DEFAULT 'stopped', state TEXT NOT NULL DEFAULT 'stopped', session_id TEXT,
+  pid INTEGER, tmux_session TEXT, restart_count INTEGER NOT NULL DEFAULT 0, started_at INTEGER, last_heartbeat_at INTEGER,
+  last_exit TEXT, created_at INTEGER, updated_at INTEGER, desired_at INTEGER, generation INTEGER NOT NULL DEFAULT 0,
+  restart_generation INTEGER NOT NULL DEFAULT 0, supervisor_id TEXT, log_tail TEXT, log_tail_at INTEGER, deleted_at INTEGER);
+CREATE TABLE IF NOT EXISTS orchestrator_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, at INTEGER, type TEXT, actor TEXT, text TEXT, meta TEXT);
+CREATE TABLE IF NOT EXISTS orchestrator_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, at INTEGER, sender TEXT, text TEXT, delivered_at INTEGER);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
@@ -162,6 +173,7 @@ MIGRATE_COLUMNS = {
                     ("answer", "TEXT"), ("before_text", "TEXT"), ("after_text", "TEXT"), ("expires_at", "INTEGER"),
                     ("about", "INTEGER")],
     "notices": [("event", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
+    "workers": [("projects", "TEXT")],
 }
 
 SCHEMA_INDEXES = """
@@ -183,10 +195,13 @@ CREATE INDEX IF NOT EXISTS tasks_chain ON tasks(chain_root);
 CREATE INDEX IF NOT EXISTS activity_by_project ON activity_log(project, created_at, id);
 CREATE INDEX IF NOT EXISTS activity_cursor ON activity_log(project, id);
 CREATE INDEX IF NOT EXISTS activity_dedupe ON activity_log(project, bot, dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS orch_events_name ON orchestrator_events(name, id);
+CREATE INDEX IF NOT EXISTS orch_messages_name ON orchestrator_messages(name, delivered_at, id);
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
-SCHEMA_VERSION = 6
+# 7 = orchestrators (0.7.0).
+SCHEMA_VERSION = 7
 ACTIVITY_KINDS = ("activity", "shipped", "blocked", "decision")
 DECIDERS = ("owner", "delegated", "bot")
 CROSS_PROJECT = "cross-project"  # swarm-wide entries: any bot may write, only admin and chief read
@@ -199,6 +214,18 @@ LEARNING_STATUSES = ("pending", "standing")
 RULE_STATUSES = ("proposed", "approved", "rejected")
 DIGEST_DAYS = 14
 STALE_DAYS = 14  # Waiting-on-you items this old are suggested for dropping in the weekly review
+ORCH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+RELAY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,80}$")
+ORCH_FIELDS = {"worker_id", "project", "repo", "owner_bot_id", "provider", "model", "brief", "secret_bundles", "relay_agent_name"}
+ORCH_STATES = ("stopped", "starting", "running", "restarting", "stopping", "crash-loop", "unreachable", "blocked")
+ORCH_EVENT_TYPES = ("start", "stop", "crash", "restart", "crash-loop", "adopt", "relay", "blocked", "supervisor")
+ORCH_STALE_SECONDS = 600       # no heartbeat for this long: unreachable, and the owner is told
+ORCH_SUPERVISOR_LEASE = 90     # a second supervisor is refused while the first one reported this recently
+ORCH_BRIEF_MAX = 20000
+ORCH_MESSAGE_MAX = 4000
+ORCH_TAIL_MAX = 32 * 1024
 
 
 class KeyStore:
@@ -488,6 +515,22 @@ def redact_url(url):
     return f"{p.scheme}://{p.netloc}{tail}"
 
 
+def load_secret_patterns():
+    """The same list the runner scans new lines with before a push (config/secret-patterns.txt)."""
+    path = os.environ.get("SWARM_SECRET_PATTERNS_FILE") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "..",
+                                                                         "config", "secret-patterns.txt")
+    pats = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("  #", 1)[0].strip()
+                if line and not line.startswith("#"):
+                    pats.append(re.compile(line))
+    except (OSError, re.error):
+        pass
+    return pats
+
+
 class Backend:
     def __init__(self, store, public_url="", keys=None):
         self.s = store
@@ -500,6 +543,7 @@ class Backend:
         self.max_open = env_int("SWARM_MAX_OPEN_TASKS_PER_OWNER", 100)
         self.started_at = now()
         self.limiter = FailLimiter(env_int("SWARM_AUTH_FAIL_LIMIT", 20))
+        self.secret_patterns = load_secret_patterns()
 
     # ---------- auth ----------
     def who(self, header):
@@ -1054,6 +1098,8 @@ class Backend:
         draining = bool(b.get("draining"))
         with self.s.tx():
             self.seen(worker, draining)
+            # Kept so an orchestrator can only be pinned to a worker whose allowlist takes its project.
+            self.s.run("UPDATE workers SET projects = ? WHERE name = ?", json.dumps(projects) if projects is not None else None, worker)
             if draining or projects == []:
                 return None
             sql = ("SELECT * FROM tasks t WHERE t.state = 'queued' AND t.not_before <= ?"
@@ -2134,6 +2180,285 @@ class Backend:
         self.s.run("INSERT OR REPLACE INTO meta(key, value) VALUES('log_export_week', ?)", week)
 
     # ---------- status ----------
+    # ---------- orchestrators (one long-lived agent session per name, pinned to one worker) ----------
+    def orch_row(self, name):
+        return self.s.one("SELECT * FROM orchestrators WHERE name = ? AND deleted_at IS NULL", name)
+
+    def shape_orch(self, r, full=False):
+        out = {k: v for k, v in r.items() if k not in ("log_tail", "supervisor_id", "brief", "deleted_at")}
+        out["secret_bundles"] = json.loads(r.get("secret_bundles") or "[]")
+        out["tmux_session"] = r.get("tmux_session") or f"orch-{r['name']}"
+        out["uptime"] = now() - r["started_at"] if r.get("started_at") and r["state"] == "running" else None
+        out["heartbeat_age"] = now() - r["last_heartbeat_at"] if r.get("last_heartbeat_at") else None
+        if full:
+            out["brief"] = r["brief"]
+        return out
+
+    def get_orch(self, who, name):
+        r = self.orch_row(name) if ORCH_NAME_RE.match(name or "") else None
+        if not r or not (who["role"] in ("admin", "chief") or
+                         (who["role"] == "bot" and (r["owner_bot_id"] or "").lower() == who["bot"].lower())):
+            raise ApiError(404, "no such orchestrator")
+        return r
+
+    def orch_event(self, name, typ, actor, text=None, meta=None):
+        self.s.run("INSERT INTO orchestrator_events(name, at, type, actor, text, meta) VALUES(?,?,?,?,?,?)",
+                   name, now(), typ, actor, (text or "")[:500] or None, json.dumps(meta) if meta else None)
+
+    def notify_orch(self, r, kind, text):
+        """One notice per state change: the owner bot first, the Chief of Staff when there is no reachable owner."""
+        seq = self.s.one("SELECT COUNT(*) AS n FROM orchestrator_events WHERE name = ? AND type = ?", r["name"], kind)["n"]
+        event_id = f"orch:{r['name']}:{kind}:{seq}"
+        payload = {"event": "orchestrator", "event_id": event_id, "idempotency_key": event_id, "orchestrator": r["name"],
+                   "kind": kind, "state": r["state"], "desired": r["desired"], "worker_id": r["worker_id"],
+                   "project": r["project"], "owner": r["owner_bot_id"], "text": text}
+        owner = self.bot(r["owner_bot_id"])
+        if owner and owner.get("notify_url"):
+            self.queue_notice(event_id, owner, "owner", payload)
+        else:
+            self.queue_notice(event_id, self.chief(), "no_owner" if not r["owner_bot_id"] else "owner_not_registered", payload)
+
+    def secret_hit(self, text):
+        return next((i + 1 for i, p in enumerate(self.secret_patterns) if p.search(text or "")), None)
+
+    def scrub(self, text):
+        return "\n".join("[line hidden: it looks like a secret]" if self.secret_hit(ln) else ln for ln in (text or "").splitlines())
+
+    def orch_fields(self, b, cur=None):
+        unknown = sorted(set(b) - ORCH_FIELDS - ({"name", "start"} if cur is None else set()))
+        if unknown:
+            raise ApiError(400, f"unknown field(s): {', '.join(unknown)}. Name secret bundles in secret_bundles; never send values")
+        cur = cur or {}
+        f = {}
+        for k in ("worker_id", "project", "repo", "owner_bot_id", "provider", "model", "relay_agent_name"):
+            f[k] = clean_text(b[k], 200, k) or None if k in b else cur.get(k)
+        f["brief"] = clean_text(b["brief"], ORCH_BRIEF_MAX, "brief") if "brief" in b else cur.get("brief")
+        bundles = text_list(b["secret_bundles"], "secret_bundles", BUNDLE_RE, 10) if "secret_bundles" in b else None
+        f["secret_bundles"] = json.dumps(bundles) if bundles is not None else cur.get("secret_bundles") or "[]"
+        if not f["worker_id"] or not SAFE_NAME.fullmatch(f["worker_id"]):
+            raise ApiError(400, "worker_id is required: the name of the one worker that runs this orchestrator")
+        if not f["project"]:
+            raise ApiError(400, "project is required")
+        proj = self.project(f["project"])
+        if not proj:
+            raise ApiError(404, f"no such project {f['project']}. Create it first: swarmctl project set {f['project']} --repo OWNER/REPO")
+        if not f["brief"]:
+            raise ApiError(400, "brief is required: the standing instructions, with no secrets in it")
+        hit = self.secret_hit(f["brief"])
+        if hit:
+            raise ApiError(400, f"the brief looks like it holds a secret (secret pattern {hit}). Put keys in a runtime bundle "
+                                "and name the bundle in secret_bundles")
+        if f["repo"]:
+            f["repo"] = norm_repo(f["repo"])
+            if f["repo"] not in self.project_repos(proj):
+                raise ApiError(400, f"repo {f['repo']} is not one of project {f['project']}'s repos")
+        f["provider"] = f["provider"] or "claude"
+        if f["provider"] != "claude":
+            raise ApiError(400, "provider must be claude: an orchestrator is one persistent Claude Code session")
+        f["model"] = f["model"] or proj.get("default_model") or "default"
+        if not MODEL_RE.match(f["model"]):
+            raise ApiError(400, "bad model name")
+        if f["owner_bot_id"]:
+            owner = self.bot(f["owner_bot_id"])
+            if not owner:
+                raise ApiError(404, f"no such bot {f['owner_bot_id']}")
+            if owner["role"] != "chief" and owner["id"].lower() not in (x.lower() for x in proj["bots"]):
+                raise ApiError(400, f"{owner['id']} is not bound to project {f['project']}")
+            f["owner_bot_id"] = owner["id"]
+        if f["relay_agent_name"]:
+            if not RELAY_NAME_RE.match(f["relay_agent_name"]):
+                raise ApiError(400, "relay_agent_name: lowercase letters, digits, dash or underscore, 2 to 64 characters")
+            taken = self.s.one("SELECT name FROM orchestrators WHERE relay_agent_name = ? AND deleted_at IS NULL AND name != ?",
+                               f["relay_agent_name"], cur.get("name") or "")
+            if taken:
+                raise ApiError(409, f"relay_agent_name {f['relay_agent_name']} is already used by orchestrator {taken['name']}")
+        w = self.s.one("SELECT name, projects FROM workers WHERE name = ?", f["worker_id"])
+        if not w:
+            raise ApiError(400, f"worker {f['worker_id']} has never checked in. Start its runner first (it checks in every 20 seconds)")
+        if w["projects"] is not None and f["project"] not in json.loads(w["projects"]):
+            raise ApiError(403, f"worker {f['worker_id']} does not take project {f['project']} (its SWARM_WORKER_PROJECTS allowlist)")
+        return f
+
+    def create_orch(self, who, b):
+        self.need(who, "admin")
+        name = clean_text(b.get("name"), 40, "name") or ""
+        if not ORCH_NAME_RE.match(name):
+            raise ApiError(400, "name: 2 to 32 characters, lowercase letters, digits and dashes, starting with a letter or digit")
+        with self.s.tx():
+            if self.orch_row(name):
+                raise ApiError(409, f"orchestrator {name} already exists. Change it with PUT /orchestrators/{name}")
+            f = self.orch_fields(b)
+            old = self.s.one("SELECT name FROM orchestrators WHERE name = ?", name)
+            if old:  # a deleted record with the same name: its events stay, the row is replaced
+                self.s.run("DELETE FROM orchestrators WHERE name = ?", name)
+                self.s.run("DELETE FROM orchestrator_messages WHERE name = ?", name)
+            desired = "running" if b.get("start") else "stopped"
+            self.s.run("INSERT INTO orchestrators(name, worker_id, project, repo, owner_bot_id, provider, model, brief, secret_bundles,"
+                       " relay_agent_name, desired, state, tmux_session, created_at, updated_at, desired_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       name, f["worker_id"], f["project"], f["repo"], f["owner_bot_id"], f["provider"], f["model"], f["brief"],
+                       f["secret_bundles"], f["relay_agent_name"], desired, "stopped", f"orch-{name}", now(), now(), now())
+            self.orch_event(name, "created", "admin", f"pinned to worker {f['worker_id']}, project {f['project']}")
+            if desired == "running":
+                self.orch_event(name, "start-requested", "admin")
+        return {"orchestrator": self.shape_orch(self.orch_row(name), full=True)}
+
+    def change_orch(self, who, name, b):
+        self.need(who, "admin")
+        with self.s.tx():
+            r = self.get_orch(who, name)
+            f = self.orch_fields(b, r)
+            live = r["state"] in ("running", "starting", "stopping") and (r["last_heartbeat_at"] or 0) > now() - ORCH_STALE_SECONDS
+            if f["worker_id"] != r["worker_id"] and (r["desired"] == "running" or live):
+                raise ApiError(409, "stop it before moving it to another worker")
+            cols = ", ".join(f"{k} = ?" for k in f)
+            self.s.run(f"UPDATE orchestrators SET {cols}, updated_at = ? WHERE name = ?", *f.values(), now(), name)
+            changed = sorted(k for k in f if f[k] != r.get(k))
+            self.orch_event(name, "config", "admin", "changed: " + (", ".join(changed) or "nothing")
+                            + (". Takes effect at the next start or restart" if changed else ""))
+        return {"orchestrator": self.shape_orch(self.orch_row(name), full=True)}
+
+    def control_orch(self, who, name, action):
+        self.need(who, "admin")
+        with self.s.tx():
+            r = self.get_orch(who, name)
+            if action == "start":
+                self.s.run("UPDATE orchestrators SET desired = 'running', desired_at = ?, generation = generation + 1, updated_at = ?"
+                           " WHERE name = ?", now(), now(), name)
+            elif action == "restart":
+                self.s.run("UPDATE orchestrators SET desired = 'running', desired_at = ?, generation = generation + 1,"
+                           " restart_generation = generation + 1, updated_at = ? WHERE name = ?", now(), now(), name)
+            elif action == "stop":
+                self.s.run("UPDATE orchestrators SET desired = 'stopped', desired_at = ?, updated_at = ? WHERE name = ?", now(), now(), name)
+            elif action == "delete":
+                if r["desired"] == "running":
+                    raise ApiError(409, f"stop it first: swarmctl orchestrator stop {name}")
+                self.s.run("UPDATE orchestrators SET deleted_at = ?, updated_at = ? WHERE name = ?", now(), now(), name)
+                self.s.run("DELETE FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL", name)
+            self.orch_event(name, f"{action}-requested", "admin")
+        return {"orchestrator": self.shape_orch(self.orch_row(name)) if action != "delete" else None, "action": action}
+
+    def list_orchs(self, who):
+        rows = self.s.q("SELECT * FROM orchestrators WHERE deleted_at IS NULL ORDER BY name")
+        if who["role"] == "bot":
+            rows = [r for r in rows if (r["owner_bot_id"] or "").lower() == who["bot"].lower()]
+        return {"orchestrators": [self.shape_orch(r) for r in rows]}
+
+    def show_orch(self, who, name):
+        r = self.get_orch(who, name)
+        events = self.s.q("SELECT at, type, actor, text FROM orchestrator_events WHERE name = ? AND at >= ? ORDER BY id DESC LIMIT 20",
+                          name, r["created_at"] or 0)
+        pending = self.s.one("SELECT id, at, sender FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL ORDER BY id LIMIT 1", name)
+        return {"orchestrator": self.shape_orch(r, full=True), "events": events, "pending_message": pending}
+
+    def orch_logs(self, who, name, qs):
+        r = self.get_orch(who, name)
+        try:
+            n = int(qs.get("lines") or 100)
+        except ValueError:
+            raise ApiError(400, "lines must be a number")
+        if not 1 <= n <= 500:
+            raise ApiError(400, "lines must be 1 to 500")
+        lines = self.scrub(r["log_tail"]).splitlines()[-n:] if r["log_tail"] else []
+        return {"name": name, "at": r["log_tail_at"], "lines": lines}
+
+    def orch_message(self, who, name, b):
+        text = clean_text(b.get("text"), ORCH_MESSAGE_MAX, "text")
+        if not text:
+            raise ApiError(400, "text is required")
+        if self.secret_hit(text):
+            raise ApiError(400, "the message looks like it holds a secret; refer to a secret bundle by name instead")
+        sender = who["bot"] or who["role"]
+        with self.s.tx():
+            r = self.get_orch(who, name)
+            if r["desired"] != "running":
+                raise ApiError(409, f"orchestrator {name} is stopped")
+            if self.s.one("SELECT 1 FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL", name):
+                raise ApiError(409, "one message at a time: the last message has not been delivered yet")
+            cur = self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text) VALUES(?,?,?,?)", name, now(), sender, text)
+            self.orch_event(name, "message", sender, f"message queued ({len(text)} characters)")
+        return {"id": cur.lastrowid, "queued": True}
+
+    def orch_heartbeat(self, who, name, b):
+        """The supervisor on the pinned worker reports, and gets back what it should be doing."""
+        self.need(who, "worker")
+        worker = clean_text(b.get("worker"), 80, "worker") or ""
+        sup = clean_text(b.get("supervisor_id"), 64, "supervisor_id") or ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", sup):
+            raise ApiError(400, "supervisor_id is required")
+        with self.s.tx():
+            r = self.s.one("SELECT * FROM orchestrators WHERE name = ?", name) if ORCH_NAME_RE.match(name) else None
+            if not r:
+                raise ApiError(404, "no such orchestrator")
+            if r["worker_id"] != worker:
+                raise ApiError(403, f"orchestrator {name} is pinned to another worker; nothing may start here")
+            if r["supervisor_id"] and r["supervisor_id"] != sup and (r["last_heartbeat_at"] or 0) > now() - ORCH_SUPERVISOR_LEASE:
+                raise ApiError(409, "another supervisor is running this orchestrator", {"other_supervisor": True})
+            self.seen(worker)
+            state = clean_text(b.get("state"), 20, "state") or r["state"]
+            if state not in ORCH_STATES or state == "unreachable":
+                raise ApiError(400, "bad state")
+            # A supervisor that shuts down cleanly hands over at once, so its replacement need not wait out the lease.
+            vals = {"state": state, "supervisor_id": None if b.get("release") else sup, "last_heartbeat_at": now(), "updated_at": now()}
+            for k, rx in (("session_id", r"[A-Za-z0-9_-]{1,100}"), ("tmux_session", r"orch-[a-z0-9-]{1,40}")):
+                v = clean_text(b.get(k), 100, k) if k in b else r[k]
+                if v and not re.fullmatch(rx, v):
+                    raise ApiError(400, f"bad {k}")
+                vals[k] = v or None
+            for k in ("pid", "restart_count", "started_at"):
+                v = b.get(k, r[k])
+                if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+                    raise ApiError(400, f"{k} must be a whole number")
+                vals[k] = v
+            if "last_exit" in b:
+                vals["last_exit"] = clean_text(b["last_exit"], 300, "last_exit")
+            if isinstance(b.get("log_tail"), str):
+                vals["log_tail"] = self.scrub(b["log_tail"][-ORCH_TAIL_MAX:])
+                vals["log_tail_at"] = now()
+            events = b.get("events") or []
+            if not isinstance(events, list) or len(events) > 50:
+                raise ApiError(400, "events must be a list of at most 50")
+            cols = ", ".join(f"{k} = ?" for k in vals)
+            self.s.run(f"UPDATE orchestrators SET {cols} WHERE name = ?", *vals.values(), name)
+            for e in events:
+                typ = clean_text((e or {}).get("type"), 30, "event type") if isinstance(e, dict) else None
+                if typ not in ORCH_EVENT_TYPES:
+                    raise ApiError(400, f"bad event type {typ!r}")
+                self.orch_event(name, typ, worker, self.scrub(clean_text(e.get("text"), 500, "event text")))
+            fresh = self.s.one("SELECT * FROM orchestrators WHERE name = ?", name)
+            if r["state"] == "unreachable" and state != "unreachable":
+                self.orch_event(name, "recovered", "backend", f"the supervisor is reporting again ({state})")
+            if state == "crash-loop" and r["state"] != "crash-loop":
+                self.notify_orch(fresh, "crash-loop", f"Orchestrator {name} crashed too often and was not restarted. "
+                                                      f"Last exit: {fresh['last_exit'] or 'unknown'}. Restart it with: "
+                                                      f"swarmctl orchestrator restart {name}")
+            ack = b.get("delivered_message_id")
+            if isinstance(ack, int) and not isinstance(ack, bool):
+                if self.s.run("UPDATE orchestrator_messages SET delivered_at = ? WHERE id = ? AND name = ? AND delivered_at IS NULL",
+                              now(), ack, name).rowcount:
+                    self.orch_event(name, "message-delivered", worker, f"message {ack} typed into the session")
+            msg = None
+            if not r["deleted_at"] and r["desired"] == "running":
+                msg = self.s.one("SELECT id, at, sender, text FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL"
+                                 " ORDER BY id LIMIT 1", name)
+        return {"desired": "stopped" if r["deleted_at"] else r["desired"], "deleted": bool(r["deleted_at"]),
+                "generation": r["generation"], "restart_generation": r["restart_generation"], "message": msg,
+                "config": {k: r[k] for k in ("project", "repo", "provider", "model", "brief", "relay_agent_name", "session_id")}
+                | {"secret_bundles": json.loads(r["secret_bundles"] or "[]")}}
+
+    def orchestrator_watch(self):
+        """Mark orchestrators whose supervisor went quiet as unreachable, and tell the owner once."""
+        with self.s.tx():
+            for r in self.s.q("SELECT * FROM orchestrators WHERE deleted_at IS NULL AND desired = 'running'"
+                              " AND state NOT IN ('unreachable', 'crash-loop')"
+                              " AND max(coalesce(last_heartbeat_at, 0), coalesce(desired_at, 0)) < ?", now() - ORCH_STALE_SECONDS):
+                self.s.run("UPDATE orchestrators SET state = 'unreachable', updated_at = ? WHERE name = ?", now(), r["name"])
+                last = f"{(now() - r['last_heartbeat_at']) // 60} minutes ago" if r["last_heartbeat_at"] else "never"
+                self.orch_event(r["name"], "unreachable", "backend", f"no heartbeat from worker {r['worker_id']}; last one {last}")
+                self.notify_orch(dict(r, state="unreachable"), "unreachable",
+                                 f"Orchestrator {r['name']} on worker {r['worker_id']} has not reported for over "
+                                 f"{ORCH_STALE_SECONDS // 60} minutes (last heartbeat {last}). Check: "
+                                 f"systemctl status swarm-orchestrator@{r['name']}")
+
     def status(self, who):
         mine = who["role"] == "bot"
         where, args = ("WHERE lower(owner) = lower(?)", [who["bot"]]) if mine else ("", [])
@@ -2166,6 +2491,11 @@ class Backend:
                         out["warnings"].append("There is no database backup yet. Check: systemctl status swarm-backup")
         else:
             out["notices"] = {}
+        out["orchestrators"] = [{k: o[k] for k in ("name", "state", "desired", "worker_id", "last_heartbeat_at", "restart_count")}
+                                for o in self.list_orchs(who)["orchestrators"]]
+        for o in out["orchestrators"]:
+            if o["desired"] == "running" and o["state"] in ("unreachable", "crash-loop", "blocked"):
+                out["warnings"].append(f"Orchestrator {o['name']} is {o['state']}. See: swarmctl orchestrator status {o['name']}")
         return out
 
 
@@ -2334,7 +2664,7 @@ def deliver_once(backend, poster=None):
 def background(backend, stop):
     while not stop.wait(5):
         for job in (backend.reap, lambda: deliver_once(backend), backend.escalate, backend.watchdog, backend.retention,
-                    backend.weekly_export):
+                    backend.weekly_export, backend.orchestrator_watch):
             try:
                 job()
             except Exception as e:  # keep the loop alive
@@ -2593,6 +2923,49 @@ def r_log_brief(api, who, m, qs, body, h):
     return ("text/markdown; charset=utf-8", api.log_brief(who, qs).encode())
 
 
+@route("GET", r"/orchestrators", ("admin", "chief", "bot"), "List orchestrators with state, worker and last heartbeat. Bot: the ones it owns")
+def r_orch_list(api, who, m, qs, body, h):
+    return api.list_orchs(who)
+
+
+@route("POST", r"/orchestrators", ("admin",), "Create an orchestrator pinned to one worker (secret bundles by name only). `start: true` starts it")
+def r_orch_create(api, who, m, qs, body, h):
+    return api.create_orch(who, body)
+
+
+@route("GET", r"/orchestrators/([^/]+)", ("admin", "chief", "bot"), "One orchestrator with its brief and last 20 events. Bot: own only")
+def r_orch_get(api, who, m, qs, body, h):
+    return api.show_orch(who, m[0])
+
+
+@route("PUT", r"/orchestrators/([^/]+)", ("admin",), "Change an orchestrator's settings; they apply at the next start or restart")
+def r_orch_change(api, who, m, qs, body, h):
+    return api.change_orch(who, m[0], body)
+
+
+@route("POST", r"/orchestrators/([^/]+)/(start|stop|restart|delete)", ("admin",),
+       "Set it to run, stop it gracefully, restart it (also clears a crash loop), or delete a stopped one")
+def r_orch_control(api, who, m, qs, body, h):
+    return api.control_orch(who, m[0], m[1])
+
+
+@route("GET", r"/orchestrators/([^/]+)/logs", ("admin", "chief", "bot"), "The last lines of its terminal (`lines`, up to 500), secret-scanned. Bot: own only")
+def r_orch_logs(api, who, m, qs, body, h):
+    return api.orch_logs(who, m[0], qs)
+
+
+@route("POST", r"/orchestrators/([^/]+)/messages", ("admin", "chief", "bot"), "Queue one message (`text`, up to 4000 characters); "
+       "typed into the session when the agent is idle. One at a time. Bot: own only")
+def r_orch_message(api, who, m, qs, body, h):
+    return api.orch_message(who, m[0], body)
+
+
+@route("POST", r"/worker/orchestrators/([^/]+)/heartbeat", ("worker",), "Supervisor on the pinned worker only: report state and the "
+       "terminal tail, get the desired state, settings and one pending message")
+def r_orch_heartbeat(api, who, m, qs, body, h):
+    return api.orch_heartbeat(who, m[0], body)
+
+
 @route("GET", r"/notices", ("admin", "chief"), "The last 100 deliveries with state and last error")
 def r_notices(api, who, m, qs, body, h):
     return {"notices": api.s.q("SELECT id, key, target, reason, event, state, attempts, last_error, created_at, sent_at"
@@ -2606,7 +2979,7 @@ def permission_table():
              "| --- | --- | " + " | ".join("---" for _ in cols) + " | --- |"]
     for r in ROUTES:
         path = r["pattern"].replace("([^/]+)", "ID").replace("(artifacts|attachments)", "artifacts or attachments") \
-            .replace("(report|artifact|bundle)", "KIND").replace("\\", "")
+            .replace("(report|artifact|bundle)", "KIND").replace("(start|stop|restart|delete)", "ACTION").replace("\\", "")
         cells = ["public" if r["roles"] is None else ("yes" if c in r["roles"] else "no") for c in cols]
         lines.append(f"| {r['method']} | `{path}` | " + " | ".join(cells) + f" | {r['doc']} |")
     return "\n".join(lines)

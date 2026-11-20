@@ -85,6 +85,14 @@ The downsides are the reverse of the chain's strengths: one stuck run can burn i
 session grows all the time, and a worker update waits for the run to end
 ([updating-the-kit.md](updating-the-kit.md)).
 
+## When neither fits: an orchestrator
+
+A chain or a long run both end. For a product-level agent that must keep **one session** going for days on
+one worker, with a fixed name other bots can message, the kit has orchestrators: one Claude Code session in
+tmux, kept up by its own supervisor outside the runner, with heartbeats, crash restarts that resume the
+session, and a crash-loop stop. See [orchestrators.md](orchestrators.md). Prefer a chain whenever the job
+can be split into cycles.
+
 ## Heartbeats, and what they cost
 
 The worker sends a **machine heartbeat** every 30 seconds while a task runs, chain or not. It is a plain

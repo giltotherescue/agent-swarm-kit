@@ -186,6 +186,7 @@ maybe type a code). How it works: [docs/cloud-init.md](docs/cloud-init.md).
 | **treg** | Paid data with no subscription, and some private tools it connects to | Keyword and SERP data, contact enrichment, Google Search Console, Google Ads |
 | **The worker** | All coding (any size), jobs over about 15 minutes, design, deep research, bulk scraping, a specific model | A pricing page change, a 40-page competitor study, a second-model review |
 | **A chain on the worker** | Jobs that run for days as their own orchestrator, in short cycles that hand on a checkpoint ([long-running jobs](docs/long-running-jobs.md)) | A "polisher" that keeps walking the app, fixing bugs and testing again |
+| **An orchestrator on the worker** | Rare: one agent that must keep a single session up for days on one worker ([orchestrators](docs/orchestrators.md)) | A product agent other bots message by name |
 | **The bot itself** | Quick lookups, coordination, messages | "What did we decide about the logo?", replying in Slack |
 | **Executor** | Later, only if the worker needs your connected tools too | A worker task that must read your CRM |
 
@@ -303,6 +304,7 @@ Start with the concepts, then follow your path.
 - [Activity and decisions](docs/activity-and-decisions.md): recent feed and nightly export to the memory repo.
 - [Delegated decisions](docs/delegated-decisions.md): when the Chief of Staff can answer and how you can overrule it.
 - [Long-running jobs](docs/long-running-jobs.md): jobs that run for days, as a chain of short cycles.
+- [Orchestrators](docs/orchestrators.md): the rare agent that must keep one session up for days on one worker.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Zero-touch server (cloud-init)](docs/cloud-init.md): the bot builds the worker; you only approve in a browser.
 - [Worker server setup](docs/worker-setup.md): the by-hand path: any provider, Tailscale, and the security baseline.

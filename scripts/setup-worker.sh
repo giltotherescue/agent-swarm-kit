@@ -770,6 +770,8 @@ EOF
   if [[ $UPGRADE -eq 1 ]] && systemctl is-enabled --quiet swarm-worker; then
     systemctl restart swarm-worker
   fi
+  # Orchestrator supervisors pick up the new code. Their sessions live in the agent's own scopes and keep running.
+  systemctl try-restart 'swarm-orchestrator@*.service' >/dev/null 2>&1 || true
   rm -f "$RUNNER_HOME/drain"
 
   say "Old releases: keeping current and previous only"

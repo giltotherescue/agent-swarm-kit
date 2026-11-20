@@ -99,6 +99,14 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | GET | `/log/items` | yes | yes | yes | no | no | Current state of each item (deliverable) in a project. Bot: bound projects only |
 | GET | `/log/rules` | yes | yes | yes | no | no | A project's standing rules, rule changes waiting for review, and the changelog (`format=md` for the rules doc) |
 | GET | `/log/brief` | yes | yes | yes | no | no | Read before drafting: standing rules plus the last 14 days of feedback, as Markdown |
+| GET | `/orchestrators` | yes | yes | yes | no | no | List orchestrators with state, worker and last heartbeat. Bot: the ones it owns |
+| POST | `/orchestrators` | yes | no | no | no | no | Create an orchestrator pinned to one worker (secret bundles by name only). `start: true` starts it |
+| GET | `/orchestrators/ID` | yes | yes | yes | no | no | One orchestrator with its brief and last 20 events. Bot: own only |
+| PUT | `/orchestrators/ID` | yes | no | no | no | no | Change an orchestrator's settings; they apply at the next start or restart |
+| POST | `/orchestrators/ID/ACTION` | yes | no | no | no | no | Set it to run, stop it gracefully, restart it (also clears a crash loop), or delete a stopped one |
+| GET | `/orchestrators/ID/logs` | yes | yes | yes | no | no | The last lines of its terminal (`lines`, up to 500), secret-scanned. Bot: own only |
+| POST | `/orchestrators/ID/messages` | yes | yes | yes | no | no | Queue one message (`text`, up to 4000 characters); typed into the session when the agent is idle. One at a time. Bot: own only |
+| POST | `/worker/orchestrators/ID/heartbeat` | no | no | no | yes | no | Supervisor on the pinned worker only: report state and the terminal tail, get the desired state, settings and one pending message |
 | GET | `/notices` | yes | yes | no | no | no | The last 100 deliveries with state and last error |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).

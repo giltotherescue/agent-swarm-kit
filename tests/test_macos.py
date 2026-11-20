@@ -148,6 +148,23 @@ class SetupScript(unittest.TestCase):
         self.assertEqual(os.listdir(f"{self.home}/Library/LaunchAgents"), [])
         self.assertTrue(os.path.exists(f"{self.home}/.config/agent-swarm/worker.token"))
 
+    def test_orchestrator_supervisor_agent_is_added_and_removed(self):
+        self.assertEqual(self.run_setup("--orchestrator", "polisher", check=False).returncode, 1)  # kit not installed yet
+        self.run_setup("--with-backend")
+        self.assertEqual(self.run_setup("--orchestrator", "Bad Name", check=False).returncode, 1)
+        self.run_setup("--orchestrator", "polisher")
+        path = f"{self.home}/Library/LaunchAgents/com.agent-swarm-kit.orchestrator-polisher.plist"
+        with open(path, "rb") as fh:
+            agent = plistlib.load(fh)
+        self.assertEqual(agent["ProgramArguments"], [f"{self.home}/.local/lib/agent-swarm/swarm-launchd", "orchestrator", "polisher"])
+        self.assertTrue(agent["KeepAlive"])
+        self.assertTrue(agent["AbandonProcessGroup"])   # stopping the supervisor leaves the tmux session alone
+        self.run_setup("--remove-orchestrator", "polisher")
+        self.assertFalse(os.path.exists(path))
+        self.run_setup("--orchestrator", "polisher")
+        self.run_setup("--uninstall")
+        self.assertEqual(os.listdir(f"{self.home}/Library/LaunchAgents"), [])
+
     def test_refuses_on_linux_without_the_test_switch(self):
         env = {k: v for k, v in self.env.items() if k != "SWARM_MAC_FORCE"}
         r = subprocess.run(["bash", SETUP, "--with-backend"], capture_output=True, text=True, env=env)

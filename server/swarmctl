@@ -30,6 +30,9 @@ Examples:
   swarmctl enqueue --chain --max-cycles 30 --owner app-bot -r you/app --pr polish.md   (see docs/long-running-jobs.md)
   swarmctl log export marketing --days 7 --out marketing-log.md
   sudo swarmctl drain | undrain | restart-when-idle    (on the worker)
+  swarmctl orchestrator create app-steward --worker build-box -p app --owner app-bot --brief steward.md --start
+  swarmctl orchestrator list | status NAME | logs NAME | start | stop | restart NAME   (see docs/orchestrators.md)
+  swarmctl orchestrator message app-steward "Look at the signup page next"
 """
 import argparse
 import base64
@@ -169,6 +172,8 @@ def cmd_status(a):
     for w in r.get("workers") or []:
         ago = int(time.time()) - (w["last_seen"] or 0)
         print(f"  worker   {w['name']}  last seen {ago}s ago{'  (draining)' if w['draining'] else ''}")
+    for o in r.get("orchestrators") or []:
+        print(f"  orchestrator {o['name']}  {o['state']} (wants {o['desired']})  on {o['worker_id']}  {ago_text(o['last_heartbeat_at'])}")
     for t in r["running"]:
         print(f"  running  {t['id']}  owner {t['owner']}  on {t['lease_worker']}")
     for t in r["waiting"]:
@@ -177,6 +182,92 @@ def cmd_status(a):
         print("  WARNING: " + w)
     if r["stuck_running"]:
         print("  STUCK (no heartbeat): " + ", ".join(r["stuck_running"]))
+
+
+def ago_text(ts):
+    if not ts:
+        return "never reported"
+    sec = int(time.time()) - ts
+    return f"last heartbeat {sec}s ago" if sec < 120 else f"last heartbeat {sec // 60} min ago"
+
+
+def duration(sec):
+    if sec is None:
+        return "-"
+    d, rest = divmod(int(sec), 86400)
+    return (f"{d}d " if d else "") + f"{rest // 3600}h {rest % 3600 // 60}m"
+
+
+def cmd_orchestrator(a):
+    """Long-running orchestrators (docs/orchestrators.md). Creating, changing, starting and stopping need the admin token."""
+    path = f"/orchestrators/{urllib.parse.quote(a.name or '', safe='')}"
+    if a.action == "list":
+        r = call("GET", "/orchestrators")
+        if a.json:
+            return show(r)
+        for o in r["orchestrators"]:
+            print(f"{o['name']:20} {o['state']:11} wants {o['desired']:8} on {o['worker_id']:16} up {duration(o['uptime']):10} "
+                  f"restarts {o['restart_count']}  {ago_text(o['last_heartbeat_at'])}")
+        return
+    if not a.name:
+        sys.exit(f"swarmctl: orchestrator {a.action} needs a NAME")
+    if a.action in ("create", "set"):
+        body = {"worker_id": a.worker, "project": a.project, "repo": a.repo, "owner_bot_id": a.owner, "model": a.model,
+                "relay_agent_name": a.relay_name}
+        if a.brief:
+            body["brief"] = read_prompt(a.brief)
+        if a.secret_bundle is not None:
+            body["secret_bundles"] = [b for b in a.secret_bundle if b]
+        if a.no_secret_bundles:
+            body["secret_bundles"] = []
+        body = {k: v for k, v in body.items() if v is not None}
+        if a.action == "create":
+            body.update(name=a.name, start=a.start)
+            r = call("POST", "/orchestrators", body)
+        else:
+            r = call("PUT", path, body)
+        o = r["orchestrator"]
+        print(f"{o['name']} {o['state']} (wants {o['desired']}) on worker {o['worker_id']}")
+        if a.action == "create":
+            print(f"On worker {o['worker_id']}, install its supervisor once: sudo systemctl enable --now swarm-orchestrator@{o['name']}"
+                  " (docs/orchestrators.md; on a Mac: bash scripts/setup-macos.sh --orchestrator NAME)")
+        return
+    if a.action in ("start", "stop", "restart", "delete"):
+        r = call("POST", f"{path}/{a.action}", {})
+        verb = {"start": "set to run", "stop": "stopping (the agent gets a wrap-up message first)",
+                "restart": "restarting (a crash loop is cleared)", "delete": "deleted"}[a.action]
+        print(f"{a.name}: {verb}. The supervisor acts within about 30 seconds.")
+        return
+    if a.action == "message":
+        text = a.text if a.text != "-" else sys.stdin.read()
+        r = call("POST", f"{path}/messages", {"text": text})
+        print(f"message {r['id']} queued; it is typed into the session when the agent is idle")
+        return
+    if a.action == "logs":
+        r = call("GET", f"{path}/logs?lines={a.lines}")
+        if a.json:
+            return show(r)
+        when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(r["at"])) if r["at"] else "never"
+        print(f"# last {len(r['lines'])} lines of orch-{a.name}, uploaded {when}")
+        print("\n".join(r["lines"]))
+        return
+    r = call("GET", path)
+    if a.json:
+        return show(r)
+    o = r["orchestrator"]
+    print(f"{o['name']}: {o['state']} (wants {o['desired']})")
+    for label, value in (("worker", o["worker_id"]), ("project", o["project"]), ("repo", o["repo"] or "-"),
+                         ("owner bot", o["owner_bot_id"] or "-"), ("model", o["model"]), ("relay name", o["relay_agent_name"] or "-"),
+                         ("secret bundles", ", ".join(o["secret_bundles"]) or "-"), ("tmux session", o["tmux_session"]),
+                         ("pid", o["pid"] or "-"), ("session id", o["session_id"] or "-"), ("uptime", duration(o["uptime"])),
+                         ("heartbeat", ago_text(o["last_heartbeat_at"])), ("restarts", o["restart_count"]),
+                         ("last exit", o["last_exit"] or "-")):
+        print(f"  {label:15} {value}")
+    if r.get("pending_message"):
+        print(f"  {'message':15} one waiting from {r['pending_message']['sender']}")
+    print("  last events:")
+    for e in r["events"][:10]:
+        print(f"    {time.strftime('%m-%d %H:%M', time.gmtime(e['at']))}  {e['type']:18} {e['text'] or ''}")
 
 
 def cmd_waiting(a):
@@ -659,6 +750,19 @@ def main():
     apply.add_argument("snapshot", help="snapshot file, or - for stdin")
     apply.add_argument("--dir", required=True, help="memory repo checkout")
     apply.set_defaults(fn=apply_activity)
+
+    orc = sub.add_parser("orchestrator", help="long-running orchestrators: one agent session kept up for days on one worker")
+    orc.add_argument("action", choices=["list", "status", "create", "set", "start", "stop", "restart", "delete", "logs", "message"])
+    orc.add_argument("name", nargs="?"); orc.add_argument("text", nargs="?", help="message: the text, or - for stdin")
+    orc.add_argument("--worker", help="create: the one worker that runs it (its SWARM_WORKER_NAME)")
+    orc.add_argument("-p", "--project"); orc.add_argument("-r", "--repo"); orc.add_argument("--owner", help="owner bot id (gets notices)")
+    orc.add_argument("-m", "--model"); orc.add_argument("--brief", help="file with the standing instructions, or - for stdin (no secrets)")
+    orc.add_argument("--secret-bundle", action="append", help="name of a runtime secret bundle to load (repeat). Names only")
+    orc.add_argument("--no-secret-bundles", action="store_true", help="set: remove all secret bundles")
+    orc.add_argument("--relay-name", help="fixed name on Agent Relay (optional)")
+    orc.add_argument("--start", action="store_true", help="create: set it to run right away")
+    orc.add_argument("--lines", type=int, default=100, help="logs: how many lines (up to 500)")
+    orc.add_argument("--json", action="store_true"); orc.set_defaults(fn=cmd_orchestrator)
 
     nt = sub.add_parser("notices", help="recent deliveries to bot inboxes (admin or chief)")
     nt.set_defaults(fn=lambda a: show(call("GET", "/notices")))

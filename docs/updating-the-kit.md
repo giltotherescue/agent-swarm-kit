@@ -105,6 +105,17 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.7.0 (not released yet)
+
+Run the setup script as usual. The backend adds the `orchestrators`, `orchestrator_events` and
+`orchestrator_messages` tables and a `projects` column on `workers` by itself at start; nothing is changed or
+removed. The setup script installs the `swarm-orchestrator@.service` template but enables nothing: no
+orchestrator runs until you create one and enable its supervisor ([orchestrators.md](orchestrators.md)).
+After an upgrade it restarts any running supervisors (`systemctl try-restart 'swarm-orchestrator@*'`);
+their sessions keep running and are adopted. A worker reports its project allowlist again with its next
+check-in (every 20 seconds), so create orchestrators after the upgraded runner has checked in. On a Mac,
+run `scripts/setup-macos.sh` again (it adds `tmux`), then `--orchestrator NAME` for each one.
+
 ## Upgrading to 0.6.0
 
 The backend adds the activity table on startup. Existing project log entries stay where they are.

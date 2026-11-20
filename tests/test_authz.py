@@ -127,7 +127,7 @@ class AuthzTest(unittest.TestCase):
         tokens = {"admin": ADMIN, "chief": self.chief, "bot": self.alice, "worker": WORKER, "task": task_tok}
         for r in sb.ROUTES:
             path = r["pattern"].replace("([^/]+)", "zz-none").replace("(artifacts|attachments)", "artifacts") \
-                .replace("(report|artifact|bundle)", "report").replace("\\", "")
+                .replace("(report|artifact|bundle)", "report").replace("(start|stop|restart|delete)", "start").replace("\\", "")
             for role, tok in tokens.items():
                 st, out = self.b.call(r["method"], path, {}, tok=tok)
                 generic = st == 403 and isinstance(out, dict) and out.get("error") == "this token cannot do that"

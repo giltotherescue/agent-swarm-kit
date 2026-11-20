@@ -15,6 +15,7 @@ worker.
 | **treg** | Paid data without a subscription (SEO, search results, enrichment), and your own private tools it connects to, like Google Search Console and Google Ads | Accounts a connector already covers well, big batches without asking |
 | **The worker** | All coding of any size, jobs over about 15 minutes, design, deep research, bulk scraping, work that should run on a specific model | Quick replies, chat, anything that needs you right now |
 | **A chain on the worker** | Jobs that run for days and steer themselves, as short cycles that each hand a checkpoint to the next | One-off tasks; anything you want to watch step by step |
+| **An orchestrator on the worker** | A product-level agent that must keep one session up for days on one worker, which other bots message by name | Anything a chain can do; most long jobs should be a chain |
 | **Executor** | Later: when a worker task needs one of your connected tools too | Day one. Skip it at first |
 
 ## The bot itself
@@ -90,7 +91,9 @@ when there is something to look at or decide.
 through the app, fixing bugs and testing again. Run those as a **chain**: each cycle is a short run that
 writes a checkpoint and queues the next cycle, so a stuck cycle costs little, and cancelling any cycle
 stops the whole chain. A single long run with a bigger time limit is possible too, but it is not the
-default. See [long-running-jobs.md](long-running-jobs.md).
+default. See [long-running-jobs.md](long-running-jobs.md). Only when one agent truly has to hold a single
+session for days (a product-level agent other bots talk to by name), use an **orchestrator**: one session in
+tmux on one pinned worker, kept up by its own supervisor ([orchestrators.md](orchestrators.md)).
 
 ## Executor
 

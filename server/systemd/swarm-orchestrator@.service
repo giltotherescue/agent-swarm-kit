@@ -1,0 +1,31 @@
+[Unit]
+Description=agent-swarm-kit orchestrator supervisor for %i (one long-lived agent session in tmux)
+Documentation=file:///opt/agent-swarm-kit/current/docs/orchestrators.md
+After=network-online.target swarm-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Not part of swarm-worker: no task slot, no concurrency count, and restarting or updating the runner never
+# touches it. Like the runner it holds the worker token and reaches the agent user only through agent-exec.
+# The session itself runs as the agent user in tmux, in its own scope (swarm-orch-%i-*.scope) under the agent's
+# user manager, so restarting this unit leaves the session running; the next supervisor adopts it.
+User=swarm-runner
+Group=swarm-runner
+Environment=HOME=/var/lib/swarm-runner
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=SWARM_AGENT_USER=agent
+Environment=SWARM_WORKER_TOKEN_FILE=/var/lib/swarm-runner/worker.token
+Environment=SWARM_RUNNER_DIR=/var/lib/swarm-runner
+Environment=SWARM_HANDOFF_DIR=/srv/agent-swarm
+Environment=SWARM_WORK_DIR=/home/agent/work
+EnvironmentFile=/etc/agent-swarm/swarm.env
+ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/current/server/swarm_orchestrator.py %i
+# Only the supervisor is stopped on restart; the session lives in the agent's own scope.
+KillMode=process
+Restart=always
+RestartSec=10
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

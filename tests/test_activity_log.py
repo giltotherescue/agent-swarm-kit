@@ -202,7 +202,7 @@ class ActivityHelpersTest(unittest.TestCase):
                 db.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
                 db.execute("INSERT INTO projects(name) VALUES('project')")
             upgraded = sb.Store(path)
-            self.assertEqual(upgraded.one("SELECT value FROM meta WHERE key = 'schema_version'")["value"], "6")
+            self.assertEqual(upgraded.one("SELECT value FROM meta WHERE key = 'schema_version'")["value"], str(sb.SCHEMA_VERSION))
             self.assertEqual(upgraded.one("SELECT name FROM projects")["name"], "project")
             self.assertEqual(upgraded.one("SELECT COUNT(*) AS count FROM activity_log")["count"], 0)
             store.db().close()

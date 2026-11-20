@@ -10,6 +10,8 @@
 #       --backend-url URL --worker-token-file FILE        (required in that case; the token file is copied, never printed)
 #   bash scripts/setup-macos.sh --with-backend        this Mac runs the task backend too (one machine does it all)
 #   bash scripts/setup-macos.sh --uninstall           stop and remove the launchd agents (your data stays)
+#   bash scripts/setup-macos.sh --orchestrator NAME   after the install: add the supervisor for one orchestrator
+#   bash scripts/setup-macos.sh --remove-orchestrator NAME   stop and remove it (docs/orchestrators.md)
 # Options: --worker-name NAME  --no-claude  --no-codex  --max-parallel N (default 1)
 #
 # What it makes (all under your home folder):
@@ -19,13 +21,14 @@
 #   ~/Library/LaunchAgents/com.agent-swarm-kit.sync.plist     secrets sync, every 10 minutes
 #   ~/Library/LaunchAgents/com.agent-swarm-kit.cleanup.plist  old task folders, daily
 #   ~/Library/LaunchAgents/com.agent-swarm-kit.backend.plist  only with --with-backend
+#   ~/Library/LaunchAgents/com.agent-swarm-kit.orchestrator-NAME.plist  only with --orchestrator NAME
 # Safe to run again: a second run is an upgrade. Exit codes: 0 done, 1 stopped on an error.
 set -euo pipefail
 
 KIT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL_PREFIX=com.agent-swarm-kit
 WITH_BACKEND=0; WITH_CLAUDE=1; WITH_CODEX=1; MAX_PARALLEL=1; UNINSTALL=0
-BACKEND_URL=""; TOKEN_FILE=""; WORKER_NAME=""
+BACKEND_URL=""; TOKEN_FILE=""; WORKER_NAME=""; ORCH=""; ORCH_ACTION=""
 
 say() { printf '\n==> %s\n' "$*"; }
 die() { printf 'setup-macos: %s\n' "$*" >&2; exit 1; }
@@ -85,8 +88,8 @@ write_env() {
   chmod 600 "$CONF/swarm.env"
 }
 
-plist() {  # plist LABEL_SUFFIX ROLE EXTRA_XML : write one LaunchAgent file
-  local suffix="$1" role="$2" extra="${3:-}"
+plist() {  # plist LABEL_SUFFIX ROLE EXTRA_XML [ARG] : write one LaunchAgent file
+  local suffix="$1" role="$2" extra="${3:-}" arg="${4:+<string>$4</string>}"
   cat > "$AGENTS/$LABEL_PREFIX.$suffix.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,7 +97,7 @@ plist() {  # plist LABEL_SUFFIX ROLE EXTRA_XML : write one LaunchAgent file
 <dict>
   <key>Label</key><string>$LABEL_PREFIX.$suffix</string>
   <key>ProgramArguments</key>
-  <array><string>$LIBDIR/swarm-launchd</string><string>$role</string></array>
+  <array><string>$LIBDIR/swarm-launchd</string><string>$role</string>$arg</array>
 $extra
   <key>AbandonProcessGroup</key><true/>
   <key>StandardOutPath</key><string>$LOGS/agent-swarm-$suffix.log</string>
@@ -121,6 +124,24 @@ write_plists() {
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>'
   fi
+}
+
+orchestrator_agent() {  # add or remove the supervisor for one orchestrator (the kit must be installed already)
+  if [[ "$ORCH_ACTION" == remove ]]; then
+    launch stop "orchestrator-$ORCH"; rm -f "$AGENTS/$LABEL_PREFIX.orchestrator-$ORCH.plist"
+    echo "Removed the supervisor for $ORCH. Its tmux session (orch-$ORCH) keeps running until you stop the orchestrator:"
+    echo "  swarmctl orchestrator stop $ORCH"
+    return 0
+  fi
+  [[ -x "$LIBDIR/swarm-launchd" ]] || die "install the kit first (run this script without --orchestrator)"
+  command -v tmux >/dev/null 2>&1 || die "tmux is missing. Run: brew install tmux"
+  install -d "$AGENTS" "$LOGS"
+  # The supervisor stays up; launchd restarts it. AbandonProcessGroup (in plist) keeps the tmux session alive when it stops.
+  plist "orchestrator-$ORCH" orchestrator '  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>' "$ORCH"
+  launch start "orchestrator-$ORCH"
+  echo "Supervisor for orchestrator $ORCH loaded. Log: $LOGS/agent-swarm-orchestrator-$ORCH.log"
 }
 
 launch() {  # launch ACTION LABEL_SUFFIX : bootstrap or bootout one agent (launchctl is stubbed in tests)
@@ -183,7 +204,7 @@ install_cli_tools() {
   say "Homebrew packages (no sudo)"
   command -v brew >/dev/null || die "Homebrew is not installed. Install it first from https://brew.sh (its own installer asks for your Mac password once), then run this again."
   local p
-  for p in coreutils git gh node jq sops age; do
+  for p in coreutils git gh node jq sops age tmux; do
     brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
   done
   if (( WITH_CLAUDE )) && ! command -v claude >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/claude" ]]; then
@@ -208,11 +229,15 @@ parse_args() {
       --no-claude) WITH_CLAUDE=0; shift;;
       --no-codex) WITH_CODEX=0; shift;;
       --uninstall) UNINSTALL=1; shift;;
-      -h|--help) sed -n '2,26p' "$0"; exit 0;;
+      --orchestrator) ORCH="${2:?missing name}"; ORCH_ACTION=add; shift 2;;
+      --remove-orchestrator) ORCH="${2:?missing name}"; ORCH_ACTION=remove; shift 2;;
+      -h|--help) sed -n '2,25p' "$0"; exit 0;;
       *) die "unknown option: $1";;
     esac
   done
   [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || die "--max-parallel needs a whole number"
+  [[ -z "$ORCH" || "$ORCH" =~ ^[a-z0-9][a-z0-9-]{1,31}$ ]] || die "orchestrator name: 2 to 32 lowercase letters, digits and dashes"
+  [[ -n "$ORCH" ]] && return 0
   [[ -z "$WORKER_NAME" || "$WORKER_NAME" =~ ^[A-Za-z0-9._-]{1,60}$ ]] || die "--worker-name: letters, numbers, dot, dash, underscore only"
   if (( ! UNINSTALL )) && (( ! WITH_BACKEND )); then
     [[ -n "$BACKEND_URL" && -n "$TOKEN_FILE" ]] || die "give --backend-url and --worker-token-file (a second worker for a backend elsewhere), or --with-backend"
@@ -226,9 +251,17 @@ main() {
   [[ "${SWARM_MAC_FORCE:-0}" == 1 || "$(uname -s)" == Darwin ]] || die "this script is for macOS. On Ubuntu use scripts/setup-worker.sh"
   [[ $EUID -ne 0 ]] || die "do not run this with sudo. It needs no admin rights and installs only into your home folder"
   paths
+  if [[ -n "$ORCH" ]]; then
+    orchestrator_agent
+    return 0
+  fi
   if (( UNINSTALL )); then
     say "Stopping the launchd agents"
     for s in worker sync cleanup backend; do launch stop "$s"; rm -f "$AGENTS/$LABEL_PREFIX.$s.plist"; done
+    for f in "$AGENTS/$LABEL_PREFIX".orchestrator-*.plist; do
+      [[ -e "$f" ]] || continue
+      s="$(basename "$f" .plist)"; launch stop "${s#"$LABEL_PREFIX".}"; rm -f "$f"
+    done
     echo "Removed. Your settings ($CONF), tasks and secrets are still there; delete them by hand if you want them gone."
     return 0
   fi
