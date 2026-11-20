@@ -4,6 +4,23 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.6.1 (2026-11-20)
+
+Fixes from the fresh-server install test of 0.6.0 on DigitalOcean Ubuntu 24.04 (install test 5).
+
+- **First boot stopped at the Claude and Codex installs.** Stock DigitalOcean Ubuntu 24.04 images mark root's
+  password "must be changed", so every `sudo -u agent` failed with "Account or password is expired".
+  `setup-worker.sh` now clears that flag (`chage -d TODAY root`) before anything runs as `agent`. With `--yes`
+  it does so on its own; by hand it asks first. It sets no password and does not touch SSH settings.
+- **SOPS never installed.** `setup-secrets.sh --prepare` rewrote the published checksum line with three
+  spaces, so `sha256sum -c` looked for a file named " sops" and refused every download. The line is now
+  rewritten correctly, and a download that does not match is still refused.
+- `config/swarm.env.example` shows `SWARM_WORKER_NAME` and `SWARM_WORKER_PROJECTS`, commented out, with a
+  pointer to `docs/multi-worker.md`. Existing installs keep their settings and their hostname as the name.
+- `render-cloud-init.py` no longer defaults to a release tag that may not exist (v0.6.0 was never tagged, so
+  first boot got a 404). It uses the tag only when the checkout has it, else the checkout's commit, else the
+  main branch, and says which on screen. `--kit-url` still overrides it.
+
 ## 0.6.0 (2026-11-20)
 
 - Add a short per-project activity feed with SQLite storage, `swarmctl activity-log`, and an API. Kinds:

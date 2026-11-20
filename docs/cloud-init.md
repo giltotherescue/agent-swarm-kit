@@ -66,7 +66,10 @@ Progress is one line per step in `/var/lib/agent-swarm/firstboot/status`. It end
    ```
 
    Options: `--lockdown bot` (leave public SSH open until the bot closes it itself, see "Safer
-   lockdown" below), `--no-claude`, `--no-codex`, `--kit-url`, `--kit-sha256`. Every value is checked
+   lockdown" below), `--no-claude`, `--no-codex`, `--kit-url`, `--kit-sha256`. Without `--kit-url` the
+   server downloads this version's release tag from GitHub if your checkout has that tag, otherwise the
+   commit your checkout is on, otherwise the main branch. The script prints which one it chose. If you
+   changed the kit and did not push the commit, GitHub does not have it: push it or pass `--kit-url`. Every value is checked
    against a strict pattern. The output holds the Tailscale key if you used one, so it is saved with mode
    600 and refused on screen. Delete it once the server is up.
 3. **Create the server (DigitalOcean).** One call to the Droplets API. `user_data` is the file's text,
@@ -140,7 +143,8 @@ sudo bash /opt/agent-swarm-kit/current/scripts/setup-worker.sh --lockdown --yes 
 - **The admin user has passwordless sudo.** Nobody is there to type a password. Who can use it is decided
   by your Tailscale access rules (and, before lockdown, by the bootstrap key). Keep the rules narrow:
   only your admin group, never `root`.
-- The kit is downloaded over HTTPS from the release tag. Pass `--kit-sha256` to pin its hash.
+- The kit is downloaded over HTTPS from GitHub (the release tag, or a commit or the main branch when there is
+  no tag, see step 2). Pass `--kit-sha256` to pin its hash.
 - The `agent` user still has no sudo and no tokens. Nothing here changes the trust model in
   [secrets.md](secrets.md).
 
@@ -151,7 +155,19 @@ the file is rejected. `firstboot.sh` runs every step in order, handles a failed 
 Tailscale and a setup script that finishes with warnings, using stand-ins for the setup script, Tailscale
 and systemd. `setup-worker.sh --yes` and the lockdown guard are covered by tests.
 
-**Not tested on a real server:** creating a droplet through the API, the real first boot (including
-that `swarm-firstboot` starts after cloud-init has finished), the real Tailscale join with a key, the real
-login link, the automatic lockdown, and the SOPS download in `setup-secrets.sh`. Run it on a server you
-can throw away first.
+**Install test 5 (2026-11-20, 0.6.0 on a fresh DigitalOcean Ubuntu 24.04 droplet)** created the droplet
+through the API and ran the real first boot. It found three problems, fixed in 0.6.1:
+
+- Stock DigitalOcean Ubuntu 24.04 images mark root's password "must be changed". Every `sudo -u agent`
+  then failed ("Account or password is expired") and first boot stopped at the Claude and Codex installs.
+  `setup-worker.sh` now clears that flag before anything runs as `agent`. It sets no password. The test
+  used `chage -d $(date +%F) root` by hand; 0.6.1 does the same.
+- `setup-secrets.sh --prepare` never installed SOPS: its checksum line was rewritten with an extra space,
+  so `sha256sum -c` refused every download. Fixed, and checked against the real SOPS 3.10.2 checksums file.
+- The default kit download was the `v0.6.0` tag, which did not exist, so first boot got a 404. See step 2.
+
+With those worked around, setup, the smoke test and the SSH and firewall hardening passed.
+
+**Not tested on a real server:** the real Tailscale join with a key, the real login link, the automatic
+lockdown, linking a real secrets repo, and the 0.6.1 fixes themselves on a new droplet (they are covered
+by tests here). Run it on a server you can throw away first.

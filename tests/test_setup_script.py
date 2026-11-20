@@ -209,6 +209,64 @@ class ClaudeInstallTest(unittest.TestCase):
         self.assertIn("TODO:Claude Code was installed but 'claude --version' does not run", out)
 
 
+class RootPasswordTest(unittest.TestCase):
+    """Install test 5, defect 1: stock DigitalOcean Ubuntu 24.04 marks root's password "must be changed", so every
+    sudo -u agent failed during first boot. Setup clears that flag (and only that flag) before anything uses sudo."""
+    LOCKED = "root:*:{lastchg}:0:99999:7:::\ndaemon:*:19000:0:99999:7:::\n"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.calls = os.path.join(self.tmp, "calls")
+        write(self.calls, "")
+        for name in ("chage", "passwd", "usermod", "chpasswd"):
+            stub(self.tmp, name, f'echo "{name} $*" >> "{self.calls}"')
+
+    def run_clear(self, lastchg, yes=True, stdin=""):
+        shadow = os.path.join(self.tmp, "shadow")
+        write(shadow, self.LOCKED.format(lastchg=lastchg))
+        script = (f'SHADOW_FILE="{shadow}"\nASSUME_YES={1 if yes else 0}\n'
+                  'clear_root_forced_password_change\nprintf "TODO:%s\\n" "${INCOMPLETE[@]}"\n')
+        return bash(script, self.tmp, stdin=stdin)
+
+    def test_forced_change_is_cleared_with_yes_and_no_password_is_set(self):
+        code, out = self.run_clear(0)
+        self.assertEqual(code, 0, out)
+        calls = read(self.calls).splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertRegex(calls[0], r"^chage -d \d{4}-\d{2}-\d{2} root$")
+        self.assertIn("no password is set", out)
+        self.assertNotIn("TODO:root", out)
+
+    def test_normal_root_account_is_left_alone(self):
+        for lastchg in ("19500", ""):
+            code, out = self.run_clear(lastchg)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(read(self.calls), "", lastchg)
+            self.assertNotIn("must be changed", out)
+
+    def test_missing_shadow_file_is_left_alone(self):
+        code, out = bash(f'SHADOW_FILE="{self.tmp}/none"\nclear_root_forced_password_change\necho done', self.tmp)
+        self.assertEqual(code, 0, out)
+        self.assertIn("done", out)
+        self.assertEqual(read(self.calls), "")
+
+    def test_interactive_no_leaves_it_and_says_how_to_fix(self):
+        code, out = self.run_clear(0, yes=False, stdin="no\n")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(read(self.calls), "")
+        self.assertIn("TODO:root's password must be changed", out)
+        self.assertIn("chage -d $(date +%F) root", out)
+
+    def test_runs_before_anything_uses_sudo(self):
+        text = read(SETUP)
+        main = text[text.index("\nmain() {"):]
+        self.assertLess(main.index("clear_root_forced_password_change"), main.index("create_admin"))
+        self.assertLess(main.index("clear_root_forced_password_change"), main.index("install_model_clis"))
+        # Not on the --harden or --lockdown only paths: they never run sudo -u.
+        self.assertLess(main.index('"$ONLY" == harden'), main.index("clear_root_forced_password_change"))
+
+
 class AptWaitTest(unittest.TestCase):
     """Round 3, defect A: wait for first-boot setup and other apt runs, retry on a lock, and never hang."""
     FAST = ('APT_POLL=0.2\nAPT_PROGRESS=0\nAPT_RETRY_PAUSE=0.1\nAPT_CI_TIMEOUT=0.5\n')
@@ -335,6 +393,16 @@ class ScriptTextTest(unittest.TestCase):
         for n, line in enumerate(text.splitlines(), 1):
             if re.search(r"^\s*(logged\s+)?apt-get\b|(\|\||&&|;)\s*(logged\s+)?apt-get\b", line):
                 self.fail(f"setup-worker.sh:{n} calls apt-get without the lock timeout: {line.strip()}")
+
+    def test_env_example_shows_worker_name_and_projects_without_setting_them(self):
+        # Install test 5, defect 3: both are needed to pin work to a worker, and were only in docs/multi-worker.md.
+        # Commented out, so a new install still uses its hostname and every project, and old installs are unchanged.
+        lines = read(os.path.join(KIT, "config", "swarm.env.example")).splitlines()
+        for name in ("SWARM_WORKER_NAME", "SWARM_WORKER_PROJECTS"):
+            self.assertTrue(any(ln.startswith(f"# {name}=") for ln in lines), name)
+            self.assertFalse(any(ln.startswith(f"{name}=") for ln in lines), f"{name} must stay commented out")
+            i = next(n for n, ln in enumerate(lines) if ln.startswith(f"# {name}="))
+            self.assertIn("docs/multi-worker.md", lines[i - 1] + lines[i - 2], name)
 
     def test_shellcheck_if_available(self):
         files = ["scripts/setup-worker.sh", "scripts/smoke-test.sh", "tests/setup_root_check.sh"]
