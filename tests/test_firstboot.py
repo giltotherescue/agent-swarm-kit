@@ -201,6 +201,8 @@ class Firstboot(unittest.TestCase):
 esac''')
         self.env_file = f"{t}/firstboot.env"
         self.state = f"{t}/state"
+        self.units = f"{t}/units"
+        os.makedirs(self.units)
 
     def stub(self, rel, body):
         path = os.path.join(self.tmp, rel)
@@ -208,13 +210,13 @@ esac''')
             fh.write("#!/bin/bash\n" + body + "\n")
         os.chmod(path, 0o755)
 
-    def run_fb(self, env_text, **extra):
+    def run_fb(self, env_text, *args, **extra):
         open(self.env_file, "w").write(env_text)
         env = dict(os.environ, PATH=f"{self.tmp}/bin:" + os.environ["PATH"], CALLS=self.calls, FIRSTBOOT_ENV_FILE=self.env_file,
                    FIRSTBOOT_STATE_DIR=self.state, FIRSTBOOT_LOG=f"{self.tmp}/fb.log", FIRSTBOOT_ALLOW_NON_ROOT="1",
-                   FIRSTBOOT_POLL="1", TAILSCALE_WAIT="2")
+                   FIRSTBOOT_POLL="1", TAILSCALE_WAIT="2", FIRSTBOOT_UNIT_DIR=self.units)
         env.update(extra)
-        r = subprocess.run(["bash", f"{self.tmp}/kit/scripts/firstboot.sh"], capture_output=True, text=True, env=env, timeout=60)
+        r = subprocess.run(["bash", f"{self.tmp}/kit/scripts/firstboot.sh", *args], capture_output=True, text=True, env=env, timeout=60)
         return r, open(f"{self.state}/status").read(), open(self.calls).read()
 
     def test_key_join_runs_every_step_and_locks_down(self):
@@ -261,6 +263,59 @@ esac''')
         self.assertEqual(r.returncode, 1)
         self.assertNotIn("smoke-test", calls)
         self.assertIn("stopped setup-worker.sh exited 1", status)
+
+    def unit(self):
+        return os.path.join(self.units, "swarm-firstboot-resume.service")
+
+    def test_resume_unit_is_removed_when_firstboot_ends(self):
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=bot\n", TS_UP="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("systemctl enable swarm-firstboot-resume.service", calls)
+        self.assertIn("systemctl disable swarm-firstboot-resume.service", calls)
+        self.assertFalse(os.path.exists(self.unit()))
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=bot\n", TS_UP="1", SETUP_RC="1")
+        self.assertFalse(os.path.exists(self.unit()), "a stopped run removes the unit too")
+
+    def interrupted(self, phase, status_text):
+        """Leave the state a reboot leaves: unit installed, status without an end, the phase it was in."""
+        os.makedirs(self.state, exist_ok=True)
+        open(f"{self.state}/status", "w").write(status_text)
+        open(f"{self.state}/phase", "w").write(phase + "\n")
+        open(self.unit(), "w").write("[Unit]\n")
+
+    def test_reboot_during_the_tailscale_wait_resumes_the_wait_and_locks_down(self):
+        self.interrupted("tailscale-wait", "started kit 9.9.9\nsetup ok\ntailscale waiting for approval\nsmoke ok\n")
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=auto\n", "--resume", TS_UP="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("resumed after a reboot during the Tailscale wait", status)
+        self.assertIn("setup-worker --lockdown --yes --admin-user ops", calls)
+        self.assertNotIn("setup-worker --yes", calls, "a resume does not run setup again")
+        self.assertTrue(status.startswith("started kit 9.9.9"), "a resume keeps the earlier lines")
+        self.assertTrue(status.rstrip().endswith("finished"), status)
+        self.assertFalse(os.path.exists(self.unit()))
+
+    def test_resume_still_not_joined_asks_for_a_new_link_and_ends(self):
+        self.interrupted("tailscale-wait", "setup ok\n")
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=auto\n", "--resume", TS_UP="0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(open(f"{self.state}/tailscale-login-url").read().strip(), "https://login.tailscale.com/a/abc123XYZ")
+        self.assertIn("skipped: Tailscale never connected", status)
+        self.assertTrue(status.rstrip().endswith("finished"), status)
+
+    def test_reboot_during_another_step_writes_stopped(self):
+        self.interrupted("smoke", "setup ok\nworker started\n")
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=auto\n", "--resume", TS_UP="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stopped a reboot interrupted first boot during the smoke step", status.splitlines()[-1])
+        self.assertNotIn("setup-worker", calls)
+        self.assertFalse(os.path.exists(self.unit()))
+
+    def test_resume_after_a_finished_run_does_nothing(self):
+        self.interrupted("finished", "setup ok\nfinished\n")
+        r, status, calls = self.run_fb("ADMIN_USER=ops\nLOCKDOWN=auto\n", "--resume", TS_UP="1")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(status, "setup ok\nfinished\n")
+        self.assertNotIn("setup-worker", calls)
 
     def test_login_url_parser(self):
         out = subprocess.run(["bash", "-c", 'FIRSTBOOT_LIB=1 source "$1"; login_url "$2"', "_", f"{KIT}/scripts/firstboot.sh", "/dev/stdin"],

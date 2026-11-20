@@ -25,6 +25,8 @@ Orchestrators (WORK/orchestrators/NAME, tmux socket and session orch-NAME; see d
   agent-exec --work DIR --handoff DIR orch-status NAME [--lines N] [--sessions-dir DIR]
   agent-exec --work DIR --handoff DIR orch-send NAME        (types inbox/orch-NAME/message.md, then Enter)
   agent-exec --work DIR --handoff DIR orch-kill NAME
+  agent-exec --work DIR --handoff DIR orch-keys NAME KEY...   (only Enter, Down, Up, Escape, 1-9: answers a first-run screen)
+  agent-exec --work DIR --handoff DIR orch-check NAME [--agent-env FILE] [--claude-dir DIR]   (does Claude have a sign-in?)
   agent-exec --work DIR --handoff DIR orch-relay NAME --relay-name X [--agent-env FILE] -- COMMAND ARGS...
 Output is JSON on stdout for prepare and collect. No secrets are ever printed.
 """
@@ -39,7 +41,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
 MAX_ARTIFACT = 25 * 1024 * 1024
@@ -548,6 +550,8 @@ def cmd_orch_status(p, name, lines, sessions_dir):
             out["exit"] = int(info[2]) if len(info) > 2 and info[2].lstrip("-").isdigit() else None
         if lines:
             out["tail"] = tmux(name, "capture-pane", "-p", "-J", "-t", f"orch-{name}", "-S", f"-{int(lines)}").stdout
+        # Only what is on the screen now, so a sign-in or first-run screen that scrolled away is not seen again.
+        out["screen"] = tmux(name, "capture-pane", "-p", "-J", "-t", f"orch-{name}").stdout
     print(json.dumps(out))
 
 
@@ -576,6 +580,52 @@ def cmd_orch_kill(p, name):
     if user_systemd(env):
         subprocess.run(["systemctl", "--user", "stop", f"swarm-orch-{name}-*.scope"], env=env, capture_output=True)
     print(json.dumps({"alive": orch_alive(name)}))
+
+
+ORCH_KEYS = ("Enter", "Down", "Up", "Escape") + tuple(str(i) for i in range(1, 10))
+
+
+def cmd_orch_keys(p, name, keys):
+    """Press a few named keys, to answer one of Claude Code's first-run screens. Never free text."""
+    if not keys or len(keys) > 4 or any(k not in ORCH_KEYS for k in keys):
+        die("orch-keys takes 1 to 4 of: " + " ".join(ORCH_KEYS))
+    if not orch_alive(orch_name(name)):
+        die(f"orch-{name} is not running", 4)
+    for k in keys:
+        tmux(name, "send-keys", "-t", f"orch-{name}", k, check=True)
+        time.sleep(0.3)
+    print(json.dumps({"sent": keys}))
+
+
+CLAUDE_TOKEN_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def cmd_orch_check(p, name, agent_env, claude_dir=None):
+    """Before a start: does Claude Code have a sign-in for this user? Says how, never the value.
+
+    logged_in is true (a token in agent.env, a proxy, an apiKeyHelper or a saved /login), false (none of those), or
+    null on a Mac without any of them, where a /login lives in the Keychain and cannot be checked from here."""
+    orch_name(name)
+    env = clean_env(agent_env=agent_env)
+    cdir = claude_dir or os.path.join(env["HOME"], ".claude")
+    how = next((f"{k} in the agent environment" for k in CLAUDE_TOKEN_VARS if env.get(k)), None)
+    if not how and env.get("ANTHROPIC_BASE_URL"):
+        how = "a proxy (ANTHROPIC_BASE_URL) in the agent environment"
+    if not how:
+        try:
+            if os.path.getsize(os.path.join(cdir, ".credentials.json")) > 2:
+                how = "a saved /login"
+        except OSError:
+            pass
+    if not how:
+        try:
+            with open(os.path.join(cdir, "settings.json")) as fh:
+                if json.load(fh).get("apiKeyHelper"):
+                    how = "an apiKeyHelper in Claude's settings"
+        except (OSError, ValueError, AttributeError):
+            pass
+    logged_in = True if how else (None if sys.platform == "darwin" else False)
+    print(json.dumps({"logged_in": logged_in, "how": how}))
 
 
 def cmd_orch_relay(p, name, agent_env, relay_name, command):
@@ -645,6 +695,10 @@ def main(argv):
         cmd_orch_send(p, positional[0])
     elif cmd == "orch-kill" and len(positional) == 1:
         cmd_orch_kill(p, positional[0])
+    elif cmd == "orch-keys" and len(positional) >= 2 and not opts and not command:
+        cmd_orch_keys(p, positional[0], positional[1:])
+    elif cmd == "orch-check" and len(positional) == 1 and not command:
+        cmd_orch_check(p, positional[0], opts.get("--agent-env"), opts.get("--claude-dir"))
     elif cmd == "orch-relay" and len(positional) == 1 and command:
         return cmd_orch_relay(p, positional[0], opts.get("--agent-env"), opts.get("--relay-name"), command)
     elif cmd == "exec" and len(positional) == 1 and command:

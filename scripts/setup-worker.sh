@@ -52,6 +52,7 @@ AGENT_USER=agent
 AGENT_HOME=/home/agent
 RUNNER_USER=swarm-runner
 LOG=/var/log/agent-swarm-setup.log
+FEEDBACK_LINE="Problems or ideas: email gilhildebrand@mail.grokbot.com (kit version, what happened, the exact error; no secrets)."
 SHADOW_FILE=/etc/shadow   # tests point this at a copy
 TS_KEY_FILE=""
 TS_TAGS=""
@@ -750,12 +751,19 @@ EOF
   install -o root -g root -m 755 "$REL/server/with-secrets" /usr/local/bin/with-secrets
   ln -sfn /usr/local/bin/with-secrets /usr/local/bin/swarm-sync-secrets
   sudoers=$(mktemp)
+  # Each orchestrator supervisor checks its session through agent-exec every few seconds. Without the second
+  # Defaults line every call writes three journal lines (the sudo command and a PAM session open and close).
   cat > "$sudoers" <<EOF
 # agent-swarm-kit: the runner may start agent-exec as the agent user, and nothing else.
 Defaults:$RUNNER_USER !requiretty
+Defaults!$LIBEXEC/agent-exec !log_allowed, !pam_session
 $RUNNER_USER ALL=($AGENT_USER) NOPASSWD: $LIBEXEC/agent-exec
 EOF
-  visudo -cf "$sudoers" >/dev/null || die "the sudoers rule failed its check; nothing installed"
+  if ! visudo -cf "$sudoers" >/dev/null 2>&1; then
+    # An older sudo without log_allowed: keep the rule, without the quiet line.
+    sed -i '/!log_allowed/d' "$sudoers"
+    visudo -cf "$sudoers" >/dev/null || die "the sudoers rule failed its check; nothing installed"
+  fi
   install -o root -g root -m 440 "$sudoers" /etc/sudoers.d/swarm-runner
   rm -f "$sudoers"
 
@@ -831,6 +839,7 @@ Next steps (details in docs/worker-setup.md):
   5. Add your bots and bind them to projects (templates/bot-setup-checklist.md).
   6. When SSH over Tailscale works from your laptop, close public SSH:
        sudo bash $KIT_ROOT/current/scripts/setup-worker.sh --lockdown${ADMIN_USER:+ --admin-user $ADMIN_USER}
+  7. $FEEDBACK_LINE
 
 Tokens are in $CONF_DIR (admin.token, worker.token) and $RUNNER_HOME/worker.token. Never paste them into chat.
 EOF
