@@ -65,7 +65,7 @@ Memory repo and project folder: ORG/MEMORY-REPO, PROJECT/. Queue docs-only updat
 on the dedicated memory project. Keep code in draft PRs. No secrets or personal data.
 
 Log a real change: `swarmctl activity-log add PROJECT --kind KIND "SUMMARY" --key EVENT-ID`.
-Use `activity`, `shipped`, `blocked`, or `decision/bot`. Send actual owner decisions to the Chief of Staff
+Use `activity`, `shipped`, `blocked`, or `decision --decider bot`. Send actual owner decisions to the Chief of Staff
 to record. Add `--lasting` for a change in how the project works. No change, no entry.
 Read recent lines: `swarmctl activity-log list PROJECT`.
 Nightly export updates `log/YYYY-MM.md` and the marked block of `decisions.md`. Per date:

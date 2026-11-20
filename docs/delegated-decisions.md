@@ -19,7 +19,7 @@ A delegated call is not approval for an owner-only action. Do not use it to answ
 ## Answer, log, tell the owner
 
 1. Reply in the project bot's chat so it can keep working.
-2. Add one `decision/delegated` entry to the [activity feed](activity-and-decisions.md). Use the
+2. Add one decision with `--decider delegated` to the [activity feed](activity-and-decisions.md). Use the
    question ID as a stable key. Add `--lasting` only if the call changes how the project works.
 3. Put the call in the owner's next morning note once, with the ID and a short reason. Send one note
    for both sections, omitting empty sections and sending nothing when both are empty.
@@ -34,9 +34,9 @@ Delegated since the last note
 Reply "overrule #ENTRY-ID: new answer" to replace a call.
 ```
 
-When the owner overrules a call, add a new `decision/owner` with `--overrules ENTRY-ID` and tell the
+When the owner overrules a call, add a new owner decision with `--overrules ENTRY-ID` and tell the
 project bot. Leave the old line in place. An owner answer to a Waiting on you item is also a
-`decision/owner` when it makes a decision; record the owner's words, not your recommendation.
+owner decision when it makes a decision; record the owner's words, not your recommendation.
 
 ## Change the default
 

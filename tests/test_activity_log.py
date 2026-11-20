@@ -21,10 +21,10 @@ class ActivityTest(unittest.TestCase):
         self.chief = self.backend.bot("chief-bot", role="chief")
         self.other = self.backend.bot("other-bot", projects=("other",))
 
-    def add(self, kind="activity", token=None, **fields):
+    def add(self, kind="activity", token=None, expect=200, **fields):
         body = dict(project="project", kind=kind, summary="Updated the checklist")
         body.update(fields)
-        return self.backend.req("POST", "/activity-log", body, tok=token or self.bot)
+        return self.backend.req("POST", "/activity-log", body, tok=token or self.bot, expect=expect)
 
     def ctl(self, *args, input=None):
         token_file = Path(self.backend.tmp, "cli-token")
@@ -38,10 +38,12 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual(first["entry"]["bot"], "project-bot")
         self.assertTrue(self.add(dedupe_key="checklist-v2", link="https://example.com/checklist")["duplicate"])
         for fields, status in (({"dedupe_key": "checklist-v2"}, 409), ({"summary": "a\nb"}, 400),
-                               ({"summary": "uses | separator"}, 400), ({"kind": "result"}, 400),
+                               ({"summary": "x" * 601}, 400), ({"kind": "result"}, 400),
                                ({"link": "https://example.com/preview?private=value"}, 400),
-                               ({"lasting": True}, 400), ({"kind": "decision/owner"}, 403),
-                               ({"kind": "decision/delegated"}, 403), ({"project": "other"}, 404)):
+                               ({"lasting": True}, 400), ({"kind": "decision"}, 400),
+                               ({"decider": "bot"}, 400), ({"kind": "decision", "decider": "gil"}, 400),
+                               ({"kind": "decision", "decider": "owner"}, 403),
+                               ({"kind": "decision", "decider": "delegated"}, 403), ({"project": "other"}, 404)):
             with self.subTest(fields=fields):
                 body = {"project": "project", "summary": "Changed layout", "kind": "activity", **fields}
                 self.backend.req("POST", "/activity-log", body, tok=self.bot, expect=status)
@@ -55,11 +57,13 @@ class ActivityTest(unittest.TestCase):
     def test_nightly_snapshot_and_overrule_across_central_month_boundary(self):
         before = int(datetime(2026, 7, 1, 4, 59, tzinfo=timezone.utc).timestamp())
         with patch.object(sb, "now", return_value=before):
-            delegated = self.add("decision/delegated", self.chief, lasting=True, summary="Keep the short checklist")["entry"]
+            delegated = self.add("decision", self.chief, decider="delegated", lasting=True,
+                                 summary="Keep the short checklist")["entry"]
         with patch.object(sb, "now", return_value=before + 60):
-            owner = self.add("decision/owner", self.chief, overrules=delegated["id"], summary="Use the full checklist")["entry"]
-            self.add("decision/bot", lasting=True, summary="Write a checklist note <here>")
-            one_off = self.add("decision/bot", summary="One-off layout choice")["entry"]
+            owner = self.add("decision", self.chief, decider="owner", overrules=delegated["id"],
+                             summary="Use the full checklist")["entry"]
+            self.add("decision", decider="bot", lasting=True, summary="Write a checklist note <here>")
+            one_off = self.add("decision", decider="bot", summary="One-off layout choice")["entry"]
         snap = self.backend.req("GET", "/activity-log/snapshot?project=project", tok=self.bot)
         files = snap["files"]
         self.assertEqual(snap["through"], one_off["id"])
@@ -79,11 +83,54 @@ class ActivityTest(unittest.TestCase):
         next_files = self.backend.req("GET", after, tok=self.bot)["files"]
         self.assertEqual(len(next_files), 1)
         self.assertNotIn("project/decisions.md", next_files)
-        self.backend.req("POST", "/activity-log", dict(project="other", kind="decision/owner", summary="No",
+        self.backend.req("POST", "/activity-log", dict(project="other", kind="decision", decider="owner", summary="No",
                                                         overrules=delegated["id"]), tok=self.chief, expect=400)
+        # Only the owner can overrule the owner, and only a decision can overrule.
+        self.add("decision", decider="bot", overrules=owner["id"], expect=403)
+        self.add("activity", overrules=one_off["id"], expect=400)
+        self.assertEqual(self.add("decision", decider="bot", overrules=one_off["id"], summary="Changed my mind")
+                         ["entry"]["overrules"], one_off["id"])
+        self.assertIn("| decision (delegated) |", delegated["line"])
+
+    def test_dedupe_window_filters_pipes_and_cross_project(self):
+        start = 1_700_000_000
+        with patch.object(sb, "now", return_value=start):
+            first = self.add(dedupe_key="daily", summary="Ran the a | b check")["entry"]
+        self.assertIn("Ran the a \\| b check", first["line"])
+        with patch.object(sb, "now", return_value=start + 3600):
+            self.assertTrue(self.add(dedupe_key="daily", summary="Ran the a | b check")["duplicate"])
+        with patch.object(sb, "now", return_value=start + 25 * 3600):
+            second = self.add(dedupe_key="daily", summary="Ran the a | b check")
+        self.assertFalse(second["duplicate"])
+        self.add("decision", self.chief, decider="owner", summary="Ship it")
+        route = "/activity-log?project=project"
+        self.assertEqual([e["decider"] for e in self.backend.req("GET", route + "&kind=decision", tok=self.bot)["entries"]],
+                         ["owner"])
+        self.assertEqual(self.backend.req("GET", route + "&decider=bot", tok=self.bot)["entries"], [])
+        self.assertEqual(len(self.backend.req("GET", route + "&bot=project-bot", tok=self.bot)["entries"]), 2)
+        self.assertEqual(len(self.backend.req("GET", route + f"&since={start + 3600}", tok=self.bot)["entries"]), 2)
+        self.backend.req("GET", route + "&decider=gil", tok=self.bot, expect=400)
+        cross = dict(project="cross-project", kind="activity", summary="Rotated the shared runner")
+        self.assertEqual(self.backend.req("POST", "/activity-log", cross, tok=self.other)["entry"]["bot"], "other-bot")
+        self.backend.req("GET", "/activity-log?project=cross-project", tok=self.other, expect=404)
+        self.assertEqual(len(self.backend.req("GET", "/activity-log?project=cross-project", tok=self.chief)["entries"]), 1)
+
+    def test_nightly_position_is_saved_on_the_backend_only_when_marked(self):
+        snap = "/activity-log/snapshot?project=project"
+        entry = self.add()["entry"]
+        first = self.backend.req("GET", snap, tok=self.chief)
+        self.assertEqual((first["after"], first["through"]), (0, entry["id"]))
+        self.assertEqual(self.backend.req("GET", snap, tok=self.chief)["files"], first["files"])  # not advanced by reading
+        mark = "/activity-log/published"
+        self.backend.req("POST", mark, {"project": "project", "through": entry["id"]}, tok=self.bot, expect=403)
+        self.backend.req("POST", mark, {"project": "project", "through": entry["id"] + 1}, tok=self.chief, expect=400)
+        self.backend.req("POST", mark, {"project": "project", "through": entry["id"]}, tok=self.chief)
+        self.assertEqual(self.backend.req("GET", snap, tok=self.chief)["files"], {})
+        self.assertNotEqual(self.backend.req("GET", snap + "&after=0", tok=self.chief)["files"], {})
 
     def test_cli_and_offline_month_apply(self):
         added = self.ctl("add", "project", "--kind", "blocked", "Waiting for a review", "--key", "review")
+        self.assertNotEqual(self.ctl("add", "project", "--kind", "decision", "No decider").returncode, 0)
         self.assertEqual(added.returncode, 0, added.stderr)
         entry = json.loads(added.stdout)["entry"]
         listed = self.ctl("list", "project")
@@ -102,6 +149,18 @@ class ActivityTest(unittest.TestCase):
             self.assertNotEqual(self.ctl("apply", "-", "--dir", target, input=malicious).returncode, 0)
         quiet = self.ctl("export", "project", "--nightly", "--after", str(entry["id"]))
         self.assertEqual((quiet.returncode, quiet.stdout), (0, ""))
+        self.assertNotEqual(self.ctl("published", "project", str(entry["id"])).returncode, 0)  # project bot token
+
+    def test_apply_of_an_older_snapshot_changes_nothing(self):
+        self.add(summary="First")
+        old = self.ctl("export", "project", "--nightly").stdout
+        self.add(summary="Second")
+        new = self.ctl("export", "project", "--nightly").stdout
+        with tempfile.TemporaryDirectory() as target:
+            self.assertEqual(self.ctl("apply", "-", "--dir", target, input=new).returncode, 0)
+            again = self.ctl("apply", "-", "--dir", target, input=old)
+            self.assertEqual((again.returncode, again.stdout), (0, ""), again.stderr)
+            self.assertIn("Second", next(Path(target, "project", "log").iterdir()).read_text())
 
     def test_worker_claim_must_opt_in_and_stay_in_project(self):
         route = "/activity-log"
@@ -116,7 +175,8 @@ class ActivityTest(unittest.TestCase):
                 self.assertEqual(result["entry"]["bot"], "project-bot")
                 self.assertTrue(self.backend.req("POST", route, body, tok=token)["duplicate"])
                 self.backend.req("POST", route, dict(body, project="other"), tok=token, expect=403)
-                self.backend.req("POST", route, dict(body, kind="decision/delegated"), tok=token, expect=403)
+                for decider in ("delegated", "bot"):
+                    self.backend.req("POST", route, dict(body, kind="decision", decider=decider), tok=token, expect=403)
             self.backend.finish(claim)
             self.backend.req("POST", route, body, tok=token, expect=409)
 

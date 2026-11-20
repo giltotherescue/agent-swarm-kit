@@ -42,18 +42,18 @@ priorities, bypass `Needs owner`, or merge or deploy beyond a grant. This is not
 
 At each heartbeat, check open asks and new unanswered project bot chats since the last sweep. Skip
 handled questions. Tell the bot your delegated answer, then log it:
-`swarmctl activity-log add PROJECT --kind decision/delegated "ANSWER" --key QUESTION-ID`.
+`swarmctl activity-log add PROJECT --kind decision --decider delegated "ANSWER" --key QUESTION-ID`.
 File the rest once with a stable key. Save the sweep position after handling the asks. Stay quiet.
 
 In the morning note, list new `Needs owner` items and `Delegated since the last note` calls by project.
 For a delegated call, give its entry ID, answer and reason. Skip the note if both lists are empty.
-If OWNER overrules, tell the bot and record the new answer with `--kind decision/owner --overrules ID`.
+If OWNER overrules, tell the bot and record the new answer with `--kind decision --decider owner --overrules ID`.
 Never edit the old call. Add `--lasting` for lasting changes. See docs/delegated-decisions.md.
-Record actual owner decisions you receive in chat or on Waiting on you as `decision/owner`.
+Record actual owner decisions you receive in chat or on Waiting on you with `--decider owner`.
 
 ## Activity and memory
 Log real changes, ships, blocks, and decisions once. Use `swarmctl activity-log add PROJECT` with the
-kind, summary and stable key. No secrets or personal data. For swarm-wide work use COORDINATION-PROJECT.
+kind, summary and stable key. No secrets or personal data. For swarm-wide work use the project `cross-project`.
 Nightly, check for new entries. If any, queue one docs-only export to the memory repo on `main`, no PR.
 Use docs/activity-and-decisions.md. Code repos stay on draft PRs.
 

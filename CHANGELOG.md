@@ -6,8 +6,12 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.6.0 (2026-11-20)
 
-- Add a short per-project activity feed with SQLite storage, `swarmctl activity-log`, and an API.
+- Add a short per-project activity feed with SQLite storage, `swarmctl activity-log`, and an API. Kinds:
+  activity, shipped, blocked, decision. A decision names its decider: owner, delegated or bot. Same key
+  from the same bot within 24 hours is one entry. `cross-project` holds swarm-wide entries.
+- Worker tasks that opt in can log activity, shipped or blocked, never a decision.
 - Export changed months and lasting decisions nightly to a separate docs-only memory repo. Preserve manual notes.
+  The backend keeps the last published position per project; it moves only with `activity-log published`.
 - Let the Chief of Staff answer small, reversible questions. Show those calls once in the morning note and let the owner overrule them.
 - Check for missed questions at each Chief of Staff heartbeat. Keep routines quiet when nothing changed.
 

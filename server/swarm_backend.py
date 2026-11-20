@@ -142,9 +142,8 @@ CREATE TABLE IF NOT EXISTS log_entries(
   summary TEXT NOT NULL, detail TEXT, links TEXT, task_id TEXT, dedupe_key TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS activity_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, bot TEXT NOT NULL, kind TEXT NOT NULL,
-  summary TEXT NOT NULL, link TEXT, overrules INTEGER, lasting INTEGER NOT NULL DEFAULT 0,
-  dedupe_key TEXT, created_at INTEGER NOT NULL,
-  UNIQUE(project, bot, dedupe_key));
+  decider TEXT, summary TEXT NOT NULL, link TEXT, overrules INTEGER, lasting INTEGER NOT NULL DEFAULT 0,
+  dedupe_key TEXT, created_at INTEGER NOT NULL);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
@@ -183,11 +182,15 @@ CREATE INDEX IF NOT EXISTS log_ref ON log_entries(project, ref, id);
 CREATE INDEX IF NOT EXISTS tasks_chain ON tasks(chain_root);
 CREATE INDEX IF NOT EXISTS activity_by_project ON activity_log(project, created_at, id);
 CREATE INDEX IF NOT EXISTS activity_cursor ON activity_log(project, id);
+CREATE INDEX IF NOT EXISTS activity_dedupe ON activity_log(project, bot, dedupe_key) WHERE dedupe_key IS NOT NULL;
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
 SCHEMA_VERSION = 6
-ACTIVITY_KINDS = ("activity", "shipped", "blocked", "decision/owner", "decision/delegated", "decision/bot")
+ACTIVITY_KINDS = ("activity", "shipped", "blocked", "decision")
+DECIDERS = ("owner", "delegated", "bot")
+CROSS_PROJECT = "cross-project"  # swarm-wide entries: any bot may write, only admin and chief read
+DEDUPE_WINDOW = 24 * 3600
 CENTRAL = ZoneInfo("America/Chicago")
 LOG_KINDS = ("activity", "decision", "result", "item", "feedback", "learning", "rule")
 ITEM_STATUSES = ("draft", "needs-review", "approved", "changes", "rejected")
@@ -350,18 +353,20 @@ def clean_text(value, limit, field):
 
 
 def activity_text(value, limit, field):
-    if value is not None and (not isinstance(value, str) or not value.isprintable() or "|" in value):
-        raise ApiError(400, f"{field} must be one plain line without pipes")
+    if value is not None and (not isinstance(value, str) or not value.isprintable()):
+        raise ApiError(400, f"{field} must be one plain line")
     return clean_text(value, limit, field) or None
 
 
 def activity_entry(row):
     stamp = datetime.fromtimestamp(row["created_at"], CENTRAL).strftime("%Y-%m-%d %H:%M CT")
-    summary = re.sub(r"([\\\[\]`*_~])", r"\\\1", html.escape(row["summary"], quote=False))
-    if row["kind"].startswith("decision/"):
+    summary = re.sub(r"([\\\[\]`*_~|])", r"\\\1", html.escape(row["summary"], quote=False))
+    kind = row["kind"]
+    if kind == "decision":
+        kind = f"decision ({row['decider']})"
         summary += f" (#{row['id']})" if row["overrules"] is None else f" (#{row['id']}, overrules #{row['overrules']})"
     return {**{field: value for field, value in row.items() if field != "dedupe_key"},
-            "line": f"- {stamp} | {row['bot']} | {row['kind']} | {summary} | {row['link'] or '-'}"}
+            "line": f"- {stamp} | {row['bot']} | {kind} | {summary} | {row['link'] or '-'}"}
 
 
 def text_list(value, field, item_re=None, limit=50):
@@ -1640,9 +1645,13 @@ class Backend:
         if allowed is not None and project.lower() not in (p.lower() for p in allowed):
             raise ApiError(404, "no such project log")
 
-    def activity_project(self, who, project):
+    def activity_project(self, who, project, write=False):
+        if project == CROSS_PROJECT:
+            if who["role"] in ("admin", "chief") or (write and who["role"] == "bot"):
+                return project
+            raise ApiError(404, "no such project activity log")
         if not isinstance(project, str) or not ID_RE.fullmatch(project):
-            raise ApiError(400, "project must be a registered project name")
+            raise ApiError(400, f"project must be a registered project name or {CROSS_PROJECT}")
         if not self.project(project) or (who["role"] == "bot" and
                                         not any(p["name"] == project for p in self.bound_projects(who["bot"]))):
             raise ApiError(404, "no such project activity log")
@@ -1653,14 +1662,20 @@ class Backend:
         if task and (task["untrusted"] or "Activity log: yes" not in task["prompt"].splitlines() or
                      body.get("project") not in (None, task["project"])):
             raise ApiError(403, "a trusted task brief must opt in, and a task can only write to its own project")
-        project = self.activity_project(who, task["project"] if task else body.get("project"))
+        project = self.activity_project(who, task["project"] if task else body.get("project"), write=True)
         kind = body.get("kind")
         if kind not in ACTIVITY_KINDS:
             raise ApiError(400, "kind must be one of: " + ", ".join(ACTIVITY_KINDS))
-        if ((kind == "decision/delegated" and who["role"] != "chief") or
-                (kind == "decision/owner" and who["role"] not in ("chief", "admin"))):
-            raise ApiError(403, "this token cannot record that decision kind")
-        summary = activity_text(body.get("summary"), 300, "summary")
+        if task and kind == "decision":
+            raise ApiError(403, "a worker task can log activity, shipped or blocked, not decisions")
+        decider = body.get("decider")
+        if (decider is not None) != (kind == "decision") or (decider is not None and decider not in DECIDERS):
+            raise ApiError(400, "a decision needs a decider (" + ", ".join(DECIDERS) + "), and only a decision has one")
+        if decider in ("owner", "delegated") and who["role"] not in ("chief", "admin"):
+            raise ApiError(403, "only the Chief of Staff or admin can record owner or delegated decisions")
+        if decider == "delegated" and who["role"] != "chief":
+            raise ApiError(403, "only the Chief of Staff makes delegated decisions")
+        summary = activity_text(body.get("summary"), 600, "summary")
         if not summary:
             raise ApiError(400, "summary is required")
         link = activity_text(body.get("link"), 500, "link")
@@ -1670,33 +1685,37 @@ class Backend:
                 valid = url.scheme == "https" and url.hostname and not url.username and url.password is None and "@" not in url.netloc
             except ValueError:
                 valid = False
-            if not valid or any(char in '?<>"\\' or char.isspace() for char in link):
+            if not valid or any(char in '?<>"\\|' or char.isspace() for char in link):
                 raise ApiError(400, "link must be an HTTPS URL without credentials or a query string")
         key = (f"task:{task['id']}:{who['claim']}" if task else activity_text(body.get("dedupe_key"), 120, "dedupe_key"))
         lasting = body.get("lasting", False)
-        if not isinstance(lasting, bool) or (lasting and not kind.startswith("decision/")):
+        if not isinstance(lasting, bool) or (lasting and kind != "decision"):
             raise ApiError(400, "lasting must be a boolean and only decisions may set it to true")
         overrules = body.get("overrules")
-        if overrules is not None and (kind != "decision/owner" or type(overrules) is not int or not 0 < overrules < 2**63):
-            raise ApiError(400, "overrules must be a delegated entry ID on an owner decision")
+        if overrules is not None and (kind != "decision" or type(overrules) is not int or not 0 < overrules < 2**63):
+            raise ApiError(400, "only a decision may overrule, and overrules must be an entry ID")
         bot = (task["owner"] if ID_RE.fullmatch(task["owner"] or "") else "worker") if task else who["bot"] or "admin"
         with self.s.tx():
             if task:
                 self.own_task(who, task["id"])
             if overrules is not None:
-                target = self.s.one("SELECT lasting FROM activity_log WHERE id = ? AND project = ? AND kind = 'decision/delegated'",
+                target = self.s.one("SELECT decider, lasting FROM activity_log WHERE id = ? AND project = ? AND kind = 'decision'",
                                     overrules, project)
                 if not target:
-                    raise ApiError(400, "overrules must name a delegated entry in this project")
+                    raise ApiError(400, "overrules must name an earlier decision in this project")
+                if target["decider"] == "owner" and decider != "owner":
+                    raise ApiError(403, "only another owner decision can overrule an owner decision")
                 lasting = lasting or bool(target["lasting"])
-            prior = self.s.one("SELECT * FROM activity_log WHERE project = ? AND bot = ? AND dedupe_key = ?",
-                               project, bot, key) if key else None
+            prior = self.s.one("SELECT * FROM activity_log WHERE project = ? AND bot = ? AND dedupe_key = ? AND created_at > ?"
+                               " ORDER BY id DESC LIMIT 1", project, bot, key, now() - DEDUPE_WINDOW) if key else None
             if prior:
-                if (kind, summary, link, overrules, lasting) != tuple(prior[field] for field in ("kind", "summary", "link", "overrules", "lasting")):
-                    raise ApiError(409, "dedupe_key already used for a different activity entry")
+                fields = ("kind", "decider", "summary", "link", "overrules", "lasting")
+                if (kind, decider, summary, link, overrules, lasting) != tuple(prior[f] for f in fields):
+                    raise ApiError(409, "dedupe_key was used for a different entry in the last 24 hours")
                 return {"entry": activity_entry(prior), "duplicate": True}
-            entry_id = self.s.run("INSERT INTO activity_log(project, bot, kind, summary, link, overrules, lasting, dedupe_key, created_at)"
-                                  " VALUES(?,?,?,?,?,?,?,?,?)", project, bot, kind, summary, link, overrules, lasting, key, now()).lastrowid
+            entry_id = self.s.run("INSERT INTO activity_log(project, bot, kind, decider, summary, link, overrules, lasting,"
+                                  " dedupe_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                  project, bot, kind, decider, summary, link, overrules, lasting, key, now()).lastrowid
             row = self.s.one("SELECT * FROM activity_log WHERE id = ?", entry_id)
         return {"entry": activity_entry(row), "duplicate": False}
 
@@ -1704,11 +1723,21 @@ class Backend:
         project = self.activity_project(who, qs.get("project"))
         try:
             limit = int(qs.get("limit", "20"))
+            since = int(qs.get("since", "0"))
         except ValueError:
-            raise ApiError(400, "limit must be a number")
+            raise ApiError(400, "limit and since must be numbers")
         if not 1 <= limit <= 1000:
             raise ApiError(400, "limit must be between 1 and 1000")
-        rows = self.s.q("SELECT * FROM activity_log WHERE project = ? ORDER BY id DESC LIMIT ?", project, limit)
+        sql, args = "SELECT * FROM activity_log WHERE project = ? AND created_at >= ?", [project, since]
+        for field, allowed in (("bot", None), ("kind", ACTIVITY_KINDS), ("decider", DECIDERS)):
+            value = qs.get(field)
+            if value is None:
+                continue
+            if (allowed and value not in allowed) or not ID_RE.fullmatch(value):
+                raise ApiError(400, f"bad {field} filter")
+            sql += f" AND {field} = ?"
+            args.append(value)
+        rows = self.s.q(sql + " ORDER BY id DESC LIMIT ?", *args, limit)
         return {"entries": [activity_entry(row) for row in reversed(rows)]}
 
     def export_activity(self, who, qs):
@@ -1729,17 +1758,21 @@ class Backend:
                         " ORDER BY id", project, *bounds, through)
         return "".join(activity_entry(row)["line"] + "\n" for row in rows)
 
+    def activity_cursor(self, project):
+        row = self.s.one("SELECT value FROM meta WHERE key = ?", f"activity_published:{project}")
+        return int(row["value"]) if row else 0
+
     def activity_snapshot(self, who, qs):
         project = self.activity_project(who, qs.get("project"))
         try:
-            after = int(qs.get("after", "0"))
+            after = int(qs["after"]) if qs.get("after") is not None else self.activity_cursor(project)
             if not 0 <= after < 2**63:
                 raise ValueError
         except ValueError:
             raise ApiError(400, "after must be an activity entry ID or zero")
         through = self.s.one("SELECT MAX(id) AS newest FROM activity_log WHERE project = ?", project)["newest"] or 0
         if through <= after:
-            return {"through": through, "files": {}}
+            return {"after": after, "through": through, "files": {}}
         new = self.s.q("SELECT created_at, lasting FROM activity_log WHERE project = ? AND id > ? AND id <= ?",
                        project, after, through)
         months = {datetime.fromtimestamp(row["created_at"], CENTRAL).strftime("%Y-%m") for row in new}
@@ -1749,17 +1782,28 @@ class Backend:
             for row in self.s.q("SELECT * FROM activity_log WHERE project = ? AND lasting = 1 AND id <= ? ORDER BY id",
                                 project, through):
                 date = datetime.fromtimestamp(row["created_at"], CENTRAL).strftime("%Y-%m-%d")
-                groups.setdefault(date, {}).setdefault(row["kind"], []).append(activity_entry(row)["line"])
+                groups.setdefault(date, {}).setdefault(row["decider"], []).append(activity_entry(row)["line"])
             block = ["<!-- activity-log:begin -->"]
             for date, entries in sorted(groups.items()):
                 block += ["", f"## {date}"]
-                for label, kind in (("Owner decided", "decision/owner"),
-                                    ("Delegated by Chief of Staff", "decision/delegated"), ("Project bot calls", "decision/bot")):
-                    if kind == "decision/bot" and kind not in entries:
+                for label, decider in (("Owner decided", "owner"),
+                                       ("Delegated by Chief of Staff", "delegated"), ("Project bot calls", "bot")):
+                    if decider == "bot" and decider not in entries:
                         continue
-                    block += ["", f"### {label}", "", *entries.get(kind, ["None."])]
+                    block += ["", f"### {label}", "", *entries.get(decider, ["None."])]
             files[f"{project}/decisions.md"] = "\n".join([*block, "", "<!-- activity-log:end -->", ""])
-        return {"through": through, "files": files}
+        return {"after": after, "through": through, "files": files}
+
+    def mark_activity_published(self, who, body):
+        """Advance the nightly export cursor. Call only after the export task is done (its push succeeded)."""
+        project = self.activity_project(who, body.get("project"))
+        through = body.get("through")
+        with self.s.tx():
+            newest = self.s.one("SELECT MAX(id) AS newest FROM activity_log WHERE project = ?", project)["newest"] or 0
+            if type(through) is not int or not 0 <= through <= newest:
+                raise ApiError(400, f"through must be an entry ID from a snapshot of this project (0 to {newest})")
+            self.s.run("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", f"activity_published:{project}", str(through))
+        return {"project": project, "published_through": through}
 
     def latest(self, project, kind, ref, status=None):
         sql, args = "SELECT * FROM log_entries WHERE lower(project) = lower(?) AND kind = ? AND ref = ?", [project, kind, ref]
@@ -2512,7 +2556,7 @@ def r_activity_add(api, who, m, qs, body, h):
     return api.post_activity(who, body)
 
 
-@route("GET", r"/activity-log", ("admin", "chief", "bot"), "Read recent activity (`project`, `limit`). Bot: bound projects only")
+@route("GET", r"/activity-log", ("admin", "chief", "bot"), "Read recent activity (`project`, `limit`, `bot`, `kind`, `decider`, `since`). Bot: bound projects only")
 def r_activity_list(api, who, m, qs, body, h):
     return api.list_activity(who, qs)
 
@@ -2522,9 +2566,14 @@ def r_activity_export(api, who, m, qs, body, h):
     return ("text/markdown; charset=utf-8", api.export_activity(who, qs).encode())
 
 
-@route("GET", r"/activity-log/snapshot", ("admin", "chief", "bot"), "Nightly activity files changed after an entry ID (`project`, `after`)")
+@route("GET", r"/activity-log/snapshot", ("admin", "chief", "bot"), "Nightly activity files changed since the last published entry (`project`, `after` overrides it)")
 def r_activity_snapshot(api, who, m, qs, body, h):
     return api.activity_snapshot(who, qs)
+
+
+@route("POST", r"/activity-log/published", ("admin", "chief"), "Save the nightly export position (`project`, `through`) after a verified push")
+def r_activity_published(api, who, m, qs, body, h):
+    return api.mark_activity_published(who, body)
 
 
 @route("GET", r"/log/items", ("admin", "chief", "bot"), "Current state of each item (deliverable) in a project. Bot: bound projects only")

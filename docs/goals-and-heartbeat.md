@@ -46,7 +46,7 @@ you about 10 minutes, and most of that is reading.
 4. **You confirm.** You get one message with all projects. You reply "yes", or change a goal in plain
    words ("drop the TikTok one, add a pricing test"). Your reply is the only approval that counts.
 5. **Write it down.** The Chief of Staff writes the confirmed goals into the goals file, sends each
-   project bot its own goals, and adds one `decision/owner` entry per project to the activity feed.
+   project bot its own goals, and adds one owner decision (`--kind decision --decider owner`) per project to the activity feed.
    Mark a goal change lasting. Keep the detailed decision in the project log too.
 
 ### What makes a good goal
@@ -97,7 +97,7 @@ little each day, so keep it tight.
 2. **Is each goal moving?** Look at the project log and task results since yesterday. Something
    happened toward the goal, or work is queued or running for it.
 3. **What is blocked?** A task waiting on an answer, a missing login, a failed task.
-4. **What did I decide?** Log each new bot choice once as `decision/bot` in the activity feed.
+4. **What did I decide?** Log each new bot choice once as a decision (`--decider bot`) in the activity feed.
 5. **Read the brief** (`swarmctl log brief PROJECT`: the standing rules plus the last 14 days of
    feedback) before planning new work, so the same note never has to be given twice.
 
@@ -120,7 +120,7 @@ questions newer than the last sweep. Use chat IDs or timestamps with message IDs
 finds a change, stop without a message or a log entry.
 
 Skip questions already answered, delegated, listed or dropped. Answer new small questions under the
-[delegation rule](delegated-decisions.md). Tell the project bot, log `decision/delegated`, and put the
+[delegation rule](delegated-decisions.md). Tell the project bot, log a delegated decision, and put the
 call in the next morning note once. File the rest once on Waiting on you with a stable question key
 and a recommendation. Save the sweep position after handling what you found, so a retry can pick up
 missed work. If chat search is not available, check only new unread threads or ask project bots to

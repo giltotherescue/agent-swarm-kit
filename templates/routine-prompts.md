@@ -51,7 +51,7 @@ Send OWNER one note with only nonempty sections:
   Delegated since the last note: [PROJECT] #ENTRY-ID: answer. Why: reason. (link)
 Say how to reply: "1 yes, 2 drop, 3 snooze" or "overrule #ENTRY-ID: new answer".
 Record Waiting on you replies with POST SWARM_URL/waiting/ITEM_ID.
-Log actual owner decisions as decision/owner. For overrules give --overrules ENTRY-ID and tell the bot.
+Log actual owner decisions with --kind decision --decider owner. For overrules give --overrules ENTRY-ID and tell the bot.
 ```
 
 ## 3. Nightly memory cleanup (every bot)
@@ -135,7 +135,7 @@ No new evidence, goals to set or asks to review: stop quietly.
    "Goals right now", and add one log entry per project:
    POST SWARM_URL/log {"project": "PROJECT", "kind": "decision", "summary": "Goals for week of DATE confirmed",
    "detail": "the goals with their Done means lines", "dedupe_key": "goals-PROJECT-DATE"}.
-   Log the confirmed decision in the activity feed as decision/owner. Use --lasting for changed goals.
+   Log the confirmed decision in the activity feed with --kind decision --decider owner. Use --lasting for changed goals.
 6. If OWNER does not reply within a day, keep last week's unfinished goals and say so in the next
    morning list. Do not nag.
 ```
@@ -154,7 +154,7 @@ You are MY-BOT-ID for PROJECT. Check this week's goals (in my brief under "Goals
 2. Read the brief before planning any new work, and follow it: GET SWARM_URL/log/brief?project=PROJECT
    (the standing rules plus the last 14 days of feedback).
 3. For each goal: is it moving (progress logged, or work queued or running)? What is blocked?
-4. Log each new choice that matters once as decision/bot in the activity feed.
+4. Log each new choice that matters once with --kind decision --decider bot in the activity feed.
 5. On track: do or queue the next piece of work. All coding and anything over about 15 minutes goes to
    the worker. Send no message.
 6. Blocked and I can fix it: fix it or queue a follow-up. Send no message.
@@ -189,7 +189,7 @@ Check open Waiting on you items and unanswered project bot chats since the last 
 Skip answered, delegated, listed or dropped questions. Use a stable question ID.
 Delegate only if small, reversible and within the brief, goals and latest status. Follow all limits in
 docs/delegated-decisions.md. If unsure or disabled, file it once with a recommendation.
-If delegated, tell the bot, add decision/delegated with the question ID as key, and save the entry ID
+If delegated, tell the bot, add a decision with --decider delegated and the question ID as key, and save the entry ID
 for the next morning note. Add --lasting if it changes how the project works. Save the sweep position.
 ```
 
@@ -198,10 +198,11 @@ for the next morning note. Add --lasting if it changes how the project works. Sa
 Schedule: once a night. See docs/activity-and-decisions.md for the memory repo grant and brief.
 
 ```
-Check each project: swarmctl activity-log export PROJECT --nightly --after LAST-PUBLISHED-ID
-All outputs empty: stop. No task, log or message. Use zero the first night.
+Check each project: swarmctl activity-log export PROJECT --nightly
+All outputs empty: stop. No task, log or message.
 Combine nonempty snapshots in one nightly.json array. Attach it to one docs-only memory repo task
 with --push-main. If one is already in flight, wait. Ask the task to run:
 swarmctl activity-log apply .task-context/attachments/nightly.json --dir .
-Verify the push before saving each through ID. Keep old IDs on failure. Do not log or announce success.
+When that task is done (the push succeeded), run swarmctl activity-log published PROJECT THROUGH for each
+snapshot. If it failed, do nothing; the next night retries. Do not log or announce success.
 ```

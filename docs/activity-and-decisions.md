@@ -1,8 +1,8 @@
 # Activity and decisions
 
 Each project bot and the Chief of Staff write one short line when something ships, changes, gets
-blocked, or is decided. Write for the affected project. Use a registered coordination project for
-swarm-wide work. Expect zero to five lines a day per project. A check that finds nothing new writes
+blocked, or is decided. Write for the affected project. For swarm-wide work use the project
+`cross-project`; any bot can write there and only the Chief of Staff and admin can read it. Expect zero to five lines a day per project. A check that finds nothing new writes
 nothing. Never log secrets or personal data, even in links. Use a short, plain summary, not a transcript.
 
 ```text
@@ -10,20 +10,27 @@ nothing. Never log secrets or personal data, even in links. Use a short, plain s
 ```
 
 `CT` means Central Time. The backend sets the clock and bot ID. Use `-` when there is no link. Links
-must use HTTPS (secure web links), without credentials or query strings. Use a stable key on retries.
+must use HTTPS (secure web links), without credentials or query strings. A summary is one line of up
+to 600 characters. Use a stable key on retries: the same key from the same bot within 24 hours returns
+the first entry instead of adding a second.
 
 | Kind | When to write it |
 | --- | --- |
 | `activity` | A real change worth tracking |
 | `shipped` | Something went live or was delivered, not merely queued |
 | `blocked` | A new blocker that stops work |
-| `decision/owner` | The owner actually said yes or made the call. Only the Chief of Staff or admin records it |
-| `decision/delegated` | The Chief of Staff made a call for the owner under the [delegation rule](delegated-decisions.md) |
-| `decision/bot` | A bot made a choice within its own brief |
+| `decision` | A call was made. Needs `--decider`, see below |
+
+| Decider | Who made the call |
+| --- | --- |
+| `owner` | The owner actually said yes or made the call. Only the Chief of Staff or admin records it |
+| `delegated` | The Chief of Staff, for the owner, under the [delegation rule](delegated-decisions.md) |
+| `bot` | A bot, within its own brief |
 
 ```bash
 swarmctl activity-log add PROJECT --kind shipped "Published the help page" --key HELP-PAGE-V2
-swarmctl activity-log list PROJECT --limit 10
+swarmctl activity-log add PROJECT --kind decision --decider bot "Kept the short checklist" --key CHECKLIST
+swarmctl activity-log list PROJECT --limit 10 --kind decision
 swarmctl activity-log export PROJECT --month YYYY-MM
 ```
 
@@ -43,7 +50,7 @@ is a real update, the task writes one object to `.task-context/activity-log.json
 
 The runner posts it with the task's current
 claim. The task never gets a bot or worker credential. The entry belongs to the task's project and
-owner bot. A task cannot record owner or delegated decisions. Do not opt in a task from untrusted input.
+owner bot. A task can write `activity`, `shipped` or `blocked`, never a decision. Do not opt in a task from untrusted input.
 The owning bot should not log the same event again. Small, bot-only swarms can keep the same lines and
 decisions in memory notes instead.
 
@@ -56,16 +63,16 @@ standing workflow or a confirmed change in goals. The nightly snapshot also puts
 actually decided. The Chief of Staff's calls are always overrulable by the owner.
 
 ```bash
-swarmctl activity-log add PROJECT --kind decision/owner --overrules ENTRY-ID "Use the full checklist"
+swarmctl activity-log add PROJECT --kind decision --decider owner --overrules ENTRY-ID "Use the full checklist"
 ```
 
-The new entry names the old ID. If the original was lasting, its overrule is lasting too. Never edit or
+Only a decision can overrule, and only an owner decision can overrule an owner decision. The new entry names the old ID. If the original was lasting, its overrule is lasting too. Never edit or
 delete the old line. The new owner entry is what overrules it. Tell the affected bot what changed.
 
 ## Nightly export to the memory repo
 
-The memory repo is a separate, private, docs-only repo with `main` as its default branch. A project can have `README.md` for its brief,
-`tasks.md` for open work, `decisions.md` for lasting choices, and `log/` for the monthly feed. To start,
+The memory repo is a separate, private, docs-only repo with `main` as its default branch. A project
+can have `README.md` for its brief, `tasks.md` for open work, `decisions.md` for lasting choices, and `log/` for the monthly feed. To start,
 put `# Project brief` in `README.md`, `# Open work` in `tasks.md`, and `# Decisions` in `decisions.md`.
 The export adds the date sections and headings. An empty `log/` need not be committed.
 
@@ -77,26 +84,28 @@ queue docs updates whenever needed, without a pull request (PR). The example bin
 swarmctl project set MEMORY-PROJECT --repo ORG/MEMORY-REPO --bot PROJECT-BOT --allow-push-main
 ```
 
-- Each night, the Chief of Staff checks each project with the command below. Use zero for the first run
-  and the last successfully published entry ID thereafter. Empty output means no new data. Do not
-  queue a task or send a note if all projects are quiet.
-- Put the nonempty snapshots in one `nightly.json` file as an array. Queue one docs-only task with the
-  file attached. Use a low-cost model and keep at most one export in flight. Do not attach credentials.
-- In the task brief, run the offline apply command below from the memory checkout. Commit only the
-  changed docs. The worker pushes to `main` after the task finishes, without a PR. Code repos keep draft
-  PRs. Never add secrets or personal data to memory docs.
-- Advance each saved ID to its snapshot's `through` only after verifying the push. On failure, keep the
-  old ID and retry with a fresh snapshot. Do not log the export itself or send routine success messages.
+Each night the Chief of Staff runs the first command below for each project. The backend remembers
+the last published entry per project, so the snapshot holds only what is new, and empty output means
+nothing changed: queue nothing and send nothing. Otherwise put the nonempty snapshots in one
+`nightly.json` array and queue one docs-only task with it attached (second command), on a low-cost
+model, with at most one export in flight. The task brief runs the offline apply (third command) from
+the memory checkout and commits only the changed docs. The worker pushes to `main` without a pull
+request and reports `done` only after the push succeeded. Then, and only then, the Chief of Staff
+saves the position with the fourth command, using each snapshot's `through`. On failure it saves
+nothing, and the next night's snapshot covers the same entries again. Do not log the export or send
+success messages. Never add secrets or personal data to memory docs.
 
 ```bash
-swarmctl activity-log export PROJECT --nightly --after LAST-PUBLISHED-ID
+swarmctl activity-log export PROJECT --nightly
 swarmctl enqueue --project MEMORY-PROJECT --owner CHIEF-BOT --push-main --attach nightly.json brief.md
 swarmctl activity-log apply .task-context/attachments/nightly.json --dir .
+swarmctl activity-log published PROJECT THROUGH
 ```
 
 The snapshot includes full Markdown for each changed `<project>/log/YYYY-MM.md`, including any months
 missed while the routine was off. It includes the generated `decisions.md` block only when a lasting
 decision changed. The apply command replaces only the block between `<!-- activity-log:begin -->` and
 `<!-- activity-log:end -->`; it appends it if there are no markers. It refuses mismatched markers and
-keeps anything outside them untouched. It refuses snapshots that would drop old entries. Do not hand
-edit the generated block or monthly files.
+keeps anything outside them untouched. It refuses snapshots that would drop old entries, and applying
+the same or an older snapshot again changes nothing. Do not hand edit the generated block or monthly
+files. `--after ID` on the export overrides the saved position, for example `--after 0` to rebuild.
