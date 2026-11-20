@@ -300,6 +300,8 @@ Start with the concepts, then follow your path.
 - [Which tool when](docs/which-tool-when.md): connectors, treg, the worker or Executor.
 - [Goals meeting and work heartbeat](docs/goals-and-heartbeat.md): how bots keep moving each week.
 - [Project log](docs/project-log.md): items with status and version, decisions, feedback, and a short rules doc per project.
+- [Activity and decisions](docs/activity-and-decisions.md): recent feed and nightly export to the memory repo.
+- [Delegated decisions](docs/delegated-decisions.md): when the Chief of Staff can answer and how you can overrule it.
 - [Long-running jobs](docs/long-running-jobs.md): jobs that run for days, as a chain of short cycles.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Zero-touch server (cloud-init)](docs/cloud-init.md): the bot builds the worker; you only approve in a browser.

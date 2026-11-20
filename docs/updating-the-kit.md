@@ -105,6 +105,12 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.6.0
+
+The backend adds the activity table on startup. Existing project log entries stay where they are.
+Update the bot prompts and, if you want nightly exports, set up the separate
+[memory repo](activity-and-decisions.md#nightly-export-to-the-memory-repo).
+
 ## Upgrading to 0.5.0
 
 Re-run setup as above. Nothing changes in the database and no setting is required. What you get and what changes:

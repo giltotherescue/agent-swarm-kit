@@ -4,6 +4,13 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.6.0 (2026-11-20)
+
+- Add a short per-project activity feed with SQLite storage, `swarmctl activity-log`, and an API.
+- Export changed months and lasting decisions nightly to a separate docs-only memory repo. Preserve manual notes.
+- Let the Chief of Staff answer small, reversible questions. Show those calls once in the morning note and let the owner overrule them.
+- Check for missed questions at each Chief of Staff heartbeat. Keep routines quiet when nothing changed.
+
 ## 0.5.0 (2026-11-20)
 
 Setup with nobody typing: the bot builds the server, and every sign-in is "open this link".

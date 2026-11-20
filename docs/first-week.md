@@ -41,6 +41,10 @@ sudo swarmctl bot test chief
 
    Each bot should see a `reason: "test"` event in its own inbox, and only its own. `sudo swarmctl status` shows `notices: sent N`.
 
+   Each bot adds one real day-one entry to the [activity feed](activity-and-decisions.md). Read it
+   with `swarmctl activity-log list PROJECT`. Before the first nightly export, set up the separate
+   [memory repo](activity-and-decisions.md#nightly-export-to-the-memory-repo).
+
 ## Day 2: a small report-only task
 
 Ask `website-bot` in chat to research something small, for example "list the five slowest pages and why". The bot queues it (with `swarmctl`, or the same thing as `POST /tasks`). If the brief needs files, attach them with `--attach`; the worker cannot see the bot's own computer:

@@ -180,13 +180,15 @@ Ask:
 2. **"What time should the morning decision list arrive?"** Recommend: 8:00.
 
 Then set up the routines from `templates/routine-prompts.md`:
-- Chief of Staff: morning decision batch, nightly memory cleanup, weekly goals meeting, fallback handler
-  (only with a worker).
+- Chief of Staff: morning decision batch, missed-question sweep at each heartbeat, nightly memory
+  cleanup, weekly goals meeting. With a worker, also set up the fallback handler and nightly activity export.
 - Each project bot: nightly memory cleanup, daily work heartbeat, task result handler (only with a
   worker).
 
 Without a worker, keep the goals file and the project log as notes in each bot's memory (see
 `docs/goals-and-heartbeat.md` and `docs/project-log.md`, section "Without a worker").
+With a worker, offer a separate docs-only memory repo with a main-branch grant for that repo alone.
+Use `docs/activity-and-decisions.md`. Ask whether to keep the default in `docs/delegated-decisions.md`.
 
 ## Step 9. Worker: where it runs and how big (worker only)
 
