@@ -52,7 +52,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -147,7 +147,8 @@ MIGRATE_COLUMNS = {
               ("unpushed", "INTEGER DEFAULT 0"), ("human_snooze_until", "INTEGER"),
               ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER"),
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
-              ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER")],
+              ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
+              ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -161,6 +162,7 @@ DROP INDEX IF EXISTS tasks_idem;
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_idem_owner ON tasks(coalesce(lower(owner), ''), idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, not_before);
+CREATE INDEX IF NOT EXISTS tasks_follow_up ON tasks(parent_id) WHERE follow_up = 1;
 CREATE INDEX IF NOT EXISTS tasks_updated ON tasks(updated_at);
 CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS events_task ON events(task_id, id);
@@ -174,7 +176,7 @@ CREATE INDEX IF NOT EXISTS tasks_chain ON tasks(chain_root);
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LOG_KINDS = ("activity", "decision", "result", "item", "feedback", "learning", "rule")
 ITEM_STATUSES = ("draft", "needs-review", "approved", "changes", "rejected")
 VERDICTS = ("approved", "changes", "rejected")
@@ -655,6 +657,9 @@ class Backend:
         if who["role"] == "bot" and owner and owner.lower() != who["bot"].lower():
             raise ApiError(403, "a project bot can only queue tasks it owns")
         project = clean_text(b.get("project"), 80, "project")
+        target_worker = clean_text(b.get("target_worker"), 80, "target_worker")
+        if target_worker and not SAFE_NAME.fullmatch(target_worker):
+            raise ApiError(400, "target_worker must be a worker name (letters, digits, dot, dash or underscore)")
         repo = clean_text(b.get("repo"), 200, "repo")
         repo = norm_repo(repo) if repo else None
         proj = self.project(project)
@@ -731,6 +736,8 @@ class Backend:
                  "push_main": push_main, "ask_human": bool(b.get("ask_human")), "untrusted": untrusted, "kind": kind,
                  "project": project, "parent_id": parent_id, "follow_up": follow_up, "timeout": timeout, "chain": chain,
                  "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
+        if target_worker:
+            canon["target_worker"] = target_worker
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
         scope = (owner or "").lower()
         t = now()
@@ -758,14 +765,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
-                    timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0, max_cycles)
+                    timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
+                    max_cycles, target_worker)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -842,6 +850,8 @@ class Backend:
             raise ApiError(409, f"task {parent_id} is still {st}. Send it a message instead: swarmctl message {parent_id} \"...\"",
                            {"task_id": parent_id})
         if st == "waiting":
+            if b.get("target_worker") and b["target_worker"] != parent.get("target_worker"):
+                raise ApiError(400, "a follow-up to a waiting task answers it; it cannot change the worker pin")
             for flag in ("push", "open_pr", "push_main"):
                 if b.get(flag) and not parent.get(flag):
                     raise ApiError(400, f"task {parent_id} is waiting for an answer. A follow-up answers it and cannot add "
@@ -850,7 +860,7 @@ class Backend:
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]
@@ -947,6 +957,10 @@ class Backend:
         self.need(who, "admin", "chief", "bot")
         with self.s.tx():
             t = self.get_task(who, task_id)
+            if t["state"] == "failed" and t["failure_resolved_at"] is None:
+                self.s.run("UPDATE tasks SET failure_resolved_at = ?, updated_at = ? WHERE id = ?", now(), now(), task_id)
+                self.event(task_id, "failure_resolved", who["bot"] or who["role"], note or "failure dismissed")
+                t = self.get_task(who, task_id)
             if t["chain_root"]:
                 return self.cancel_chain(who, t, note)
             return self.cancel_one(who, t, note)
@@ -998,27 +1012,29 @@ class Backend:
     def claim(self, who, b):
         self.need(who, "worker")
         worker = clean_text(b.get("worker"), 80, "worker") or "worker"
+        projects = b.get("projects")
+        if projects is not None and (not isinstance(projects, list) or len(projects) > 100 or
+                                     any(not isinstance(project, str) or not project.strip() or len(project) > 80
+                                         for project in projects)):
+            raise ApiError(400, "projects must be a list of up to 100 project names")
         draining = bool(b.get("draining"))
         with self.s.tx():
             self.seen(worker, draining)
-            if draining:
+            if draining or projects == []:
                 return None
-            pick = None
-            for t in self.s.q("SELECT * FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY created_at LIMIT 100", now()):
-                if t["held_behind"]:
-                    h = self.s.one("SELECT state FROM tasks WHERE id = ?", t["held_behind"])
-                    if h and h["state"] not in TERMINAL:
-                        continue
-                host = t["workspace_host"]
-                if host and host != worker:
-                    w = self.s.one("SELECT last_seen FROM workers WHERE name = ?", host)
-                    if w and (w["last_seen"] or 0) > now() - 3600:
-                        continue  # that worker has the folder and session; leave it for that worker
-                pick = t
-                break
-            if not pick:
+            sql = ("SELECT * FROM tasks t WHERE t.state = 'queued' AND t.not_before <= ?"
+                   " AND (t.target_worker IS NULL OR t.target_worker = ?)"
+                   " AND NOT EXISTS (SELECT 1 FROM tasks h WHERE h.id = t.held_behind"
+                   " AND h.state NOT IN ('done','failed','cancelled'))"
+                   " AND (t.target_worker IS NOT NULL OR NOT EXISTS (SELECT 1 FROM workers w"
+                   " WHERE w.name = t.workspace_host AND w.name != ? AND w.last_seen > ? AND w.draining = 0))")
+            args = [now(), worker, worker, now() - 3600]
+            if projects is not None:
+                sql += " AND t.project IN (" + ",".join("?" for project in projects) + ")"
+                args.extend(projects)
+            t = self.s.one(sql + " ORDER BY t.created_at, t.rowid LIMIT 1", *args)
+            if not t:
                 return None
-            t = pick
             attempts = t["attempts"] + 1
             claim_id = "c" + secrets.token_hex(8)
             tok = "swt_" + secrets.token_urlsafe(32)
@@ -1226,6 +1242,25 @@ class Backend:
                              text=f"Task {t['id']} waited {age // 3600} hours on {bot}. It is now on the Waiting on you list.")
                     self.queue_notice(eid, self.chief(), "alert", p)
                     self.s.run("UPDATE tasks SET escalated_at = ? WHERE id = ?", now(), t["id"])
+        self.escalate_failures()
+
+    def escalate_failures(self):
+        unresolved = ("t.state = 'failed' AND t.failure_escalated_at IS NULL AND t.failure_resolved_at IS NULL"
+                      " AND NOT EXISTS (SELECT 1 FROM tasks f WHERE f.parent_id = t.id AND f.follow_up = 1"
+                      " AND f.state != 'cancelled')")
+        failed = self.s.q(f"SELECT t.id FROM tasks t WHERE {unresolved} ORDER BY t.finished_at LIMIT 100")
+        for task in failed:
+            with self.s.tx():
+                marked = self.s.run(f"UPDATE tasks AS t SET failure_escalated_at = ? WHERE t.id = ? AND {unresolved}",
+                                    now(), task["id"]).rowcount
+            if not marked:
+                continue
+            try:
+                self.alert(f"task-failed:{task['id']}",
+                           f"Task {task['id']} failed and has no follow-up. Review its report or queue a follow-up.",
+                           "supervisor")
+            except Exception:
+                print(f"failure escalation could not be queued for task {task['id']}", file=sys.stderr, flush=True)
 
     def watchdog(self):
         with self.s.tx():

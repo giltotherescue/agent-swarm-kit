@@ -19,6 +19,7 @@ Environment=SWARM_WORK_DIR=/home/agent/work
 Environment=SWARM_REQUIRE_SCOPE=1
 Environment=SWARM_RUN_AGENT=/opt/agent-swarm-kit/current/server/run-agent
 EnvironmentFile=/etc/agent-swarm/swarm.env
+ExecStartPre=+/usr/sbin/runuser -u agent -- /usr/bin/env -i HOME=/home/agent PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/swarm-sync-secrets --if-configured
 ExecStart=/usr/bin/python3 /opt/agent-swarm-kit/current/server/swarm_worker.py
 Restart=always
 RestartSec=10

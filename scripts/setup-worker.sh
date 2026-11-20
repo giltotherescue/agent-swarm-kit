@@ -711,6 +711,7 @@ EOF
   install -d -m 755 "$LIBEXEC"
   install -o root -g root -m 755 "$REL/server/agent-exec" "$LIBEXEC/agent-exec"
   install -o root -g root -m 755 "$REL/server/with-secrets" /usr/local/bin/with-secrets
+  ln -sfn /usr/local/bin/with-secrets /usr/local/bin/swarm-sync-secrets
   sudoers=$(mktemp)
   cat > "$sudoers" <<EOF
 # agent-swarm-kit: the runner may start agent-exec as the agent user, and nothing else.

@@ -105,6 +105,12 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.4.0
+
+Re-run setup as above. The database gains new columns in place. A single worker needs no new routing
+settings. Follow [Secrets](secrets.md#set-up-the-encrypted-repo) to set up encryption and move any
+legacy `with-secrets` values. Until then the existing worker and local `.env` bundles still work.
+
 ## Upgrading from 0.3.0 to 0.3.1
 
 0.3.1 is a fix release. Re-run the setup script as in "Pulling an update". Nothing else to do: no new

@@ -32,6 +32,11 @@ A background loop runs every few seconds. It:
 
 Task states: `queued`, `running`, `waiting`, `done`, `failed`, `cancelled`. A waiting task has `waiting_on` set to `owner` (the bot that queued it) or `human`.
 
+The supervisor sends one Chief of Staff escalation for a failed task with no active or completed
+follow-up. Queue a follow-up to take over the work, or run `swarmctl cancel TASK_ID` to dismiss the failed
+task without changing its failed state. The backend records the escalation attempt even if it cannot queue a
+notice. The normal task result still goes to the owning bot; webhook transport retries can redeliver it.
+
 ## Tokens
 
 Every request except `GET /health` needs `Authorization: Bearer <token>`. A bearer token is a long random password sent with each request. The backend stores only hashes of bot and task tokens.
