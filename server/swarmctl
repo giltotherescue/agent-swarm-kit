@@ -26,6 +26,7 @@ Examples:
   swarmctl log add marketing --kind item --status needs-review "Spring sale ad, Facebook"
   swarmctl log brief marketing          read before drafting: standing rules plus 14 days of feedback
   swarmctl log list marketing --kind feedback,learning --days 30
+  sudo swarmctl login codex | claude | github      worker: start a sign-in, print only the link and code (docs/worker-setup.md)
   swarmctl enqueue --chain --max-cycles 30 --owner app-bot -r you/app --pr polish.md   (see docs/long-running-jobs.md)
   swarmctl log export marketing --days 7 --out marketing-log.md
   sudo swarmctl drain | undrain | restart-when-idle    (on the worker)
@@ -537,6 +538,18 @@ def main():
         d.add_argument("--max-wait", type=int, help="give up after this many seconds (default: wait as long as it takes)")
         d.add_argument("--also", action="append", help="also restart this systemd unit while idle, for example a proxy")
         d.set_defaults(fn=cmd_drain)
+
+    lg_in = sub.add_parser("login", help="worker: start a Codex, Claude or GitHub sign-in and print only the link and code (run with sudo)")
+    lg_in.add_argument("provider", choices=("codex", "claude", "github"))
+    lg_in.add_argument("--finish", action="store_true", help="claude: send the code the browser showed (read from stdin)")
+    lg_in.add_argument("--token-stdin", action="store_true", help="claude: save a token you already have (read from stdin)")
+    lg_in.add_argument("--status", action="store_true"); lg_in.add_argument("--cancel", action="store_true")
+    lg_in.add_argument("--json", action="store_true", help="print one JSON object instead of lines")
+
+    def run_login(a):
+        import swarm_login
+        swarm_login.cmd_login(a)
+    lg_in.set_defaults(fn=run_login)
 
     a, extra = p.parse_known_args(argv)
     # "log add PROJECT --kind KIND SUMMARY": argparse leaves a summary written after the options unparsed.

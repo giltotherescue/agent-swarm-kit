@@ -1,0 +1,22 @@
+[Unit]
+Description=CLIProxyAPI (optional proxy for model subscriptions), local only
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cliproxy
+Group=cliproxy
+WorkingDirectory=/var/lib/cliproxyapi
+Environment=MANAGEMENT_STATIC_PATH=/var/lib/cliproxyapi/static
+# The proxy rewrites config.yaml at start (it turns the management key into a hash), so the service user owns it.
+ExecStart=/opt/cliproxyapi/cli-proxy-api -config /var/lib/cliproxyapi/config.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cliproxyapi
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

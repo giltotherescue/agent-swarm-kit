@@ -62,7 +62,29 @@ This page lists the outside services the swarm can use, why each one helps, and 
 
 **Skip it if:** one Claude subscription plus one ChatGPT subscription covers your work. The default setup (plain CLIs, your own logins, Codex as fallback) is enough for most people.
 
-**Setup:** not included in the kit. Follow the project's own instructions, keep it bound to `127.0.0.1` (only reachable from the box itself), and point the CLIs at it through their base URL settings. Tasks run with a clean environment, so put the base URL setting in `/etc/agent-swarm/agent.env` (one `KEY=VALUE` per line, owned by root).
+**Setup:** `scripts/setup-cliproxy.sh` (below) installs it the safe way and sets up the web panel. Pointing Claude Code and Codex at the proxy is a separate step and stays manual: they keep using their own logins until you set their base URL settings. Tasks run with a clean environment, so put those base URL settings in `/etc/agent-swarm/agent.env` (one `KEY=VALUE` per line, owned by root, readable by the `agent` group).
+
+### The web panel, over Tailscale only (advanced)
+
+The proxy has a web page, the management panel, where you add Codex and Claude accounts by signing in with your browser. It is the easy way to add several accounts. The setup keeps it private:
+
+- The proxy listens on `127.0.0.1` only (`server.host: "127.0.0.1"`), and `management.allow-remote` stays `false`.
+- The panel's password (the management key) comes from the secret request form into a file, and the installer copies it into the config. It is never in chat or on a command line. The proxy replaces it with a hash when it starts.
+- A small gate (`cliproxy-gate`, on `127.0.0.1:8318`) passes only the panel page and the management API to the proxy and answers 404 for everything else, so the model API (`/v1/...`) is never reachable from your tailnet.
+- `tailscale serve` publishes the gate, and only to your tailnet, never to the internet (not `tailscale funnel`).
+
+```bash
+# the bot saves the key from the secret form to a file with mode 600, then, on the worker:
+sudo bash /opt/agent-swarm-kit/current/scripts/setup-cliproxy.sh --management-key-file /root/cliproxy.key --serve
+```
+
+The key must be 16 to 200 plain characters. `--serve` runs `tailscale serve --bg --https=8444 http://127.0.0.1:8318`; the panel is then at `https://YOUR-WORKER.YOUR-TAILNET.ts.net:8444/management.html`. The script downloads the release, checks it against the release's `checksums.txt`, installs it under `/opt/cliproxyapi` and runs it as its own `cliproxy` user with a systemd service. It does not restart a proxy that is already running.
+
+**Add accounts in the panel.** Open the panel from a computer on your tailnet, sign in with the management key, go to *OAuth Login*, pick Codex or Claude. The panel shows a sign-in link; open it and sign in. The provider then sends your browser to a `http://localhost:PORT/...` address (Codex uses port 1455, Claude 54545). **Nothing is listening there on your computer, so the page will fail to load. That is expected.** Copy the whole address from the browser's address bar, paste it in the panel's *Callback URL* box and press *Submit Callback URL*. The panel finishes the sign-in. Repeat for each account. Credentials are stored under `/var/lib/cliproxyapi/auth`.
+
+**Never restart the proxy while tasks are running.** A restart drops live model streams and those tasks fail. That includes `systemctl restart cliproxyapi`, an upgrade of the proxy, and a reboot of the worker with tasks running. Drain first and restart when idle: `sudo swarmctl restart-when-idle --also cliproxyapi`. Adding accounts in the panel should not need a restart, but we did not verify that; if it seems to, use the drain command above.
+
+**What was tested and what was not.** Tested: the gate, with a stand-in upstream (what it passes, what it refuses, path tricks, dead upstream), and the installer's config and key checks. Also done by hand with the real CLIProxyAPI 8.0.79 (the default version) on Linux: it started with the config the installer writes, listened only on `127.0.0.1`, rewrote the key as a hash at start, served the panel, and the panel logged in and loaded its pages **through the gate** in a real browser; the panel's Codex sign-in window opened with the link and the callback box. **Not tested:** `tailscale serve` itself with this setup, the systemd units, a full OAuth sign-in with a real Codex or Claude account (so the paste-the-callback step is checked only as far as the panel's box and the proxy's `oauth-callback` endpoint existing), and pointing the CLIs at the proxy. The panel and its API belong to the CLIProxyAPI project and can change between its releases; the default version is pinned for that reason.
 
 ## Cloudflare
 

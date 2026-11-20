@@ -29,10 +29,14 @@ what it will do and ask.
    guess your way past a failed step.
 9. **No jargon without a short meaning.** The first time you use a word like "worker", "token" or
    "Tailscale", add a few plain words about what it is.
+10. **You do the work, they approve.** Your human never SSHes anywhere, never types `sudo`, and never runs a
+    command. You build the server and run every command yourself. They only open links and approve:
+    the provider token form, the Tailscale approval, and each sign-in. Say what they are about to see
+    ("a page will ask you to type a short code") before you send a link.
 
 Read these files from the repo as you go: `README.md`, `templates/chief-of-staff.md`,
 `templates/project-bot-brief.md`, `templates/routine-prompts.md`, `docs/which-tool-when.md`,
-`docs/goals-and-heartbeat.md`, and, if they want a worker, `docs/worker-setup.md` and
+`docs/goals-and-heartbeat.md`, and, if they want a worker, `docs/cloud-init.md`, `docs/worker-setup.md` (reference) and
 `templates/bot-setup-checklist.md`.
 
 ---
@@ -44,7 +48,8 @@ Tell them, in your own words:
 > I will set you up with a small team of AI helpers: a Chief of Staff bot (that is me, or a bot you
 > pick) and one bot per project. If you want, we can also add a "worker", a rented computer in the cloud
 > that does long jobs and all the coding. I will ask one question at a time and always say what I
-> recommend. Without a worker this takes about an hour. With one, plan on an afternoon.
+> recommend. If you want a worker, I build it myself: you will not need to open a terminal. You only
+> approve a few things in your browser.
 
 Ask: **"Which name should I use for you, and what time zone are you in?"**
 
@@ -187,66 +192,89 @@ Without a worker, keep the goals file and the project log as notes in each bot's
 
 Explain:
 
-> The worker is a normal Ubuntu server from any provider you like (DigitalOcean, Hetzner, Vultr, AWS and
-> others all work). It joins Tailscale, a private network for your own devices, so it never has to be
-> open to the whole internet.
+> The worker is a normal Ubuntu server from a cloud provider. I will create it for you through the
+> provider's API and set it up while it starts, so you do not have to touch it. It joins Tailscale, a
+> private network for your own devices, so it is never open to the whole internet.
 
-Recommend: **4 CPUs and 8 GB of memory with Ubuntu 24.04**, at whatever provider they already use, or
-the cheapest one they trust. That is roughly $15 to $50 a month, depending on the provider. Bigger only for big code projects (see
-`docs/sizing-and-sandboxes.md`).
+Recommend: **DigitalOcean, 4 CPUs and 8 GB of memory, Ubuntu 24.04**, or whichever provider they already
+use. Roughly $15 to $50 a month, depending on the provider (see the README for current prices). Bigger only
+for big code projects (see `docs/sizing-and-sandboxes.md`). Hetzner, Vultr and Linode work the same way
+through their own APIs; `docs/cloud-init.md` says what is and is not tested.
 
-**Confirm the cost before they rent it** (ground rule 5). Then walk them through renting it and adding
-their SSH key, using `docs/worker-setup.md`. If they have no SSH key, help them make one on their laptop;
-the private half never leaves the laptop and never goes in chat.
+Other choices, one question each:
+- **A spare Mac at home instead?** Only if they have one that holds nothing private. It is simpler but
+  less isolated (no separate users, no limits per job). Recommend a cloud server. If they choose the Mac,
+  follow `docs/macos-worker.md` instead of Steps 10 and 11; the sign-ins happen in Terminal on the Mac, so
+  this is the one place they do type, and you tell them exactly what.
+- **A computer at home with Ubuntu?** Then use the by-hand path (`docs/worker-setup.md`) and coach them.
 
-Ask them to make a free Tailscale account if they have none. Recommend: yes, it is free for personal use.
+**Confirm the cost before you create anything** (ground rule 5), then ask for the provider token:
 
-## Step 10. Worker: model logins and the backend (worker only)
+> I need a token from DigitalOcean so I can create the server. A token is a password that only allows
+> what you pick. Open the form I send, create the token in DigitalOcean (I will tell you which permissions
+> to tick), and paste it into the form, not into chat. When the server is up I will ask you to delete the
+> token.
 
-**Model logins.** Explain:
+Send the secret request form. Never accept the token in chat. Tick **Droplet create and read, plus read for
+images, sizes and regions**.
 
-> The worker uses Claude Code and Codex, logged in with your own Claude and ChatGPT subscriptions. No
-> per-use bills.
+## Step 10. Worker: Tailscale and the build (worker only)
 
-Recommend: **the plain Claude and Codex command line tools with their own logins** (this is the
-default). A proxy that spreads work over several subscriptions exists but is for heavy users; skip it
-(see `docs/optional-services.md`). If they have only one of the two subscriptions, that is fine: use
-`--no-claude` or `--no-codex` in the setup command.
+1. Ask them to make a free Tailscale account if they have none. Recommend yes. Make sure Tailscale is
+   running on the computer your bot works from, and that their Tailscale access rules let that computer
+   reach the worker with Tailscale SSH as the admin user (sample rules: `docs/worker-setup.md`,
+   "Tailscale access rules"). Do this for them where you can.
+2. Choose how the server joins Tailscale. Recommend **a one-use key**: send a secret request form and
+   ask them to make an auth key in the Tailscale admin page that is *single use*, *expires in an hour* and
+   is *pre-approved*, and paste it into the form. The alternative needs no key: you read a login link from
+   the new server and they click it. Both are one browser step.
+3. Make the bootstrap key and the user data, exactly as in `docs/cloud-init.md`:
+   `ssh-keygen` for a bootstrap key in your scratch folder, then `scripts/render-cloud-init.py`. For a
+   first server, pass `--lockdown bot`, so public SSH stays open until you have proven Tailscale SSH works.
+4. Create the server with the provider's API (`docs/cloud-init.md`, "What the bot does"). Say what you are
+   doing in one sentence per step. Wait for it to be active.
+5. If they chose the login link: read it from the server and send it ("Open this link and approve the
+   machine"). If they gave a key, the server joins by itself.
+6. Watch `/var/lib/agent-swarm/firstboot/status` until it says `finished` (about 10 to 15 minutes; tell
+   them it is normal to wait). If it says `stopped`, read the log, tell them the exact problem in plain
+   words, and fix it yourself.
+7. Reach the server over Tailscale SSH (`ssh NAME@HOSTNAME`), check `sudo swarmctl status`, then close
+   public SSH yourself: `sudo bash /opt/agent-swarm-kit/current/scripts/setup-worker.sh --lockdown --yes --admin-user NAME`.
+8. Clean up: delete the user-data file, the Tailscale key file and the bootstrap private key, and ask them to
+   delete the provider token. From now on you only use Tailscale SSH.
 
-**Where the task tracker (backend) runs.** Explain:
+## Step 11. Worker: model logins, GitHub and secrets (worker only)
 
-> The backend is the small service that keeps track of jobs, results, the Waiting on you list and the
-> project log. It runs on the worker itself.
+Each sign-in is "open this link". You run the helper over Tailscale SSH and pass on only the link and the
+code it prints (`docs/worker-setup.md`, step 5).
 
-Recommend: **on the worker** (the default). A Cloudflare version is only a design and is not built, so
-there is nothing to choose here today; just tell them that.
+> The worker uses Claude Code and Codex, signed in with your own Claude and ChatGPT subscriptions, and GitHub
+> for pushing code. No per-use bills. For each one I will send you a link; you open it and sign in.
 
-## Step 11. Worker: install it together (worker only)
+Recommend **the plain Claude and Codex command line tools with their own sign-ins** (the default). A proxy
+that spreads work over several subscriptions exists but is for heavy users; skip it (`docs/optional-services.md`).
+If they have only one subscription, that is fine; use `--no-claude` or `--no-codex` in the render step.
 
-Follow `docs/worker-setup.md` and the "Path B" steps in `README.md`. You cannot type on their server, so
-give them one command at a time, explain it in one sentence, and ask them to paste back the last few
-lines of output (never any secret). In short:
-
-1. Get the kit onto the server (docs/worker-setup.md, step 2).
-2. Run `sudo bash scripts/setup-worker.sh --admin-user NAME --tailscale later`. It takes 5 to 15
-   minutes. On a brand new server it may wait a few minutes for the server's own first-boot updates;
-   that is normal.
-3. Logins on the server: they type `sudo -iu agent claude` then `/login`, and
-   `sudo -iu agent codex login --device-auth`, and approve in their browser. GitHub: they run
-   `sudo -u swarm-runner -H gh auth login`. You never see these codes.
-4. Join Tailscale: `sudo tailscale up --ssh`, then approve the server in the Tailscale page.
-5. Set up [encrypted secrets](docs/secrets.md#set-up-the-encrypted-repo) with them, even for one worker.
-   Have them make the owner, worker and recovery keys, save the recovery key in their password manager,
-   then sync a runtime bundle and check names with `with-secrets --check tools`. Do not ask for any of
-   the private keys or bundle values; the secret-request-form rules above still apply.
-6. Start the worker and check it: `sudo systemctl start swarm-worker`, then
-   `sudo bash scripts/smoke-test.sh`. Expect "0 failed". Up to 2 warnings (GitHub, Tailscale) are normal
-   until those are done.
-7. Close public SSH once they can log in over Tailscale: `sudo bash scripts/setup-worker.sh --lockdown`.
+1. **Codex.** First check the preflight: device-code sign-in must be turned on in ChatGPT, under Security
+   settings (or by their workspace admin). If it is off, the code is rejected. Ask them to turn it on, then run
+   `sudo swarmctl login codex` and send them the `URL` and `CODE` lines.
+2. **Claude.** Needs a Pro, Max, Ultra, Team or Enterprise plan. Run `sudo swarmctl login claude` and send the
+   `URL`. The page will then show them a code. Send a secret request form for that code, then run
+   `swarmctl login claude --finish` with the code on standard input. The long-lived token is saved on the
+   server and never shown to you or them.
+3. **GitHub.** Run `sudo swarmctl login github` and send the `URL` and `CODE`. This is the runner's login.
+4. **Encrypted secrets.** The server already has SOPS, age and its own keys. Read the two public key files in
+   `/var/lib/agent-swarm/firstboot/`. Help them set up the private secrets repo ([secrets.md](docs/secrets.md)):
+   add the age public key as a recipient, add the deploy key to the repo with write access off (they approve
+   that in GitHub), keep the recovery key in their password manager, then
+   `sudo bash /opt/agent-swarm-kit/current/scripts/setup-secrets.sh --link REPO_URL`. Never ask for any
+   private key or bundle value.
+5. Run `sudo bash /opt/agent-swarm-kit/current/scripts/smoke-test.sh`. Expect "0 failed". Warnings for sign-ins
+   you skipped are fine.
 
 ## Step 12. Connect each bot to the worker (worker only)
 
-For each bot, follow `templates/bot-setup-checklist.md` with the human. The two secrets in it (the
+For each bot, follow `templates/bot-setup-checklist.md`. The two secrets in it (the
 bot's token and its inbox trigger key) go through Grok Bot's secret request form, never chat. Then bind
 each bot to its project, including projects with no code:
 
@@ -255,6 +283,9 @@ sudo swarmctl project set marketing --bot marketing-bot
 ```
 
 That binding is what lets the bot write to and read its own project log.
+
+If something here does not work for you (no cloud-init at the provider, or you would rather type it
+yourself), the manual path is `docs/worker-setup.md` and "Path B" in `README.md`.
 
 ## Step 13. First goals meeting and first task
 
@@ -285,9 +316,9 @@ date, and why. Then go quiet. From now on you only message them when something c
 | Decision | Default to recommend | When to pick something else |
 | --- | --- | --- |
 | Worker or not | With a worker if any code or long research; otherwise no | Add one later any time |
-| Where the worker runs | Any provider they already use, Ubuntu 24.04 | A provider their company requires |
+| Where the worker runs | DigitalOcean (or the provider they use), Ubuntu 24.04, built by the bot | A provider their company requires (similar API), or a spare Mac with less isolation |
 | Worker size | 4 CPUs, 8 GB | Big code projects: 8 CPUs, 16 GB, or offload test runs |
-| Private network | Tailscale, then close public SSH | Never skip it with a worker |
+| Private network | Tailscale (one-use key), then close public SSH | Never skip it with a worker. First server: lockdown by the bot, after Tailscale SSH works |
 | Model logins | Plain Claude and Codex CLIs with their own subscriptions | Proxy only for heavy users who hit limits |
 | Backend | On the worker | Cloudflare is design only, not built |
 | Project bots | One per real project, small ones merged | More later as projects grow |

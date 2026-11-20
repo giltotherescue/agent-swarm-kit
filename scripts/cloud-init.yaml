@@ -1,0 +1,55 @@
+#cloud-config
+# agent-swarm-kit worker, built at first boot with nobody typing. Fill in with scripts/render-cloud-init.py;
+# do not paste this template into a provider as it is. The result may hold a Tailscale auth key, so treat the
+# rendered file as a secret and delete it after the server is up. Docs: docs/cloud-init.md
+#
+# What it does: creates the admin user, downloads the kit, and starts swarm-firstboot.service. That service
+# runs scripts/firstboot.sh once cloud-init has finished (setup, Tailscale, secrets tools, worker, smoke test,
+# lockdown). Progress: /var/lib/agent-swarm/firstboot/status
+users:
+  - name: @@ADMIN_USER@@
+    gecos: Swarm admin
+    shell: /bin/bash
+    groups: [sudo]
+    lock_passwd: true
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - @@SSH_PUBLIC_KEY@@
+write_files:
+  - path: /etc/agent-swarm-firstboot.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ADMIN_USER=@@ADMIN_USER@@
+      LOCKDOWN=@@LOCKDOWN@@
+      WITH_CLAUDE=@@WITH_CLAUDE@@
+      WITH_CODEX=@@WITH_CODEX@@
+@@AUTH_KEY_BLOCK@@
+  - path: /usr/local/sbin/swarm-firstboot-fetch
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      work=$(mktemp -d)
+      curl -fsSL --retry 5 --retry-delay 5 -o "$work/kit.tar.gz" "@@KIT_URL@@"
+@@SHA_LINE@@
+      install -d -m 755 /opt/agent-swarm-bootstrap
+      tar -xzf "$work/kit.tar.gz" -C /opt/agent-swarm-bootstrap --strip-components=1
+      rm -rf "$work"
+      exec bash /opt/agent-swarm-bootstrap/scripts/firstboot.sh
+  - path: /etc/systemd/system/swarm-firstboot.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=agent-swarm-kit first-boot setup
+      After=cloud-final.service network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      TimeoutStartSec=infinity
+      ExecStart=/usr/local/sbin/swarm-firstboot-fetch
+runcmd:
+  - [systemctl, daemon-reload]
+  - [systemctl, start, --no-block, swarm-firstboot.service]

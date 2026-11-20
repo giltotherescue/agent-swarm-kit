@@ -1,8 +1,10 @@
 # Worker server setup
 
+> **This is the by-hand path.** The default now is [cloud-init](cloud-init.md): your Grok Bot creates the server and it sets itself up, with no SSH or `sudo` typed by you. Use this page if you want to do it yourself, if your provider has no cloud-init, or for a computer at home.
+
 This doc takes you from "I have no server" to "a worker is running tasks safely". The worker is an always-on Linux server that runs Claude Code and Codex on your behalf. It also runs the task backend by default. Any cloud provider works. You need about an hour, most of it waiting for installs.
 
-**Tested on:** version 0.3.0 passed a clean install on a fresh Ubuntu 24.04 server (DigitalOcean, 4 vCPU, 8 GB) on 2026-11-18. That run covered setup right after first boot, the smoke test (0 failed, 2 expected warnings), the admin user, firewall and SSH hardening, the lockdown refusal checks (and the lockdown rules themselves with a stand-in for Tailscale), an upgrade by running setup again, the project log, time limits and chains (with a stand-in for the model), and the task and cleanup flow. Version 0.3.1 fixes the five small defects that run found. **Not yet tested on a real server:** joining Tailscale (so also the real lockdown, Tailscale Serve and Tailscale SSH), real Claude and Codex logins and model tasks, GitHub login and repo pushes, and bot notify delivery. Earlier, version 0.2.0 had real bugs that 0.2.1 fixed, and 0.2.1 passed its own clean install the same day. Run the script first on a server you can throw away and rebuild, and run the smoke test (step 9) afterwards.
+**Tested on:** version 0.3.0 passed a clean install on a fresh Ubuntu 24.04 server (DigitalOcean, 4 vCPU, 8 GB) on 2026-11-18. That run covered setup right after first boot, the smoke test (0 failed, 2 expected warnings), the admin user, firewall and SSH hardening, the lockdown refusal checks (and the lockdown rules themselves with a stand-in for Tailscale), an upgrade by running setup again, the project log, time limits and chains (with a stand-in for the model), and the task and cleanup flow. Version 0.3.1 fixes the five small defects that run found. **Not yet tested on a real server:** joining Tailscale (so also the real lockdown, Tailscale Serve and Tailscale SSH), real Claude and Codex logins and model tasks, GitHub login and repo pushes, and bot notify delivery. Earlier, version 0.2.0 had real bugs that 0.2.1 fixed, and 0.2.1 passed its own clean install the same day. Version 0.5.0 adds the cloud-init path, `swarmctl login` and the Mac worker; those are described, with what was and was not tested, in [cloud-init.md](cloud-init.md), the 0.5.0 entry of the changelog and [macos-worker.md](macos-worker.md). Run the script first on a server you can throw away and rebuild, and run the smoke test (step 9) afterwards.
 
 If you do not want a server yet, read [grokbot-only.md](grokbot-only.md) first. You can add a worker later.
 
@@ -18,7 +20,7 @@ It is not built for several people who do not trust each other sharing one worke
 
 ## 1. Pick a provider and a size
 
-Any provider that gives you an Ubuntu LTS (Long Term Support) virtual machine works. A spare computer at home with Ubuntu 24.04 also works (macOS is not supported); the README compares the two in [Where to run the worker](../README.md#where-to-run-the-worker), with prices. A few cloud providers that people use:
+Any provider that gives you an Ubuntu LTS (Long Term Support) virtual machine works. A spare computer at home with Ubuntu 24.04 also works (for a Mac, see [macos-worker.md](macos-worker.md): a simpler but less isolated option); the README compares the two in [Where to run the worker](../README.md#where-to-run-the-worker), with prices. A few cloud providers that people use:
 
 - Hetzner (good price for the power)
 - DigitalOcean
@@ -135,29 +137,58 @@ Options:
 | `--harden` | Only run the hardening step above (firewall on, root login off once an admin works; public SSH stays open) |
 | `--lockdown` | Only run the lockdown step (step 10) |
 
-## 5. Log in the model CLIs with your own subscriptions
+## 5. Sign in the model CLIs with your own subscriptions
 
-The default is plain Claude Code and Codex logged in with your own subscriptions. No API keys.
+The default is plain Claude Code and Codex signed in with your own subscriptions. No API keys.
+
+**The easy way: the sign-in helper.** It starts each sign-in in the background and prints only the link and
+code, so a bot (or you) can pass them on. Run it on the worker with `sudo`. Every sign-in is "open this link in
+your browser", and Codex and GitHub also show a short code to type.
+
+```bash
+sudo swarmctl login codex
+sudo swarmctl login claude        # prints a link; after you sign in, the page shows a code. Then:
+echo -n "THE-CODE" | sudo swarmctl login claude --finish
+```
+
+Each command prints lines like `URL: ...`, `CODE: ...`, `EXPIRES: ...` and `NEXT: ...` (add `--json` for one JSON object).
+`sudo swarmctl login NAME --status` says where it is, and `--cancel` stops it. A bot gets the Claude code from you
+through the secret request form, never chat, and pipes it in on standard input.
+
+| Tool | What the helper runs, as which user | Notes |
+| --- | --- | --- |
+| Codex | `codex login --device-auth` as `agent` | **Before you start,** turn on device-code login in ChatGPT: *Settings, Security* for a personal account, or your workspace admin does it under workspace permissions. Without it the code is rejected. The code lasts 15 minutes |
+| Claude Code | `claude setup-token` as `agent` | Needs a Pro, Max, Ultra, Team or Enterprise plan. It makes a **one-year** token and the helper saves it as `CLAUDE_CODE_OAUTH_TOKEN` in `/etc/agent-swarm/agent.env` (owned by root, readable by the `agent` group, never printed). Tasks get it through their environment. `claude --bare` ignores it, so scripts that use `--bare` need an API key instead |
+
+Already have a token (made on your own computer with `claude setup-token`)? Send it through the secret form and run
+`sudo swarmctl login claude --token-stdin` with the token on standard input. It is checked for shape and saved the same way.
+The token can only make model requests. It lasts one year, so put a reminder in your calendar to make a new one.
+
+**By hand, if you prefer.** The old way still works:
 
 ```bash
 sudo -iu agent claude              # then type /login and follow the link
 sudo -iu agent codex login --device-auth
 ```
 
-Use `sudo -iu agent` exactly like this. The `-i` starts a login shell for `agent`, which reads its `~/.profile` and puts `~/.local/bin` (where Claude Code and Codex are installed) on the PATH (the list of folders searched for commands). With plain `sudo -u agent claude` you get "command not found".
+Use `sudo -iu agent` exactly like this. The `-i` starts a login shell for `agent`, which reads its `~/.profile` and puts `~/.local/bin` (where Claude Code and Codex are installed) on the PATH (the list of folders searched for commands). With plain `sudo -u agent claude` you get "command not found". If you log in this way, a saved `/login` still works; the env token, when present, wins over it.
 
 Heavy users with several subscriptions can add a proxy later. See [optional-services.md](optional-services.md).
 
-## 6. Log in GitHub as the runner (for repo work)
+## 6. Sign in GitHub as the runner (for repo work)
 
 Only `swarm-runner` holds a GitHub login. Agents never do.
 
 ```bash
-sudo -u swarm-runner -H gh auth login
-sudo -u swarm-runner -H gh auth setup-git
+sudo swarmctl login github        # prints a link and a one-time code; also runs "gh auth setup-git" when done
 ```
 
-Use a **fine-grained token** limited to the repos the swarm works on, with "Contents: read and write" and "Pull requests: read and write" only. The runner pushes `agent/<task-id>` branches and opens draft pull requests. It never pushes the main branch unless a project allows it (`swarmctl project set NAME --allow-push-main`), and it never merges.
+That runs `gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key` as `swarm-runner`, then `gh auth setup-git`.
+By hand: `sudo -u swarm-runner -H gh auth login` and `sudo -u swarm-runner -H gh auth setup-git`.
+
+The device flow gives the runner whatever access the account you sign in with has. If you want a narrower login, use a
+**fine-grained token** limited to the repos the swarm works on, with "Contents: read and write" and "Pull requests: read and write" only, and give it
+to `gh auth login --with-token` instead. The runner pushes `agent/<task-id>` branches and opens draft pull requests. It never pushes the main branch unless a project allows it (`swarmctl project set NAME --allow-push-main`), and it never merges.
 
 If you logged in GitHub as `agent` before, log it out: `sudo -iu agent gh auth logout`.
 

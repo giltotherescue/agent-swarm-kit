@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# swarm-launchd: the one program the macOS launchd agents run (see scripts/setup-macos.sh).
+#   swarm-launchd worker    the runner (claims tasks and runs Claude Code or Codex as you)
+#   swarm-launchd backend   the task backend (only if you chose --with-backend)
+#   swarm-launchd sync      pull and decrypt the runtime secret bundles (every 10 minutes)
+#   swarm-launchd cleanup   remove old finished task folders (daily)
+# launchd has no EnvironmentFile, so this loads ~/.config/agent-swarm/swarm.env itself, puts Homebrew and GNU
+# coreutils first on PATH (the runner needs GNU `timeout`), and starts the real program. It never prints a value.
+set -euo pipefail
+role="${1:?role: worker, backend, sync or cleanup}"
+export HOME="${HOME:-$(cd ~ && pwd)}"
+CONF="${SWARM_MAC_CONF:-$HOME/.config/agent-swarm}"
+KIT="${SWARM_MAC_KIT:-$HOME/.local/share/agent-swarm-kit/current}"
+export PATH="$HOME/.local/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/usr/local/opt/coreutils/libexec/gnubin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+[[ -r "$CONF/swarm.env" ]] || { echo "swarm-launchd: missing $CONF/swarm.env (run scripts/setup-macos.sh)" >&2; exit 78; }
+set -a; . "$CONF/swarm.env"; set +a
+PY="${SWARM_PYTHON:-python3}"
+case "$role" in
+  worker)
+    # Like the Linux service: a failed secrets sync stops the start, so a broken bundle is never ignored.
+    "$HOME/.local/bin/swarm-sync-secrets" --if-configured
+    exec "$PY" "$KIT/server/swarm_worker.py";;
+  backend) exec "$PY" "$KIT/server/swarm_backend.py";;
+  sync) exec "$HOME/.local/bin/swarm-sync-secrets" --if-configured;;
+  cleanup) exec "$PY" "$KIT/server/swarm_cleanup.py";;
+  *) echo "swarm-launchd: unknown role $role" >&2; exit 2;;
+esac

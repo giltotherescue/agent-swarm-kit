@@ -105,6 +105,18 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.5.0
+
+Re-run setup as above. Nothing changes in the database and no setting is required. What you get and what changes:
+
+- `sudo swarmctl login codex | claude | github` for browser-only sign-ins, and `scripts/setup-secrets.sh`, `scripts/render-cloud-init.py`,
+  `scripts/firstboot.sh`, `scripts/setup-macos.sh` and `scripts/setup-cliproxy.sh` arrive with the kit. None of them runs by itself on an existing worker.
+- `/etc/agent-swarm/agent.env` becomes mode 640, owner root, group `agent` (it was world-readable). Tasks still read it. If you put a
+  proxy address or a Claude token there, this is the safer mode.
+- `setup-worker.sh` takes `--yes` (answers its own questions) and the lockdown step refuses with `--yes` unless Tailscale has an address.
+- The Claude token path: if you want the long-lived token instead of a saved `/login`, run `sudo swarmctl login claude`.
+  Tasks then use the token first. Renew it before a year is up.
+
 ## Upgrading to 0.4.0
 
 Re-run setup as above. The database gains new columns in place. A single worker needs no new routing

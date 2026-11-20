@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
@@ -139,18 +139,44 @@ def as_agent():
     return base
 
 
+def parse_vm_stat(text):
+    """Available memory in MB from macOS `vm_stat` output (free, inactive and speculative pages), or None."""
+    m = re.search(r"page size of (\d+) bytes", text)
+    if not m:
+        return None
+    pages = 0
+    for label in ("free", "inactive", "speculative"):
+        n = re.search(rf"^Pages {label}:\s+(\d+)\.", text, re.M)
+        if not n:
+            return None
+        pages += int(n.group(1))
+    return pages * int(m.group(1)) // (1024 * 1024)
+
+
+def available_memory_mb():
+    """Memory the box could give a new task, in MB. Linux reads /proc/meminfo; macOS asks vm_stat. None if unknown."""
+    if sys.platform == "darwin":
+        try:
+            return parse_vm_stat(subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+    mem = {}
+    with open("/proc/meminfo") as fh:
+        for line in fh:
+            k, v = line.split(":", 1)
+            mem[k] = int(v.split()[0])
+    return mem.get("MemAvailable", 0) // 1024
+
+
 def healthy():
     """Only take new work when the box has room."""
     try:
         load = os.getloadavg()[0] / (os.cpu_count() or 1)
-        mem = {}
-        with open("/proc/meminfo") as fh:
-            for line in fh:
-                k, v = line.split(":", 1)
-                mem[k] = int(v.split()[0])
-        free_mb = mem.get("MemAvailable", 0) // 1024
+        free_mb = available_memory_mb()
     except OSError:
         return True
+    if free_mb is None:   # memory unknown (macOS without vm_stat): judge by load only
+        free_mb = 10 ** 9
     return load < float(os.environ.get("SWARM_MAX_LOAD_PER_CPU", "1.5")) and free_mb > int(os.environ.get("SWARM_MIN_FREE_MEM_MB", "1500"))
 
 

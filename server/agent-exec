@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 BRANCH_RE = re.compile(r"^(?!.*\.\.)(?!/)[A-Za-z0-9._/-]{1,200}$")
 MAX_ARTIFACT = 25 * 1024 * 1024
@@ -51,11 +51,30 @@ def check_name(v, what):
     return v
 
 
+MAC_DIRS = ("/opt/homebrew/opt/coreutils/libexec/gnubin", "/opt/homebrew/bin",
+            "/usr/local/opt/coreutils/libexec/gnubin")
+
+
+def task_path(home, platform=sys.platform, exists=os.path.isdir):
+    """PATH for tasks. On Linux it is fixed. On a Mac it also has Homebrew (and GNU coreutils, for `timeout`) in front."""
+    base = f"{home}/.local/bin:{home}/bin:/usr/local/bin:/usr/bin:/bin"
+    if platform != "darwin":
+        return base
+    return ":".join([d for d in MAC_DIRS if exists(d)] + [base])
+
+
+def timeout_command(path, which=shutil.which):
+    """The GNU `timeout` program: `timeout`, or Homebrew's `gtimeout` on a Mac that has no gnubin on its PATH."""
+    if which("timeout", path=path) or not which("gtimeout", path=path):
+        return "timeout"
+    return "gtimeout"
+
+
 def clean_env(task=None, timeout=None, agent_env=None):
     pw = pwd.getpwuid(os.getuid())
     home = pw.pw_dir
     env = {"HOME": home, "USER": pw.pw_name, "LOGNAME": pw.pw_name, "SHELL": pw.pw_shell or "/bin/bash",
-           "PATH": f"{home}/.local/bin:{home}/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TERM": "dumb"}
+           "PATH": task_path(home), "LANG": "C.UTF-8", "TERM": "dumb"}
     run_dir = f"/run/user/{os.getuid()}"
     if os.path.isdir(run_dir):
         env["XDG_RUNTIME_DIR"] = run_dir
@@ -204,7 +223,7 @@ def cmd_run(p, task, name, timeout, scope, require_scope, memory, cpu, agent_env
     env = clean_env(task, timeout, agent_env)
     if os.path.lexists(os.path.join(wd, "AGENT_STATUS")):
         os.remove(os.path.join(wd, "AGENT_STATUS"))  # every launch must write a fresh status
-    cmd = ["timeout", "--kill-after=30", str(int(timeout))] + command
+    cmd = [timeout_command(env["PATH"]), "--kill-after=30", str(int(timeout))] + command
     if scope:
         if user_systemd(env):
             cmd = ["systemd-run", "--user", "--scope", "--quiet", f"--unit=swarm-task-{task}-{int(time.time())}",
