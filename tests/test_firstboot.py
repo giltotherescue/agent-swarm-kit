@@ -1,5 +1,6 @@
 """Tests for the zero-touch bootstrap: scripts/render-cloud-init.py (the user-data) and scripts/firstboot.sh (what
 runs on the new server), with stand-ins for setup-worker.sh, the smoke test, Tailscale and systemctl."""
+import hashlib
 import os
 import re
 import shutil
@@ -30,8 +31,7 @@ class Render(unittest.TestCase):
         self.assertIn("ADMIN_USER=ops", text)
         self.assertIn("LOCKDOWN=auto", text)
         self.assertIn('echo "' + "a" * 64 + '  $work/kit.tar.gz" | sha256sum -c -', text)
-        with open(os.path.join(KIT, "VERSION")) as fh:
-            self.assertIn("archive/refs/tags/v" + fh.read().strip(), text)
+        self.assertIn('"' + rci.default_kit_url()[0] + '"', text)
         self.assertNotIn("tskey", text)
         self.assertIn("start, --no-block, swarm-firstboot.service", text)
 
@@ -87,6 +87,95 @@ class Render(unittest.TestCase):
         self.assertNotIn(AUTH, r.stdout + r.stderr)
         self.assertEqual(oct(os.stat(out).st_mode & 0o777), "0o600")
         self.assertIn(AUTH, open(out).read())
+
+
+def load_render(path):
+    spec = importlib.util.spec_from_file_location("render_copy", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class DefaultKitUrl(unittest.TestCase):
+    """Install test 5, defect 4: the default download was the v0.6.0 tag, which was never made, so first boot got a
+    404. The tag is used only when the checkout has it; otherwise this commit, or the main branch. No network."""
+    SHA = "7f0b34cff21bb45d8776b74fcbb6335dc6fbc688"
+
+    def fake_git(self, tags=(), head=SHA):
+        def run(*args):
+            if args[:3] == ("rev-parse", "-q", "--verify"):
+                name = args[3][len("refs/tags/"):-len("^{commit}")]
+                return self.SHA if name in tags else None
+            if args == ("rev-parse", "HEAD"):
+                return head
+            raise AssertionError(f"unexpected git call {args}")
+        return run
+
+    def check_url(self, url):
+        self.assertTrue(rci.URL_RE.match(url), url)
+        self.assertTrue(url.startswith("https://github.com/giltotherescue/agent-swarm-kit/archive/"), url)
+        self.assertTrue(url.endswith(".tar.gz"), url)
+
+    def test_release_tag_when_the_checkout_has_it(self):
+        url, why = rci.default_kit_url("0.6.0", self.fake_git(tags=("v0.6.0",)))
+        self.assertEqual(url, "https://github.com/giltotherescue/agent-swarm-kit/archive/refs/tags/v0.6.0.tar.gz")
+        self.assertIn("release tag v0.6.0", why)
+        self.check_url(url)
+
+    def test_missing_tag_falls_back_to_this_commit(self):
+        url, why = rci.default_kit_url("0.6.0", self.fake_git(tags=("v0.5.0",)))
+        self.assertEqual(url, f"https://github.com/giltotherescue/agent-swarm-kit/archive/{self.SHA}.tar.gz")
+        self.assertNotIn("tags/v0.6.0", url)
+        self.assertIn("no v0.6.0 tag", why)
+        self.check_url(url)
+
+    def test_no_git_falls_back_to_the_main_branch(self):
+        for head in (None, "", "not-a-sha"):
+            url, why = rci.default_kit_url("0.6.0", self.fake_git(head=head))
+            self.assertEqual(url, "https://github.com/giltotherescue/agent-swarm-kit/archive/refs/heads/main.tar.gz")
+            self.check_url(url)
+        url, _ = rci.default_kit_url("0.6.0", lambda *a: None)
+        self.check_url(url)
+
+    def test_default_in_this_checkout_is_well_formed(self):
+        url, why = rci.default_kit_url()
+        self.check_url(url)
+        self.assertIn(url, rci.render("ops", PUB))
+
+    def test_a_copy_outside_git_or_inside_another_repo_uses_the_branch(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        kit = os.path.join(d, "vendor", "kit")
+        shutil.copytree(os.path.join(KIT, "scripts"), os.path.join(kit, "scripts"))
+        shutil.copy(os.path.join(KIT, "VERSION"), kit)
+        mod = load_render(os.path.join(kit, "scripts", "render-cloud-init.py"))
+        self.assertEqual(mod.default_kit_url()[0], mod.BRANCH_URL)
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        # The kit unpacked inside someone else's repository: that repository's commit is not a kit commit.
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+            subprocess.run(["git", "-C", d, *cmd], check=True, capture_output=True, env=env)
+        self.assertIsNone(mod.git("rev-parse", "HEAD"))
+        self.assertEqual(mod.default_kit_url()[0], mod.BRANCH_URL)
+
+    def test_command_line_says_which_default_it_used(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        pub = os.path.join(d, "k.pub")
+        with open(pub, "w") as fh:
+            fh.write(PUB + "\n")
+        script = os.path.join(KIT, "scripts", "render-cloud-init.py")
+        r = subprocess.run([sys.executable, script, "--admin-user", "ops", "--ssh-public-key-file", pub],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kit download https://", r.stderr)
+        self.assertNotIn("kit download", r.stdout)
+        r = subprocess.run([sys.executable, script, "--admin-user", "ops", "--ssh-public-key-file", pub,
+                            "--kit-url", "https://example.com/kit.tar.gz"], capture_output=True, text=True)
+        self.assertEqual(r.stderr, "")
+        self.assertIn('"https://example.com/kit.tar.gz"', r.stdout)
 
 
 class Firstboot(unittest.TestCase):
@@ -189,6 +278,104 @@ class SetupFlags(unittest.TestCase):
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertNotIn("yes-said", r.stdout)
         self.assertIn("--yes", subprocess.run(["bash", setup, "--help"], capture_output=True, text=True).stdout)
+
+
+class SopsChecksum(unittest.TestCase):
+    """Install test 5, defect 2: the SOPS checksum line was rewritten as "HASH   sops" (three spaces), so
+    sha256sum -c looked for a file named " sops" and every fresh install failed to get SOPS."""
+    SECRETS = os.path.join(KIT, "scripts", "setup-secrets.sh")
+    VERSION = "3.10.2"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dl = os.path.join(self.tmp, "dl")
+        os.makedirs(self.dl)
+        self.binary = b"#!/bin/sh\necho 'sops stand-in'\n"
+        with open(os.path.join(self.dl, "sops"), "wb") as fh:
+            fh.write(self.binary)
+        good = hashlib.sha256(self.binary).hexdigest()
+        other = hashlib.sha256(b"something else").hexdigest()
+        v = self.VERSION
+        # Same shape as the published sops-vX.checksums.txt: GNU coreutils output, two spaces before the name.
+        self.sums = os.path.join(self.dl, "sums")
+        with open(self.sums, "w") as fh:
+            fh.write(f"{other}  sops-v{v}.darwin.amd64\n{other}  sops-v{v}.darwin.arm64\n"
+                     f"{other}  sops-v{v}.linux.arm64\n{good}  sops-v{v}.linux.amd64\n"
+                     f"{other}  sops-v{v}.linux.amd64.sbom.json\n{other}  sops-v{v}.windows.amd64.exe\n")
+
+    def lib(self, code, cwd=None, path=None):
+        env = dict(os.environ, SECRETS_LIB="1")
+        if path:
+            env["PATH"] = path
+        return subprocess.run(["bash", "-c", f'set -euo pipefail\nsource "{self.SECRETS}"\n' + code], cwd=cwd or self.dl,
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    def test_rewritten_line_verifies_a_file_named_sops(self):
+        r = self.lib(f'sops_sum_line sums sops-v{self.VERSION}.linux.amd64')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, hashlib.sha256(self.binary).hexdigest() + "  sops\n")
+        r = self.lib(f'sops_sum_line sums sops-v{self.VERSION}.linux.amd64 | sha256sum -c -')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "sops: OK")
+
+    def test_the_0_6_0_sed_did_not_verify(self):
+        # Keeps the bug on record: the old pipeline fails on the same realistic file.
+        r = self.lib(f'grep " sops-v{self.VERSION}.linux.amd64$" sums | sed "s/ sops-v.*/  sops/" | sha256sum -c -')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("' sops'", r.stderr)
+
+    def test_binary_mode_marker_and_arm64_pick_the_right_line(self):
+        arm = hashlib.sha256(b"arm").hexdigest()
+        with open(self.sums, "a") as fh:
+            fh.write(f"{arm} *sops-v9.9.9.linux.arm64\n")
+        r = self.lib('sops_sum_line sums sops-v9.9.9.linux.arm64')
+        self.assertEqual(r.stdout, arm + "  sops\n")
+
+    def test_tampered_download_or_missing_line_fails(self):
+        with open(os.path.join(self.dl, "sops"), "ab") as fh:
+            fh.write(b"evil\n")
+        r = self.lib(f'sops_sum_line sums sops-v{self.VERSION}.linux.amd64 | sha256sum -c -')
+        self.assertNotEqual(r.returncode, 0)
+        r = self.lib('sops_sum_line sums sops-v0.0.0.linux.amd64')
+        self.assertEqual(r.stdout, "")
+        r = self.lib('sops_sum_line sums sops-v0.0.0.linux.amd64 | sha256sum -c -')
+        self.assertNotEqual(r.returncode, 0)
+
+    def install_tools(self, binary):
+        """Run install_tools with stand-ins for curl and dpkg; install is recorded instead of writing /usr/local/bin."""
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        with open(os.path.join(self.tmp, "sops.download"), "wb") as fh:
+            fh.write(binary)
+        scripts = {
+            "curl": f'out=""; url=""\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; -*) ;; *) url="$1";; esac; shift; done\n'
+                    f'case "$url" in *checksums.txt) cp "{self.sums}" "$out";; *) cp "{self.tmp}/sops.download" "$out";; esac',
+            "dpkg": "echo amd64",
+            "age-keygen": "exit 0",
+        }
+        for name, body in scripts.items():
+            with open(os.path.join(bin_dir, name), "w") as fh:
+                fh.write("#!/bin/sh\n" + body + "\n")
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+        code = f'install() {{ echo "install $*" >> "{self.tmp}/installed"; }}\nSOPS_VERSION={self.VERSION}\ninstall_tools'
+        return self.lib(code, cwd=self.tmp, path=f"{bin_dir}:/usr/bin:/bin")
+
+    def test_install_tools_installs_a_matching_download(self):
+        if shutil.which("sops", path="/usr/bin:/bin"):
+            self.skipTest("sops is in /usr/bin, so install_tools would skip the download")
+        r = self.install_tools(self.binary)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.tmp, "installed")) as fh:
+            self.assertRegex(fh.read(), r"^install -m 755 \S+/sops /usr/local/bin/sops\n$")
+
+    def test_install_tools_refuses_a_download_that_does_not_match(self):
+        if shutil.which("sops", path="/usr/bin:/bin"):
+            self.skipTest("sops is in /usr/bin, so install_tools would skip the download")
+        r = self.install_tools(b"not the release\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not match its published checksum; nothing installed", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "installed")))
 
 
 if __name__ == "__main__":

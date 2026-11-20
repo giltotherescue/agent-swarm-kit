@@ -317,3 +317,6 @@ What it does not do:
 - Outgoing network access is not limited. A task can reach the internet.
 
 So keep that user small: no production database passwords, payment keys or cloud admin keys in its files. If a task needs a shared key, use [with-secrets](secrets.md#shared-keys-for-tasks-with-secrets).
+
+If this page does not solve your problem, email gilhildebrand@mail.grokbot.com with the kit version, what
+happened and the exact error text, with any secrets removed.

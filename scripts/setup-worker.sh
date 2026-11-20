@@ -52,6 +52,7 @@ AGENT_USER=agent
 AGENT_HOME=/home/agent
 RUNNER_USER=swarm-runner
 LOG=/var/log/agent-swarm-setup.log
+SHADOW_FILE=/etc/shadow   # tests point this at a copy
 TS_KEY_FILE=""
 TS_TAGS=""
 TS_MODE=now
@@ -94,6 +95,29 @@ logged() {  # logged COMMAND... : run a noisy command with its output in $LOG; o
 as_agent() {  # as_agent 'shell code' : run code as the agent user in a login shell (so ~/.local/bin is on PATH)
   # Not "sudo -i": sudo -i backslash-escapes the command line, so $vars and $(...) inside it break (0.2.0 bug).
   (cd "$AGENT_HOME" && sudo -u "$AGENT_USER" -H bash -lc "$1")
+}
+
+root_password_change_forced() {  # true when /etc/shadow says root must change its password before anything else
+  # Field 3 (date of last change) is 0 when "chage -d 0" or the image builder forced a change at next login.
+  [[ "$(awk -F: '$1 == "root" { print $3; exit }' "$SHADOW_FILE" 2>/dev/null)" == 0 ]]
+}
+
+clear_root_forced_password_change() {
+  # Stock DigitalOcean Ubuntu 24.04 images ship root with "password must be changed". sudo checks root's own
+  # account even for "sudo -u agent", so every as_agent call fails ("Account or password is expired") and the
+  # Claude and Codex installs stop the first boot (install test 5, defect 1). This only marks root's password as
+  # changed today. It sets no password: a locked or empty one stays as it was, and SSH settings are not touched.
+  root_password_change_forced || return 0
+  say "Root's password is marked 'must be changed', which breaks sudo -u $AGENT_USER"
+  if ! confirm "    Clear that flag (no password is set)?"; then
+    todo "root's password must be changed before setup can run commands as $AGENT_USER: chage -d \$(date +%F) root"
+    return 0
+  fi
+  if chage -d "$(date +%F)" root; then
+    echo "    Cleared. Root's password itself is unchanged."
+  else
+    todo "could not clear root's forced password change: chage -d \$(date +%F) root"
+  fi
 }
 
 # ---------- apt: wait for first-boot updates, retry on a lock ----------
@@ -557,6 +581,7 @@ main() {
   if [[ "$ONLY" == lockdown ]]; then lockdown; exit 0; fi
   if [[ "$ONLY" == harden ]]; then harden; exit 0; fi
   echo "Installer output goes to $LOG (sudo tail -f $LOG to watch it)."
+  clear_root_forced_password_change   # before anything runs sudo -u
   if [[ -n "$ADMIN_USER" ]]; then
     say "Admin user '$ADMIN_USER' (checked now, so problems show before the long installs)"
     create_admin "$ADMIN_USER"
