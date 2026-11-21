@@ -726,6 +726,8 @@ class Backend:
             return
         name = f["name"] if f else "REPORT.md"
         data = (base.rstrip() + note).lstrip("\n").encode() if note else (base.rstrip() + "\n").lstrip("\n").encode()
+        if f and data == bytes(f["data"]):
+            return
         if not data.strip():
             self.s.run("DELETE FROM files WHERE task_id = ? AND kind = 'report' AND name = ?", task_id, name)
             return
@@ -1389,6 +1391,14 @@ class Backend:
                         self.event(task_id, "publish", actor, "Auto-commit: no submodule pin changes left uncommitted now")
                     common["gitlink_skipped"], common["gitlink_skipped_count"] = None, None
                     self.set_report_note(task_id, "")
+            elif t.get("gitlink_skipped_count"):
+                # Field omitted: the stored observation still stands, and the current report must say so. A resumed claim
+                # may have uploaded a fresh REPORT.md (without the note) just before this finish; render the stored note
+                # into it. set_report_note replaces any earlier generated note, so this never duplicates it.
+                gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(t), limit=swarm_gitlink.MAX_STORED,
+                                                   patterns=self.secret_patterns, count=t["gitlink_skipped_count"])
+                if gl["count"]:
+                    self.set_report_note(task_id, swarm_gitlink.report_note(gl["items"][:swarm_gitlink.MAX_ITEMS], gl["count"]))
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:

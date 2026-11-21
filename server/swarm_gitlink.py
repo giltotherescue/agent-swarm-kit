@@ -28,7 +28,16 @@ NOTE_MARK = "gitlink pin not committed"
 # Hidden marker on the generated REPORT.md note; the backend detects the note by this, never by prose.
 NOTE_TAG = "<!-- swarm:gitlink-skip-note -->"
 NOTE_END = "<!-- /swarm:gitlink-skip-note -->"
-_NOTE_RE = re.compile(r"\n*" + re.escape(NOTE_TAG) + r".*?(?:" + re.escape(NOTE_END) + r"\n?|\Z)", re.S)
+_NOTE_LINE = r"> Note \(" + re.escape(NOTE_MARK) + r"\): the auto-commit [^\n]*\. Commit an intentional pin bump explicitly\."
+# Only an identifiable generated block is ever removed: the start marker alone on its line, then lines holding neither
+# marker, then the end marker alone on its line; or the exact legacy footer (start marker line + one generated note line,
+# written before the end marker existed). A marker quoted inline or in backticks is prose, and nothing runs to EOF.
+_NOTE_RE = re.compile(
+    r"(?:\A|\n)\n*(?:"
+    + re.escape(NOTE_TAG) + r"[ \t]*\n(?:(?![^\n]*(?:" + re.escape(NOTE_TAG) + "|" + re.escape(NOTE_END) + r"))[^\n]*\n)*?"
+    + re.escape(NOTE_END) + r"[ \t]*"
+    + r"|" + re.escape(NOTE_TAG) + r"[ \t]*\n" + _NOTE_LINE + r"[ \t]*"
+    + r")(?=\n|\Z)")
 
 # The same key=value rule as agent-control's redact() (src/orchestrators.js ASSIGNMENT_RE).
 ASSIGNMENT_RE = re.compile(r"\b([A-Za-z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*)\s*[=:]\s*(\"[^\"]*\"|'[^']*'|\S+)", re.I)
@@ -250,5 +259,5 @@ def report_note(items, count):
 
 
 def strip_report_note(text):
-    """REPORT.md text with every generated skip note (marker to end marker) removed."""
-    return _NOTE_RE.sub("", text or "")
+    """REPORT.md text with every generated skip note block removed (see _NOTE_RE); all other text is kept as is."""
+    return _NOTE_RE.sub(lambda m: "\n" if m.group(0).startswith("\n") else "", text or "")

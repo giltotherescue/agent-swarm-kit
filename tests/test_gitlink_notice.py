@@ -3,6 +3,7 @@ import json
 import unittest
 
 from helpers import Backend  # noqa: F401
+import swarm_gitlink
 from test_bus_notices import NoticeBase, FAKE_SECRET, CLOZY_HOOK
 
 TOKEN_PATH = "vendor/" + FAKE_SECRET + "/engine"
@@ -59,8 +60,8 @@ class BusGitlinkTest(NoticeBase):
 
     NOTE_TAG = "<!-- swarm:gitlink-skip-note -->"
 
-    def resumed(self, tid, first, second=None, report="## Summary\nfirst run\n", omit=False):
-        """waiting (with `first`) -> answer -> claim again -> finish done with `second` (no new report)."""
+    def resumed(self, tid, first, second=None, report="## Summary\nfirst run\n", omit=False, fresh=None):
+        """waiting (with `first`) -> answer -> claim again -> [upload `fresh` REPORT.md] -> finish done with `second`."""
         self.b.req("POST", "/tasks", {"id": tid, "prompt": "Ship " + tid, "repo": "acme/site", "push": True, "owner": "clozy-bot"})
         c = self.b.claim()
         self.b.req("PUT", f"/tasks/{tid}/files/report/REPORT.md", None, tok=c["task_token"], raw=report.encode(),
@@ -70,6 +71,9 @@ class BusGitlinkTest(NoticeBase):
         self.b.req("POST", f"/tasks/{tid}/answer", {"answer": "the second"})
         c2 = self.b.claim()
         self.assertEqual(c2["id"], tid)
+        if fresh is not None:  # the worker uploads the resumed run's report before it finishes
+            self.b.req("PUT", f"/tasks/{tid}/files/report/REPORT.md", None, tok=c2["task_token"], raw=fresh.encode(),
+                       headers={"X-Claim-Id": c2["claim_id"]})
         extra = {} if omit else {"gitlink_skipped": second}
         body = dict({"pr_url": "https://github.com/acme/site/pull/9", "pushed_branch": f"agent/{tid}", "head_sha": "c" * 40,
                      "unpushed_commits": 0}, **extra)
@@ -113,6 +117,48 @@ class BusGitlinkTest(NoticeBase):
         self.assertEqual(t["gitlink_skipped_count"], 1)
         self.assertEqual(rep.count(self.NOTE_TAG), 1)
         self.assertIn("first-pin (aaaaaaa -> bbbbbbb)", rep)
+
+    def test_omitted_observation_renders_its_note_into_a_fresh_report(self):
+        t, rep = self.resumed("tr5", [{"path": "first-pin", "old": "aaaaaaa", "new": "bbbbbbb"}], omit=True,
+                              fresh="Fresh report.\n")
+        self.assertEqual([g["path"] for g in t["gitlink_skipped"]], ["first-pin"])
+        self.assertEqual(t["gitlink_skipped_count"], 1)
+        self.assertTrue(rep.startswith("Fresh report."), rep)
+        self.assertNotIn("first run", rep)
+        self.assertIn("first-pin (aaaaaaa -> bbbbbbb)", rep)
+        self.assertEqual(rep.count(self.NOTE_TAG), 1, "rendered once, replay included")
+        self.assertEqual(rep.count(swarm_gitlink.NOTE_END), 1)
+
+    def test_explicit_empty_observation_with_a_fresh_report_leaves_it_unchanged(self):
+        t, rep = self.resumed("tr6", [{"path": "first-pin", "old": "aaaaaaa", "new": "bbbbbbb"}], [], fresh="Fresh report.\n")
+        self.assertFalse(t["gitlink_skipped_count"])
+        self.assertEqual(rep, "Fresh report.\n")
+
+    def test_omitted_observation_without_a_stored_one_leaves_a_fresh_report_alone(self):
+        t, rep = self.resumed("tr7", [], omit=True, fresh="Fresh report.\n")
+        self.assertFalse(t["gitlink_skipped_count"])
+        self.assertEqual(rep, "Fresh report.\n")
+
+    def test_inline_marker_in_prose_is_not_a_note_block(self):
+        report = ("## Summary\nReviewed `" + self.NOTE_TAG + "` handling.\n\n## Findings\n- P1: something real\n"
+                  "- the end marker `" + swarm_gitlink.NOTE_END + "` too\n")
+        self.finished("clozy-bot", "tg9", report=report, gitlink_skipped=[])
+        self.assertEqual(self.report("tg9"), report)
+
+    def test_unterminated_marker_line_never_consumes_to_eof(self):
+        report = "## Summary\nok\n\n" + self.NOTE_TAG + "\nnot a generated note\n\n## Findings\n- keep me\n"
+        self.finished("clozy-bot", "tg10", report=report, gitlink_skipped=[])
+        self.assertEqual(self.report("tg10"), report)
+
+    def test_generated_and_legacy_note_blocks_are_stripped_exactly(self):
+        note = swarm_gitlink.report_note([{"path": "engine", "old": "aaaaaaa", "new": "bbbbbbb"}], 1)
+        self.assertEqual(swarm_gitlink.strip_report_note("Body.\n" + note).rstrip(), "Body.")
+        self.assertEqual(swarm_gitlink.strip_report_note("Body." + note + "\nAfter.\n").split(), ["Body.", "After."])
+        legacy = ("Body.\n\n" + self.NOTE_TAG + "\n> Note (gitlink pin not committed): the auto-commit 1 submodule pin "
+                  "change(s) left uncommitted: engine (aaaaaaa -> bbbbbbb). Commit an intentional pin bump explicitly.\n")
+        self.assertEqual(swarm_gitlink.strip_report_note(legacy).rstrip(), "Body.")
+        inline = "x " + note.strip() + " y\n"
+        self.assertEqual(swarm_gitlink.strip_report_note(inline), inline)
 
     def test_report_note_on_publish_failure_without_a_report(self):
         self.finished("clozy-bot", "tg7", status="failed", outcome="publish_failed", error="git fetch failed",

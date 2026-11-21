@@ -42,12 +42,16 @@ stock worker forwards these only if its collector supplies them, sanitized first
 - stores the list and the count on the task (`gitlink_skipped`, `gitlink_skipped_count` in `GET /tasks/ID`). An
   explicit observation replaces the earlier one, including on a resumed claim (waiting, answer, finish): a list
   replaces it, and an explicit `[]` clears the list, the count and the note. Omitting `gitlink_skipped` keeps what
-  was stored. A replayed finish of the same claim changes nothing;
+  was stored and puts its note into the current report, also when the resumed run uploaded a fresh REPORT.md just
+  before finishing. A replayed finish of the same claim changes nothing;
 - adds a `publish` event;
 - keeps exactly one note ("gitlink pin not committed") in the task's stored REPORT.md, creating it if the run left
   none, on success and on publish failures alike. The note sits between `<!-- swarm:gitlink-skip-note -->` and
   `<!-- /swarm:gitlink-skip-note -->`; a later observation replaces it (or removes it, and removes a report that
-  held only the note). Only the markers, never the note's wording in a report, identify it;
+  held only the note). Only a generated block identifies it: each marker alone on its own line, start before end
+  (or, for notes written before the end marker existed, the start marker line followed by the one generated note
+  line). A marker quoted inline or in backticks, the note's wording in prose, or a start marker with no end marker
+  is report text and is never removed;
 - adds `gitlink_skipped` (at most 10 entries) and `gitlink_skipped_count` (the true total) to finish notices, on the
   bus and on the legacy webhook. A bus notice also gets a `WARNING:` line ahead of the report excerpt.
 
