@@ -37,6 +37,12 @@ Rule of thumb: **if a full test suite takes more than about 10 minutes or more t
    ```
    The output lands in `artifacts/script.log` on the task, and a nonzero exit marks the task `failed` with outcome `script_failed`. A script task still runs on the worker, so it helps with tokens, not CPU. Point the command at a sandbox to help with CPU too.
 3. **Cloud sandboxes (the remote-run pattern).** Services such as Cloudflare Sandbox, E2B, Modal or Daytona start a fresh container, run a command and give you the output. Use them from a script task command, or tell agents in the project brief to use them for full suites. Prove the setup once against CI (same commit, same result) before you trust it, and never edit the project's tests to make them pass in the sandbox. Never put production secrets in a sandbox.
+
+   For a whole suite, run it as parallel shards rather than one long command:
+   - **Shard and run in parallel.** Split the suite into balanced shards (by file count or past timings) and run each in its own sandbox at the same time.
+   - **Pack once.** Archive the tree a single time and reuse that snapshot for every shard, instead of re-uploading it per shard.
+   - **Pass pins through the environment.** The snapshot has no `.git`, so anything the sandbox cannot compute (the base commit, the PR base ref) is computed locally and passed as an environment variable.
+   - **One total, honest exit codes.** Print one combined total across shards. Treat a runner-error exit (125-style: the sandbox or runner failed, not your tests) as a runner failure to retry or investigate, never as a failing test.
 4. **A second cheap box.** A plain small server that runs only tests, reached over Tailscale.
 
 Write your rule into each project brief ([../templates/project-bot-brief.md](../templates/project-bot-brief.md)), for example "full suite runs in CI, agents run only touched test files".
