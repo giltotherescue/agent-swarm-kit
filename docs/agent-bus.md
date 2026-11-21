@@ -53,7 +53,7 @@ An agent token can send as itself, read and ack its own messages, list agents, r
 | `GET /bus/messages/ID` | sender, recipient, admin | The message with `attempts[]` |
 | `GET /bus/threads/THREAD` | parties, admin | Messages of the thread the caller sent or received |
 | `GET /bus/agents` | agent, admin | Names, kind, wake, aliases, `reachable`, `reason` |
-| `PUT /bus/agents/NAME`, `DELETE ...` | admin | Register or change (`kind, wake, bot_id, orchestrator, description, aliases[], notices, digest_minutes`); retire |
+| `PUT /bus/agents/NAME`, `DELETE ...` | admin | Register or change (`kind, wake, bot_id, orchestrator, description, aliases[], notices, digest_minutes, poll_window_minutes`); retire |
 | `GET /bus/agents/NAME/token` | admin; worker token with `?worker=NAME` for an orchestrator pinned to that worker (see Tokens) | The agent's token |
 | `POST /bus/agents/NAME/token/rotate` | admin | Revoke old tokens, return a new one |
 | `GET /bus` | admin token only | Plain HTML page, see below |
@@ -85,7 +85,8 @@ Every webhook wake starts a full bot run, which costs money and time. So a messa
 - **Expiry runs before delivery**: a held message older than 24 hours is failed, never sent. The sender is alerted; an expired urgent message is alerted again.
 - **Reply etiquette**: `reply_expected` is set by the sender (default false; urgent messages default to true). A bot does not reply to, or acknowledge in prose, a message whose `reply_expected` is false: it does the work and acks.
 - **Blockers**: `meta: {"blocker": true}` (`swarmctl bus send --blocker`) is urgent. `noop` cannot also be urgent or a blocker.
-- **Unreachable agents**: webhook agent: the last 3 attempts failed (or no valid `notify_url`). Orchestrator: stopped, not running, or no heartbeat for 10 minutes. Poll agent: not seen for 10 minutes. The alert goes to the alert agent (`SWARM_BUS_ALERT_AGENT`, default `chief`) only after 15 minutes of it, at most once an hour per agent. After 3 hours (or at once for an orchestrator with a run in progress) a Chief notice goes out too, and an urgent message to the `gil` agent if you registered one. Agents of kind `human` never raise alerts. If the alert agent is not registered, the alert is logged ("BUS ALERT NOT DELIVERED") and queued to the Chief bot instead of being dropped.
+- **Unreachable agents**: webhook agent: the last 3 attempts failed (or no valid `notify_url`). Orchestrator: stopped, not running, or no heartbeat for 10 minutes. Poll agent: not seen for 10 minutes, or for its `poll_window_minutes` when set (below). The alert goes to the alert agent (`SWARM_BUS_ALERT_AGENT`, default `chief`) only after 15 minutes of it, at most once an hour per agent. After 3 hours (or at once for an orchestrator with a run in progress) a Chief notice goes out too, and an urgent message to the `gil` agent if you registered one. Agents of kind `human` never raise alerts. If the alert agent is not registered, the alert is logged ("BUS ALERT NOT DELIVERED") and queued to the Chief bot instead of being dropped.
+- **Poll window**: a poll agent that checks in on a schedule (say once a day) can declare it: `poll_window_minutes` from 10 to 10080, `wake: poll` only (`swarmctl bus register NAME --kind bot --wake poll --poll-window 1500`). Reachability then allows that long between check-ins, so it is not reported unreachable in between. Leaving the field out keeps it, `null` (or `--poll-window 0`) clears it, and changing the wake away from `poll` drops it. Added with the [review queue](review-queue.md).
 - Alerts from `agent-control` are urgent. An idempotent retry of a send repeats the first `wake`.
 
 ## Finish notices over the bus

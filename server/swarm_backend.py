@@ -57,6 +57,7 @@ from zoneinfo import ZoneInfo
 
 import swarm_bus
 import swarm_gitlink
+import swarm_review
 
 VERSION = "0.8.0"
 MAX_FILE = 25 * 1024 * 1024
@@ -180,6 +181,15 @@ CREATE TABLE IF NOT EXISTS bus_attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL,
   transport TEXT NOT NULL CHECK (transport IN ('webhook','tmux','poll')),
   started_at INTEGER NOT NULL, finished_at INTEGER, ok INTEGER NOT NULL DEFAULT 0, http_status INTEGER, error TEXT);
+-- Review queue (docs/review-queue.md, a simple port of agent-control PR 62). One row per filed item; the latest decision is
+-- on the row (decision JSON), delivered over the bus or left answered and unacked for the bot to read.
+CREATE TABLE IF NOT EXISTS review_items(
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, bot TEXT NOT NULL, key TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'decision',
+  title TEXT, ask TEXT, body TEXT, recommendation TEXT, options TEXT, links TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','changes_requested','approved','rejected','closed')),
+  revision INTEGER NOT NULL DEFAULT 1, previous_item_id TEXT, close_reason TEXT,
+  decision TEXT, decided_at INTEGER, delivery TEXT, bus_message_id INTEGER, delivery_error TEXT, acked_at INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
@@ -205,7 +215,9 @@ MIGRATE_COLUMNS = {
     # 0.8.0 Agent Bus: links a message typed into an orchestrator pane to its bus row; then the wake policy (agent-control 0027).
     "orchestrator_messages": [("bus_message_id", "INTEGER")],
     "agents": [("digest_minutes", "INTEGER NOT NULL DEFAULT 60"), ("last_digest_at", "INTEGER"), ("unreachable_since", "INTEGER"),
-               ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER")],
+               ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER"),
+               # Review queue port: a poll agent's declared check-in window (minutes); reachability allows that long.
+               ("poll_window_minutes", "INTEGER")],
     "bus_messages": [("wake", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0"), ("noop", "INTEGER NOT NULL DEFAULT 0"),
                      ("reply_expected", "INTEGER NOT NULL DEFAULT 0")],
 }
@@ -238,6 +250,8 @@ CREATE INDEX IF NOT EXISTS idx_bus_attempts_message ON bus_attempts(message_id, 
 CREATE INDEX IF NOT EXISTS bus_messages_created ON bus_messages(created_at);
 CREATE INDEX IF NOT EXISTS bus_attempts_started ON bus_attempts(started_at);
 CREATE INDEX IF NOT EXISTS bus_messages_held ON bus_messages(recipient, held, state);
+CREATE UNIQUE INDEX IF NOT EXISTS review_items_live ON review_items(project, lower(bot), key) WHERE status IN ('open','changes_requested');
+CREATE INDEX IF NOT EXISTS review_items_bot ON review_items(lower(bot), updated_at);
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
@@ -613,6 +627,7 @@ class Backend:
         self.secret_patterns = load_secret_patterns()
         self.bus = swarm_bus.Bus(self, {"valid_notify_url": valid_notify_url, "post_json": post_json, "fingerprint": fingerprint,
                                         "VERSION": VERSION})
+        self.review = swarm_review.Review(self)
 
     # ---------- auth ----------
     def who(self, header):
@@ -3313,7 +3328,7 @@ def r_bus_agents(api, who, m, qs, body, h):
     return {"agents": [api.bus.shape_agent(a) for a in api.s.q("SELECT * FROM agents WHERE retired_at IS NULL ORDER BY name")]}
 
 
-@route("PUT", r"/bus/agents/([^/]+)", ("admin",), "Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`)")
+@route("PUT", r"/bus/agents/([^/]+)", ("admin",), "Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`, `poll_window_minutes`)")
 def r_bus_put_agent(api, who, m, qs, body, h):
     return Reply(*api.bus.put_agent(swarm_bus.norm_name(urllib.parse.unquote(m[0])), body))
 
@@ -3359,6 +3374,55 @@ def r_bus_rotate(api, who, m, qs, body, h):
 @route("GET", r"/bus", ("admin",), "Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception)")
 def r_bus_page(api, who, m, qs, body, h):
     return ("text/html; charset=utf-8", api.bus.page().encode())
+
+
+# ---- Review queue (docs/review-queue.md) ----
+REVIEW_FILERS = ("admin", "chief", "bot", "agent")
+
+
+def review_call(fn, *args):
+    try:
+        return fn(*args)
+    except swarm_review.ReviewError as e:
+        raise ApiError(e.status, e.message, e.extra)
+
+
+@route("PUT", r"/review/items", REVIEW_FILERS, "File or update a review item, upsert by (`project`, `bot`, `key`). Bot and bus agent: as itself. "
+       "Admin and chief name `bot`")
+def r_review_put(api, who, m, qs, body, h):
+    return Reply(*review_call(api.review.upsert, who, body))
+
+
+@route("POST", r"/review/items", REVIEW_FILERS, "Same as PUT /review/items")
+def r_review_post(api, who, m, qs, body, h):
+    return Reply(*review_call(api.review.upsert, who, body))
+
+
+@route("GET", r"/review/items", REVIEW_FILERS, "List review items (`status`, `acked=0`, `project`, `key`, `type`, `limit`; admin and chief: `bot`). "
+       "Bot and bus agent: own only")
+def r_review_list(api, who, m, qs, body, h):
+    return review_call(api.review.list, who, qs)
+
+
+@route("GET", r"/review/items/([^/]+)", REVIEW_FILERS, "One review item with its `content_hash` and decision. Bot and bus agent: own only")
+def r_review_get(api, who, m, qs, body, h):
+    return review_call(api.review.detail, who, m[0])
+
+
+@route("POST", r"/review/items/([^/]+)/decision", ("admin", "chief"), "Decide: `action` approve, changes or reject, with the `content_hash` "
+       "read from the item (409 stale and nothing recorded on a mismatch), `note`, `edited_text`, `option`, `revision`")
+def r_review_decide(api, who, m, qs, body, h):
+    return review_call(api.review.decide, who, m[0], body)
+
+
+@route("POST", r"/review/items/([^/]+)/ack", REVIEW_FILERS, "Acknowledge a decision once consumed (`revision`). Bot and bus agent: own only")
+def r_review_ack(api, who, m, qs, body, h):
+    return review_call(api.review.ack, who, m[0], body)
+
+
+@route("POST", r"/review/items/([^/]+)/close", REVIEW_FILERS, "Withdraw an open item (`reason`). Bot and bus agent: own only")
+def r_review_close(api, who, m, qs, body, h):
+    return review_call(api.review.close, who, m[0], body)
 
 
 def permission_table():

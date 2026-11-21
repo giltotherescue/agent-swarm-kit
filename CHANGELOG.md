@@ -6,6 +6,23 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+The review queue, a simple port of agent-control PR 62. See [docs/review-queue.md](docs/review-queue.md).
+
+- **File, list, decide.** Bots file items (`decision`, `copy`, `creative`, `social_post`, `deliverable`, `pr`) with
+  `PUT /review/items`, upserted by project, bot and key (new revision on change, `unchanged` on an identical re-send,
+  reopened after changes requested, a new item after approve or reject). The admin token or Chief decides with
+  `POST /review/items/ID/decision`: approve, changes or reject, with an optional note, edited text and chosen option. New
+  `review_items` table, added in place; `swarmctl review-queue` (`swarmctl rq`) file|list|show|decide|ack|close.
+- **Stale-click guard.** Every read carries `content_hash` (SHA-256 of the ask, options and recommendation). A decision must
+  send it; a missing or changed hash gets 409 `stale` and nothing is recorded.
+- **Delivery.** The decision goes to the filing bot's bus agent as an urgent message on thread `review:ID` (pointer-only if
+  the text is too long or refused). A bot without a bus agent reads it from `GET /review/items?status=answered&acked=0`.
+  `POST /review/items/ID/ack` marks it consumed (and the bus message read).
+- **Poll window.** Poll agents may set `poll_window_minutes` (10 to 10080; `swarmctl bus register --poll-window`) so they are
+  not reported unreachable between check-ins. New `agents.poll_window_minutes` column, added in place.
+- **Not ported:** the dashboard UI, meeting flags, SLA alerts, batches and sync, media, fill-ins and variants, the legacy
+  item migration, and linked-task propagation with its retry ledger.
+
 Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).
 
 - **Submodule gitlinks are never auto-committed.** The kit's auto-commits, the backend's weekly project-log export and `swarmctl log export --dir DIR --git`, share one guarded commit. It runs in a copy of the index and unstages added, modified and deleted gitlinks (index mode 160000), found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A pin replaced by files, a pin and an ordinary file at the same path, a git error, a 60-second git timeout or a gitlink still staged aborts the commit and leaves the caller's index untouched. The commit is built with plumbing from exactly the inspected index (`write-tree`, `commit-tree`, compare-and-swap `update-ref`), so repository hooks never run for these automated commits: a formatting hook cannot stage the skipped pin, and a slow post-commit hook cannot report a failure after HEAD moved. `swarmctl log export --git` no longer runs `git add -A` on the real index or passes git's output through; it prints a redacted skip note, and on a failure a redacted error with exit code 1. The stock worker still never commits leftover work.

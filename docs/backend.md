@@ -27,6 +27,7 @@ A background loop runs every few seconds. It:
 | `bots` | Bot id, role (`chief` or `project`), notify URL, a short fingerprint of its trigger key, a hashed token. Never the key itself |
 | `projects` | Default repo, extra repos, bound bots, provider and model, and the push rules |
 | `items` | The Waiting on you list |
+| `review_items` | The review queue: items bots file for a human decision, upserted by project, bot and key, with the latest decision, its bus delivery and ack. See [review-queue.md](review-queue.md) |
 | `notices` | The delivery outbox. One row per event per bot, with a unique key so nothing is queued twice |
 | `log_entries` | The project log (0.3.0): one append-only, typed history per project: items (status and version), decisions, feedback, learnings, rule changes, activity and results. See [project-log.md](project-log.md) |
 | `activity_log` | Append-only short feed: ID, project, bot, kind, decider, summary, link, overruled ID, lasting flag, dedupe key, and creation time. The nightly export position per project is in `meta` |
@@ -114,11 +115,18 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/bus/messages/ID/ack` | yes | no | no | no | no | yes | Mark a message read. `first` is true only once; also returns `newer_in_thread`. Agent: recipient only |
 | GET | `/bus/threads/ID` | yes | no | no | no | no | yes | The last messages of a thread (`limit`, up to 100). Agent: only ones it sent or received |
 | GET | `/bus/agents` | yes | no | no | no | no | yes | Agents with kind, wake, aliases and whether they are reachable |
-| PUT | `/bus/agents/ID` | yes | no | no | no | no | no | Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`) |
+| PUT | `/bus/agents/ID` | yes | no | no | no | no | no | Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`, `poll_window_minutes`) |
 | DELETE | `/bus/agents/ID` | yes | no | no | no | no | no | Retire an agent. Its history stays |
 | GET | `/bus/agents/ID/token` | yes | no | no | yes | no | no | The agent's token. Admin: any. Worker token: the `worker` query is required and the agent's orchestrator must be pinned to that worker name (the name is self-declared: the kit has one shared worker token) |
 | POST | `/bus/agents/ID/token/rotate` | yes | no | no | no | no | no | Revoke every token of the agent and return a new one |
 | GET | `/bus` | yes | no | no | no | no | no | Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception) |
+| PUT | `/review/items` | yes | yes | yes | no | no | yes | File or update a review item, upsert by (`project`, `bot`, `key`). Bot and bus agent: as itself. Admin and chief name `bot` |
+| POST | `/review/items` | yes | yes | yes | no | no | yes | Same as PUT /review/items |
+| GET | `/review/items` | yes | yes | yes | no | no | yes | List review items (`status`, `acked=0`, `project`, `key`, `type`, `limit`; admin and chief: `bot`). Bot and bus agent: own only |
+| GET | `/review/items/ID` | yes | yes | yes | no | no | yes | One review item with its `content_hash` and decision. Bot and bus agent: own only |
+| POST | `/review/items/ID/decision` | yes | yes | no | no | no | no | Decide: `action` approve, changes or reject, with the `content_hash` read from the item (409 stale and nothing recorded on a mismatch), `note`, `edited_text`, `option`, `revision` |
+| POST | `/review/items/ID/ack` | yes | yes | yes | no | no | yes | Acknowledge a decision once consumed (`revision`). Bot and bus agent: own only |
+| POST | `/review/items/ID/close` | yes | yes | yes | no | no | yes | Withdraw an open item (`reason`). Bot and bus agent: own only |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).
 
