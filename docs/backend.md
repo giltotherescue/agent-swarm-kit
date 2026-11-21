@@ -116,9 +116,9 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | GET | `/bus/agents` | yes | no | no | no | no | yes | Agents with kind, wake, aliases and whether they are reachable |
 | PUT | `/bus/agents/ID` | yes | no | no | no | no | no | Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`) |
 | DELETE | `/bus/agents/ID` | yes | no | no | no | no | no | Retire an agent. Its history stays |
-| GET | `/bus/agents/ID/token` | yes | no | no | yes | no | no | The agent's token. Admin: any. Worker: only an agent whose orchestrator is pinned to it (`worker` query) |
+| GET | `/bus/agents/ID/token` | yes | no | no | yes | no | no | The agent's token. Admin: any. Worker token: the `worker` query is required and the agent's orchestrator must be pinned to that worker name (the name is self-declared: the kit has one shared worker token) |
 | POST | `/bus/agents/ID/token/rotate` | yes | no | no | no | no | no | Revoke every token of the agent and return a new one |
-| GET | `/bus` | public | public | public | public | public | public | Plain HTML view of agents and the last 100 messages. Read only; the admin token or a request through the local Tailscale front door (loopback) |
+| GET | `/bus` | yes | no | no | no | no | no | Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception) |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).
 

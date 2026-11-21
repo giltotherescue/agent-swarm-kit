@@ -26,8 +26,9 @@ See [docs/agent-bus.md](docs/agent-bus.md).
   `waiting`/`blocked` ("NOT on GitHub") instead of `done`. Notices carry `head_sha` and `landed`.
 - **Orchestrators** check for messages every 10 seconds while idle, get a bus token at start (`BUS_AGENT`, `BUS_TOKEN_FILE`,
   `swarmctl` on `PATH`) and strip control characters from pasted text; long messages are cut with a visible marker.
+- A bus-notice `done` is judged on the current finish's push evidence: a branch pushed by an earlier claim no longer lets a new unpushed head land. Worker-token fetch of an orchestrator's bus token needs `?worker=NAME` (shared worker token: runners are trusted fleet-wide, see docs/agent-bus.md).
 - **Stored means accepted** (agent-control PR 61): once a bus message is stored, later dispatch or bookkeeping errors are logged (category plus redacted text) and the send still succeeds, so a finish notice never falls back to the normal path after storage. The tmux enqueue is idempotent and repaired by the duplicate path and the delivery loop; the loop also starts unreachable episodes it missed.
-- A plain HTML page at `/bus` (loopback or admin token) lists agents and the last 100 messages.
+- A plain HTML page at `/bus` (admin token only; no loopback exception, because a reverse proxy arrives from loopback) lists agents and the last 100 messages.
 - New routes `/bus/*` and a bus agent token column in the permission matrix (docs/backend.md). Schema version 8.
 - See docs/updating-the-kit.md, "Upgrading to 0.8.0" (also adds the missing "Upgrading to 0.7.1" note).
 

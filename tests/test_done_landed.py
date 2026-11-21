@@ -40,6 +40,30 @@ class LandedTest(unittest.TestCase):
     def payload(self, t):
         return self.api.payload(t, f"{t['id']}:{t['state']}:1", "owner")
 
+    def test_pushed_branch_of_an_earlier_claim_is_not_evidence_for_a_new_unpushed_head(self):
+        self.b.req("POST", "/tasks", {"id": "twoclaim", "prompt": "Fix the thing", "repo": "acme/site", "owner": "clozy-bot"})
+        c1 = self.b.claim()
+        st, _ = self.b.finish(c1, "next", worker="w1", pushed_branch="agent/a", head_sha="a" * 40, unpushed_commits=0)
+        self.assertEqual(st, 200)
+        c2 = self.b.claim()
+        self.assertEqual(c2["id"], "twoclaim")
+        st, _ = self.b.finish(c2, "done", worker="w1", head_sha="b" * 40, unpushed_commits=2, summary="more work")
+        self.assertEqual(st, 200)
+        t = self.row("twoclaim")
+        self.assertEqual((t["state"], t["outcome"]), ("waiting", "blocked"))
+        self.assertIn("NOT on GitHub: 2 commit(s)", t["question"])
+        self.assertIs(self.payload(t)["landed"], False)
+
+    def test_current_claim_push_still_lands_after_an_earlier_claim(self):
+        self.b.req("POST", "/tasks", {"id": "twoclaim2", "prompt": "Fix the thing", "repo": "acme/site", "owner": "clozy-bot"})
+        c1 = self.b.claim()
+        self.b.finish(c1, "next", worker="w1", pushed_branch="agent/a", unpushed_commits=0)
+        c2 = self.b.claim()
+        self.b.finish(c2, "done", worker="w1", pushed_branch="agent/a", head_sha="b" * 40, unpushed_commits=2)
+        t = self.row("twoclaim2")
+        self.assertEqual(t["state"], "done")
+        self.assertIs(self.payload(t)["landed"], True)
+
     # ---- unpushed commits ----
     def test_code_task_with_unpushed_commits_and_no_pushed_branch_is_blocked_not_done(self):
         t = self.run_task(unpushed_commits=2, summary="Fixed it")

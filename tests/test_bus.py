@@ -191,7 +191,7 @@ class TokenTest(BusCase):
     def test_worker_token_only_for_pinned_orchestrator_agent(self):
         w = self.b.req("GET", "/bus/agents/polisher/token?worker=w1", tok=WORKER)
         self.assertEqual(w["token"], self.tok["polisher"])
-        self.b.req("GET", "/bus/agents/polisher/token", tok=WORKER)   # no worker query: still only an orchestrator agent
+        self.b.req("GET", "/bus/agents/polisher/token", tok=WORKER, expect=400)   # the worker name is required
         self.b.req("GET", "/bus/agents/polisher/token?worker=w2", tok=WORKER, expect=404)
         self.b.req("GET", "/bus/agents/chief/token?worker=w1", tok=WORKER, expect=404)
         self.b.req("GET", "/bus/agents/clozy/token", tok=WORKER, expect=404)
@@ -861,8 +861,12 @@ class PageTest(BusCase):
         self.assertIn("Agent Bus", text)
         self.assertNotIn("<script>alert(1)</script>", text)
         self.assertIn("clozy", text)
-        status, _ = self.b.call("GET", "/bus", tok=self.tok["chief"])
-        self.assertIn(status, (200, 403))   # loopback requests are the local front door in this test setup
+        for tok in (self.tok["chief"], WORKER, self.tok["clozy"]):
+            self.assertEqual(self.b.call("GET", "/bus", tok=tok)[0], 403)
+
+    def test_page_without_a_token_is_refused_even_from_loopback(self):
+        # The test server is reached over 127.0.0.1, exactly like a request through a reverse proxy.
+        self.assertIn(self.b.call("GET", "/bus", tok=None)[0], (401, 403))
 
 
 if __name__ == "__main__":

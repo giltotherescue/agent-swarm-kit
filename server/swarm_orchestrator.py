@@ -44,6 +44,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
@@ -353,7 +354,7 @@ class Supervisor:
         mode = 0o640 if shared else 0o600
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            data = sw.api("GET", f"/bus/agents/{self.name}/token", timeout=30)
+            data = sw.api("GET", f"/bus/agents/{self.name}/token?worker={urllib.parse.quote(sw.NAME)}", timeout=30)
             token = data.get("token") if isinstance(data, dict) else None
             if not isinstance(token, str) or not token:
                 raise ValueError("no token in the answer")

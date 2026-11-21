@@ -125,7 +125,7 @@ with `swarmctl bus token NAME`. The backend makes its token secret in `bus-token
 on first use (mode 600); it is part of your config, not the backup: copy it if you restore onto a new server,
 or re-issue tokens. Restart each orchestrator once so its session gets a bus token
 (`swarmctl orchestrator restart NAME`); the supervisors are updated by the setup script's restart. The `/bus` page is
-read-only and answers only through the local Tailscale front door or with the admin token. To go back to 0.7.x:
+read-only and needs the admin token (a request from loopback, such as through Tailscale `serve`, gets 401 without it). To go back to 0.7.x:
 the new tables and columns stay unused in the database, which older versions ignore.
 
 ## Upgrading to 0.7.1

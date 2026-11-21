@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS agents(
   token_gen INTEGER NOT NULL DEFAULT 1,
   notices TEXT NOT NULL DEFAULT 'legacy' CHECK (notices IN ('legacy','bus')),
   last_seen_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, retired_at INTEGER);
-CREATE TABLE IF NOT EXISTS agent_aliases(alias TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS agent_aliases(alias TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS bus_messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, thread TEXT NOT NULL,
   client_msg_id TEXT, body TEXT NOT NULL, meta TEXT, urgent INTEGER NOT NULL DEFAULT 0,
@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS bus_attempts(
 # Columns added after 0.1.0. Added in place on an existing database.
 MIGRATE_COLUMNS = {
     "tasks": [("claim_id", "TEXT"), ("claimed_at", "INTEGER"), ("follow_up", "INTEGER DEFAULT 0"),
-              ("held_behind", "TEXT"), ("push_main", "INTEGER DEFAULT 0"), ("pushed_branch", "TEXT"),
+              ("held_behind", "TEXT"), ("push_main", "INTEGER DEFAULT 0"), ("pushed_branch", "TEXT"), ("pushed_current", "INTEGER"),
               ("workdir", "TEXT"), ("workspace_host", "TEXT"), ("session_model", "TEXT"),
               ("unpushed", "INTEGER DEFAULT 0"), ("human_snooze_until", "INTEGER"),
               ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER"),
@@ -699,9 +699,17 @@ class Backend:
         """Tasks that can never publish are exempt from the landed rules: report-only, untrusted input, reviews and scripts."""
         return bool(task.get("report_only") or task.get("untrusted") or task.get("kind") in ("script", "review"))
 
+    @staticmethod
+    def has_push_evidence(task):
+        """A pushed branch counts only when the current claim's finish reported it. A branch left over from an earlier claim says
+        nothing about the current head, unless nothing is unpushed. pushed_current NULL (rows from before this field existed) trusts the branch."""
+        if not task.get("pushed_branch"):
+            return False
+        return task.get("pushed_current") != 0 or (task.get("unpushed_commits") or 0) == 0
+
     def landed(self, task):
         """True: on GitHub (and the PR confirmed when one was asked for). False: known not to be. None: unknown (old worker) or not applicable."""
-        if task.get("pushed_branch") and task.get("kind") == "code":
+        if self.has_push_evidence(task) and task.get("kind") == "code":
             return bool(not task.get("open_pr") or task.get("pr_url"))
         if (task.get("unpushed_commits") or 0) > 0 and task.get("kind") == "code" and not self.cannot_push(task):
             return False
@@ -712,10 +720,10 @@ class Backend:
         old worker (no unpushed_commits field), ops and review tasks and tasks without commits."""
         if t.get("kind") != "code" or self.cannot_push(t):
             return None
-        if (t.get("unpushed_commits") or 0) > 0 and not t.get("pushed_branch"):
+        if (t.get("unpushed_commits") or 0) > 0 and not self.has_push_evidence(t):
             return (f"Work is committed on {worker or 'the worker'} but NOT on GitHub: {t['unpushed_commits']} commit(s) not pushed. "
                     "Re-queue with --push or --pr, or recover the branch.")
-        if t.get("open_pr") and t.get("pushed_branch") and not t.get("pr_url"):
+        if t.get("open_pr") and self.has_push_evidence(t) and not t.get("pr_url"):
             return f"Pushed {t['pushed_branch']} but no PR was confirmed on GitHub."
         return None
 
@@ -1297,6 +1305,7 @@ class Backend:
                           session_id=clean_text(b.get("session_id"), 200, "session_id") or t["session_id"],
                           workdir=clean_text(b.get("workdir"), 120, "workdir") or t["workdir"],
                           pushed_branch=clean_text(b.get("pushed_branch"), 200, "pushed_branch") or t["pushed_branch"],
+                          pushed_current=1 if clean_text(b.get("pushed_branch"), 200, "pushed_branch") else 0,
                           unpushed=1 if b.get("unpushed") else 0,
                           head_sha=clean_text(b.get("head_sha"), 64, "head_sha") or t["head_sha"],
                           unpushed_commits=b["unpushed_commits"] if isinstance(b.get("unpushed_commits"), int)
@@ -3186,7 +3195,7 @@ def r_bus_retire(api, who, m, qs, body, h):
     return {"ok": True, "name": n}
 
 
-@route("GET", r"/bus/agents/([^/]+)/token", ("admin", "worker"), "The agent's token. Admin: any. Worker: only an agent whose orchestrator is pinned to it (`worker` query)")
+@route("GET", r"/bus/agents/([^/]+)/token", ("admin", "worker"), "The agent's token. Admin: any. Worker token: the `worker` query is required and the agent's orchestrator must be pinned to that worker name (the name is self-declared: the kit has one shared worker token)")
 def r_bus_token(api, who, m, qs, body, h):
     a = api.bus.resolve(swarm_bus.norm_name(urllib.parse.unquote(m[0])))
     if not a:
@@ -3195,7 +3204,11 @@ def r_bus_token(api, who, m, qs, body, h):
         raise ApiError(410, f"agent {a['name']} is retired")
     if who["role"] != "admin":
         o = api.orch_row(a["orchestrator"]) if a["orchestrator"] else None
-        if not o or (qs.get("worker") and o["worker_id"] != qs["worker"]):
+        if not o:
+            raise ApiError(404, "not found")
+        if not qs.get("worker"):
+            raise ApiError(400, "the worker query (your worker name) is required")
+        if o["worker_id"] != qs["worker"]:
             raise ApiError(404, "not found")
     return {"name": a["name"], "token": api.bus.mint(a["name"], a["token_gen"])}
 
@@ -3211,16 +3224,8 @@ def r_bus_rotate(api, who, m, qs, body, h):
     return {"name": a["name"], "token": api.bus.token_for(a["name"])}
 
 
-@route("GET", r"/bus", None, "Plain HTML view of agents and the last 100 messages. Read only; the admin token or a request through the local Tailscale front door (loopback)")
+@route("GET", r"/bus", ("admin",), "Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception)")
 def r_bus_page(api, who, m, qs, body, h):
-    ok = getattr(h, "peer", "") in ("127.0.0.1", "::1")
-    if not ok:
-        try:
-            ok = api.who(h.get("Authorization"))["role"] == "admin"
-        except ApiError:
-            ok = False
-    if not ok:
-        raise ApiError(403, "the bus page is only for the admin token or through the local front door")
     return ("text/html; charset=utf-8", api.bus.page().encode())
 
 

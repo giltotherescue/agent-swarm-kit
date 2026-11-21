@@ -15,6 +15,7 @@ from unittest.mock import patch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "server"))
 import swarm_orchestrator as so  # noqa: E402
+import swarm_worker as sw  # noqa: E402
 
 SECRET = "ab_steward.1." + "e" * 40   # stand-in, not a real token
 
@@ -114,7 +115,7 @@ class BusTest(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             path = self.sup.fetch_bus_token()
-        self.assertEqual(self.api_calls, [("GET", "/bus/agents/steward/token")])
+        self.assertEqual(self.api_calls, [("GET", "/bus/agents/steward/token?worker=" + sw.NAME)])
         self.assertEqual(path, os.path.join(self.sup.dir, "steward.bus-token"))
         self.assertEqual(open(path).read(), SECRET)
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
