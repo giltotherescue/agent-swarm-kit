@@ -372,3 +372,56 @@ class SanitizeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliExportTests(Base):
+    """`swarmctl log export --dir DIR --git`, run through an installed-style symlink, uses the guarded exporter."""
+    FIXTURE = "TOKEN=abcdefgh12345"
+
+    def setUp(self):
+        super().setUp()
+        from helpers import ADMIN, Backend
+        self.b = Backend()
+        self.addCleanup(self.b.close)
+        t = Path(self.tmp.name)
+        (t / "tok").write_text(ADMIN)
+        (t / "bin").mkdir()
+        self.ctl = t / "bin" / "swarmctl"
+        os.symlink(ROOT / "server" / "swarmctl", self.ctl)   # like setup-worker.sh: ln -sfn .../server/swarmctl
+        self.env = dict(os.environ, SWARM_URL=self.b.base, SWARM_TOKEN_FILE=str(t / "tok"), HOME=str(t))
+        # the export folder: a modified tracked pin (engine), a new embedded repo named after the fixture, an edit
+        d = self.wd / self.FIXTURE; d.mkdir(); init(d); commit(d, "x", "x\n")
+        (self.wd / "README.md").write_text("changed\n")
+
+    def run_ctl(self, *args):
+        return subprocess.run([str(self.ctl), *args], env=self.env, capture_output=True, text=True, timeout=60)
+
+    def test_cli_export_skips_pins_and_never_prints_the_token(self):
+        head = g(self.wd, "rev-parse", "HEAD")
+        r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout + r.stderr
+        for frag in ("abcdefgh12345", "abcdefgh", "12345"):
+            self.assertNotIn(frag, out)
+        self.assertIn("committed in", r.stdout)
+        self.assertIn("2 submodule pin change(s) left uncommitted", r.stderr)
+        self.assertIn("TOKEN=[redacted]", r.stderr)
+        self.assertNotEqual(g(self.wd, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.in_head(), ["README.md"], "only the ordinary edit is committed")
+        tree = g(self.wd, "ls-tree", "-r", "HEAD")
+        self.assertNotIn(self.FIXTURE, tree, "the embedded repo is not committed")
+        self.assertIn(f"160000 commit {g(self.wd, 'rev-parse', 'HEAD~1:engine')}\tengine", tree, "the old pin stays in HEAD")
+        self.assertTrue(self.pin_modified())
+        self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "", "the real index matches the new HEAD")
+
+    def test_cli_export_failure_is_redacted_and_exits_nonzero(self):
+        hook = self.wd / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf 'TOKEN=abcdefgh12345\\n' >&2\nprintf '%0286d' 0 | tr 0 p >&2\nexit 1\n")
+        hook.chmod(0o755)
+        head, before = g(self.wd, "rev-parse", "HEAD"), g(self.wd, "ls-files", "-s")
+        r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("git commit failed", r.stderr)
+        for frag in ("abcdefgh", "12345"):
+            self.assertNotIn(frag, r.stdout + r.stderr)
+        self.assertEqual((g(self.wd, "rev-parse", "HEAD"), g(self.wd, "ls-files", "-s")), (head, before))

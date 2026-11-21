@@ -57,6 +57,63 @@ class BusGitlinkTest(NoticeBase):
         self.assertIn("1 submodule pin change(s) left uncommitted: engine (aaaaaaa -> bbbbbbb)", rep)
         self.assertEqual(rep.count("<!-- swarm:gitlink-skip-note -->"), 1)
 
+    NOTE_TAG = "<!-- swarm:gitlink-skip-note -->"
+
+    def resumed(self, tid, first, second=None, report="## Summary\nfirst run\n", omit=False):
+        """waiting (with `first`) -> answer -> claim again -> finish done with `second` (no new report)."""
+        self.b.req("POST", "/tasks", {"id": tid, "prompt": "Ship " + tid, "repo": "acme/site", "push": True, "owner": "clozy-bot"})
+        c = self.b.claim()
+        self.b.req("PUT", f"/tasks/{tid}/files/report/REPORT.md", None, tok=c["task_token"], raw=report.encode(),
+                   headers={"X-Claim-Id": c["claim_id"]})
+        st, out = self.b.finish(c, "waiting", question="Which pin?", waiting_on="human", gitlink_skipped=first)
+        self.assertEqual(st, 200, out)
+        self.b.req("POST", f"/tasks/{tid}/answer", {"answer": "the second"})
+        c2 = self.b.claim()
+        self.assertEqual(c2["id"], tid)
+        extra = {} if omit else {"gitlink_skipped": second}
+        body = dict({"pr_url": "https://github.com/acme/site/pull/9", "pushed_branch": f"agent/{tid}", "head_sha": "c" * 40,
+                     "unpushed_commits": 0}, **extra)
+        st, out = self.b.finish(c2, "done", **body)
+        self.assertEqual(st, 200, out)
+        # a replayed finish of the same claim changes nothing
+        st2, out2 = self.b.finish(c2, "done", **body)
+        self.assertEqual(st2, 200, out2)
+        self.assertTrue(out2.get("replayed"), out2)
+        st, out = self.b.call("GET", f"/tasks/{tid}/report")
+        return self.b.req("GET", f"/tasks/{tid}")["task"], (None if st == 404 else self.report(tid))
+
+    def test_resumed_claim_replaces_the_note_with_the_new_pin(self):
+        t, rep = self.resumed("tr1", [{"path": "first-pin", "old": "aaaaaaa", "new": "bbbbbbb"}],
+                              [{"path": "second-pin", "old": "ccccccc", "new": "ddddddd"}])
+        self.assertEqual([g["path"] for g in t["gitlink_skipped"]], ["second-pin"])
+        self.assertEqual(t["gitlink_skipped_count"], 1)
+        self.assertIn("first run", rep)
+        self.assertIn("second-pin (ccccccc -> ddddddd)", rep)
+        self.assertNotIn("first-pin", rep)
+        self.assertEqual(rep.count(self.NOTE_TAG), 1)
+
+    def test_explicit_empty_observation_clears_list_count_and_note(self):
+        t, rep = self.resumed("tr2", [{"path": "first-pin", "old": "aaaaaaa", "new": "bbbbbbb"}], [])
+        self.assertEqual(t["gitlink_skipped"], [])
+        self.assertFalse(t["gitlink_skipped_count"])
+        self.assertIn("first run", rep)
+        self.assertNotIn("first-pin", rep)
+        self.assertNotIn(self.NOTE_TAG, rep)
+        self.assertNotIn("gitlink pin not committed", rep)
+
+    def test_empty_observation_removes_a_note_only_report(self):
+        t, rep = self.resumed("tr3", [{"path": "first-pin", "old": "", "new": "bbbbbbb"}], [], report="")
+        self.assertEqual(t["gitlink_skipped"], [])
+        self.assertIsNone(rep, "the report held only the generated note, so it is gone")
+        self.assertFalse(t["has_report"])
+
+    def test_omitted_observation_keeps_the_earlier_one(self):
+        t, rep = self.resumed("tr4", [{"path": "first-pin", "old": "aaaaaaa", "new": "bbbbbbb"}], omit=True)
+        self.assertEqual([g["path"] for g in t["gitlink_skipped"]], ["first-pin"])
+        self.assertEqual(t["gitlink_skipped_count"], 1)
+        self.assertEqual(rep.count(self.NOTE_TAG), 1)
+        self.assertIn("first-pin (aaaaaaa -> bbbbbbb)", rep)
+
     def test_report_note_on_publish_failure_without_a_report(self):
         self.finished("clozy-bot", "tg7", status="failed", outcome="publish_failed", error="git fetch failed",
                       gitlink_skipped=SKIPPED[1:])
@@ -148,6 +205,15 @@ class EnqueueOptInTest(NoticeBase):
         self.assertEqual(self.b.req("POST", "/tasks", {"prompt": "x", "follow_up": "tq"})["task"]["allow_gitlink"], 0)
         self.assertEqual(self.b.req("POST", "/tasks", {"prompt": "y", "follow_up": "tq",
                                                        "allow_gitlink": True, "allow_duplicate": True})["task"]["allow_gitlink"], 1)
+
+    def test_explicit_null_allow_gitlink_is_refused(self):
+        self.finished("clozy-bot", "tn", create={"allow_gitlink": True})
+        for body in ({"prompt": "n1", "follow_up": "tn", "allow_gitlink": None},
+                     {"prompt": "n2", "repo": "acme/site", "allow_gitlink": None}):
+            st, out = self.b.call("POST", "/tasks", body)
+            self.assertEqual(st, 400, (body, out))
+            self.assertIn("allow_gitlink", out["error"])
+        self.assertEqual(self.b.req("POST", "/tasks", {"prompt": "n3", "follow_up": "tn"})["task"]["allow_gitlink"], 1)
 
     def test_allow_gitlink_must_be_a_real_boolean(self):
         base = {"repo": "acme/site", "push": True}

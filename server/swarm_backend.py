@@ -715,15 +715,22 @@ class Backend:
             p["question"] = task.get("question")
         return p
 
-    def append_report_note(self, task_id, note):
-        """Add the (sanitized) gitlink skip note to the task's stored REPORT.md once; a task without a report gets one."""
+    def set_report_note(self, task_id, note):
+        """Make the task's stored REPORT.md carry exactly this (sanitized) gitlink skip note, replacing any generated note
+        from an earlier finish; note "" removes it. A task without a report gets one; a report that held only the note
+        is removed with it. Detection is by the note's markers, never by its wording."""
         f = self.s.one("SELECT name, data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", task_id)
         text = bytes(f["data"]).decode(errors="replace") if f else ""
-        if swarm_gitlink.NOTE_TAG in text:
+        base = swarm_gitlink.strip_report_note(text)
+        if base == text and not note:
             return
-        data = (text.rstrip() + note).lstrip("\n").encode()
+        name = f["name"] if f else "REPORT.md"
+        data = (base.rstrip() + note).lstrip("\n").encode() if note else (base.rstrip() + "\n").lstrip("\n").encode()
+        if not data.strip():
+            self.s.run("DELETE FROM files WHERE task_id = ? AND kind = 'report' AND name = ?", task_id, name)
+            return
         self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
-                   task_id, "report", f["name"] if f else "REPORT.md", data, len(data), now())
+                   task_id, "report", name, data, len(data), now())
 
     @staticmethod
     def stored_gitlinks(t):
@@ -863,6 +870,8 @@ class Backend:
     def create_task(self, who, b):
         self.need(who, "admin", "chief", "bot")
         b = {k: v for k, v in b.items() if not str(k).startswith("_")}  # internal fields are never taken from a request
+        if "allow_gitlink" in b and b["allow_gitlink"] is None:
+            raise ApiError(400, "allow_gitlink must be true or false; omit it to inherit a follow-up's parent value")
         follow = clean_text(b.get("follow_up"), 80, "follow_up")
         if follow:
             return self.follow_up(who, follow, b)
@@ -1093,8 +1102,9 @@ class Backend:
             inherit["branch"] = parent.get("pushed_branch") or parent.get("branch") or f"agent/{parent['id']}"
         body = dict(inherit)
         body.update({k: v for k, v in b.items() if v is not None and v is not False and v != "" and k != "follow_up"})
-        if b.get("allow_gitlink") is not None:
+        if "allow_gitlink" in b:
             # an explicit value, JSON false included, overrides the parent's opt-in; only an omitted field inherits it
+            # (an explicit null was refused in create_task)
             body["allow_gitlink"] = parse_flag(b["allow_gitlink"], "allow_gitlink")
         body["parent_id"] = parent["id"]
         body["_workspace_host"] = parent.get("workspace_host")
@@ -1361,17 +1371,24 @@ class Backend:
                           workspace_host=c["worker"] if (b.get("workdir") or t["workdir"]) else t["workspace_host"],
                           pending_answer=None)
             skipped = b.get("gitlink_skipped")
-            if isinstance(skipped, list) and skipped:
-                # Redact on the full value (then cut) before anything is stored: the task record, the event, the report note
-                # and every notice see only this. The latest finish's observation replaces an earlier one (it describes the
-                # worktree now); the true count is kept apart from the bounded list, never re-derived from display strings.
+            if isinstance(skipped, list):
+                # An explicit observation ([] included) replaces the earlier one: it describes the worktree now. Omitting
+                # the field keeps what was stored. Redact on the full value (then cut) before anything is stored: the task
+                # record, the event, the report note and every notice see only this. The true count is kept apart from the
+                # bounded list, never re-derived from display strings. A replayed finish returns above, so this runs once.
                 gl = swarm_gitlink.public_gitlinks(skipped, limit=swarm_gitlink.MAX_STORED, patterns=self.secret_patterns,
                                                    count=b.get("gitlink_skipped_count"))
-                common["gitlink_skipped"] = json.dumps(gl["items"])
-                common["gitlink_skipped_count"] = gl["count"]
-                shown = gl["items"][:swarm_gitlink.MAX_ITEMS]
-                self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(shown, gl["count"]))
-                self.append_report_note(task_id, swarm_gitlink.report_note(shown, gl["count"]))
+                if gl["count"]:
+                    common["gitlink_skipped"] = json.dumps(gl["items"])
+                    common["gitlink_skipped_count"] = gl["count"]
+                    shown = gl["items"][:swarm_gitlink.MAX_ITEMS]
+                    self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(shown, gl["count"]))
+                    self.set_report_note(task_id, swarm_gitlink.report_note(shown, gl["count"]))
+                else:
+                    if t.get("gitlink_skipped_count"):
+                        self.event(task_id, "publish", actor, "Auto-commit: no submodule pin changes left uncommitted now")
+                    common["gitlink_skipped"], common["gitlink_skipped_count"] = None, None
+                    self.set_report_note(task_id, "")
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:

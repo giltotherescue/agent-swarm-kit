@@ -124,11 +124,16 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+def diag(text, n):
+    """A subprocess diagnostic for an error or log line: redacted on the complete text, then cut to its last n chars."""
+    return swarm_gitlink.bounded_diagnostic(text or "", n)
+
+
 def sh(cmd, cwd=None, check=True, env=None, timeout=1800):
     e = dict(os.environ if env is None else env, GIT_TERMINAL_PROMPT="0")
     r = subprocess.run(cmd, cwd=cwd, env=e, capture_output=True, text=True, timeout=timeout)
     if check and r.returncode != 0:
-        raise RuntimeError(f"{' '.join(cmd[:3])} failed: {(r.stderr or r.stdout).strip()[-500:]}")
+        raise RuntimeError(f"{' '.join(cmd[:3])} failed: {diag(r.stderr or r.stdout, 500)}")
     return r
 
 
@@ -409,7 +414,7 @@ class Runner(threading.Thread):
     def agent(self, *args, check=True, timeout=1800):
         r = subprocess.run(as_agent() + list(args), capture_output=True, text=True, timeout=timeout)
         if check and r.returncode != 0:
-            raise RuntimeError(f"agent-exec {args[0]} failed: {(r.stderr or r.stdout).strip()[-500:]}")
+            raise RuntimeError(f"agent-exec {args[0]} failed: {diag(r.stderr or r.stdout, 500)}")
         return r
 
     def stop_agent(self):
@@ -484,8 +489,10 @@ class Runner(threading.Thread):
         except ClaimLost:
             log("task", t["id"], "stopped: claim ended (cancelled, reaped or expired). Nothing published.")
         except Exception as e:
-            log("task", t["id"], "error", e)
-            status, extra = "failed", {"error": str(e)[:2000], "outcome": "worker_error"}
+            # redact the complete text first, then bound it, for both the runner log and /finish.error
+            err = swarm_gitlink.redact(str(e))
+            log("task", t["id"], "error", err[:2000])
+            status, extra = "failed", {"error": err[:2000], "outcome": "worker_error"}
         finally:
             try:
                 if status and not self.lost:
@@ -519,9 +526,9 @@ class Runner(threading.Thread):
         try:
             r = self.agent("cleanup", self.task["id"], check=False, timeout=300)
             if r.returncode != 0:
-                log("task", self.task["id"], "outbox cleanup failed:", (r.stderr or r.stdout).strip()[-300:])
+                log("task", self.task["id"], "outbox cleanup failed:", diag(r.stderr or r.stdout, 300))
         except Exception as e:
-            log("task", self.task["id"], "outbox cleanup failed:", e)
+            log("task", self.task["id"], "outbox cleanup failed:", swarm_gitlink.redact(str(e)))
 
     def fill_inbox(self):
         """Write the brief, an empty messages file and the attachments into the task's inbox folder."""
@@ -688,7 +695,7 @@ class Runner(threading.Thread):
             extra["unpushed_commits"] = g["unpushed"]
         if g.get("head"):
             extra["head_sha"] = g["head"]
-        if g.get("gitlink_skipped"):
+        if isinstance(g.get("gitlink_skipped"), list):  # an explicit [] is an observation too: it clears the old one
             # Sanitize here, before the finish request (and any log) carries it; the backend sanitizes again.
             gl = swarm_gitlink.public_gitlinks(g["gitlink_skipped"], limit=swarm_gitlink.MAX_STORED,
                                                count=g.get("gitlink_skipped_count"))
@@ -765,7 +772,7 @@ class Runner(threading.Thread):
         try:
             r = sh(["git", "fetch", "--quiet", bpath, f"+HEAD:{work_ref}"], cwd=self.clone, check=False)
             if r.returncode != 0:
-                return {"publish_error": "could not read the work bundle: " + (r.stderr or "").strip()[-300:]}
+                return {"publish_error": "could not read the work bundle: " + diag(r.stderr, 300)}
         finally:
             os.remove(bpath)
         base = f"refs/heads/{target}" if self.remote_has(target) else f"refs/heads/{self.default_branch}"
@@ -782,7 +789,7 @@ class Runner(threading.Thread):
         try:
             sh(["git", "push", "--quiet", "origin", f"{work_ref}:refs/heads/{target}"], cwd=self.clone)
         except Exception as e:
-            return {"publish_error": str(e)[:1000]}
+            return {"publish_error": swarm_gitlink.redact(str(e))[:1000]}
         out = {"pushed_branch": target}
         if t.get("open_pr") and not t.get("pr_number") and not t.get("push_main"):
             try:
@@ -801,7 +808,7 @@ class Runner(threading.Thread):
                     os.remove(bpath)
                     out["pr_url"] = r.stdout.strip().splitlines()[-1]
             except Exception as e:
-                out["publish_error"] = "pushed, but the draft PR failed: " + str(e)[:800]
+                out["publish_error"] = "pushed, but the draft PR failed: " + swarm_gitlink.redact(str(e))[:800]
         return out
 
     def run_script(self, t):

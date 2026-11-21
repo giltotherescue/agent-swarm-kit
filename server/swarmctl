@@ -467,13 +467,19 @@ def cmd_log(a):
 
 
 def git_commit(folder, message):
-    """Commit the export folder to a local git repo so every export shows as a diff (git log -p)."""
-    if not os.path.isdir(os.path.join(folder, ".git")):
-        subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=folder, check=True)
-    r = subprocess.run(["git", "-c", "user.name=swarmctl", "-c", "user.email=swarmctl@localhost", "commit", "-q", "-m", message],
-                       cwd=folder, capture_output=True, text=True)
-    print("committed" if r.returncode == 0 else "nothing new to commit", "in", folder)
+    """Commit the export folder to a local git repo so every export shows as a diff (git log -p).
+
+    Uses the backend export's guarded commit (server/swarm_gitlink.py): a copy of the index, submodule pins never
+    staged (opt-in disabled), git output captured, every diagnostic redacted before it is printed. Exits 1 on failure."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import swarm_gitlink
+    try:
+        made = swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
+                                             identity=("swarmctl", "swarmctl@localhost"),
+                                             log=lambda m: print("swarmctl: log export:", m, file=sys.stderr, flush=True))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        sys.exit("swarmctl: log export: git commit failed: " + swarm_gitlink.bounded_diagnostic(str(e), 1000))
+    print("committed" if made else "nothing new to commit", "in", folder)
 
 
 def write_secret_file(out, value):

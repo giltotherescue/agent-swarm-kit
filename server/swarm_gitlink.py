@@ -27,6 +27,8 @@ REDACTED = "[redacted]"
 NOTE_MARK = "gitlink pin not committed"
 # Hidden marker on the generated REPORT.md note; the backend detects the note by this, never by prose.
 NOTE_TAG = "<!-- swarm:gitlink-skip-note -->"
+NOTE_END = "<!-- /swarm:gitlink-skip-note -->"
+_NOTE_RE = re.compile(r"\n*" + re.escape(NOTE_TAG) + r".*?(?:" + re.escape(NOTE_END) + r"\n?|\Z)", re.S)
 
 # The same key=value rule as agent-control's redact() (src/orchestrators.js ASSIGNMENT_RE).
 ASSIGNMENT_RE = re.compile(r"\b([A-Za-z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*)\s*[=:]\s*(\"[^\"]*\"|'[^']*'|\S+)", re.I)
@@ -243,4 +245,10 @@ def warning_line(items, count):
 
 
 def report_note(items, count):
-    return f"\n\n{NOTE_TAG}\n> Note ({NOTE_MARK}): the auto-commit " + format_note(items, count) + ". Commit an intentional pin bump explicitly.\n"
+    return (f"\n\n{NOTE_TAG}\n> Note ({NOTE_MARK}): the auto-commit " + format_note(items, count)
+            + f". Commit an intentional pin bump explicitly.\n{NOTE_END}\n")
+
+
+def strip_report_note(text):
+    """REPORT.md text with every generated skip note (marker to end marker) removed."""
+    return _NOTE_RE.sub("", text or "")
