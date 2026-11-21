@@ -59,7 +59,7 @@ import swarm_bus
 import swarm_gitlink
 import swarm_review
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
