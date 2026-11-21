@@ -221,7 +221,9 @@ MIGRATE_COLUMNS = {
                # Review queue port: a poll agent's declared check-in window (minutes); reachability allows that long.
                ("poll_window_minutes", "INTEGER")],
     "bus_messages": [("wake", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0"), ("noop", "INTEGER NOT NULL DEFAULT 0"),
-                     ("reply_expected", "INTEGER NOT NULL DEFAULT 0")],
+                     ("reply_expected", "INTEGER NOT NULL DEFAULT 0"),
+                     # 0.8.2: informational messages (bus send --fyi) are actionable = 0; every older row and unmarked message is 1.
+                     ("actionable", "INTEGER NOT NULL DEFAULT 1")],
 }
 
 SCHEMA_INDEXES = """
@@ -840,6 +842,8 @@ class Backend:
                 print("bus owner lookup failed:", repr(e), file=sys.stderr, flush=True)
             if agent and self.bus.send_notice(agent, task, dict(self.payload(task, event_id, "owner"), notify_target="bus")):
                 return
+            if agent and task["state"] == "cancelled":
+                return  # an informational cancellation is never worth the legacy fallback wake
         owner = self.bot(task.get("owner"))
         chief = self.chief()
         if owner and owner.get("notify_url"):
@@ -3351,7 +3355,7 @@ def bus_who(who, raw=None, bus=None):
     return bus.resolve(raw) if raw else None
 
 
-@route("POST", r"/bus/send", ("admin", "agent"), "Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `noop`, "
+@route("POST", r"/bus/send", ("admin", "agent"), "Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `actionable`, `noop`, "
        "`reply_expected`, `meta`). Stored first, then woken. Admin sets `from`")
 def r_bus_send(api, who, m, qs, body, h):
     if who["role"] == "agent":
@@ -3361,7 +3365,7 @@ def r_bus_send(api, who, m, qs, body, h):
         frm = f["name"] if f else swarm_bus.clean_from(body.get("from"))
     status, data = api.bus.send({"from": frm, "to": body.get("to"), "body": body.get("body"), "thread": body.get("thread"),
                                  "client_msg_id": body.get("client_msg_id"), "urgent": body.get("urgent") is True,
-                                 "noop": body.get("noop") is True,
+                                 "noop": body.get("noop") is True, "actionable": body.get("actionable"),
                                  "reply_expected": body["reply_expected"] if isinstance(body.get("reply_expected"), bool) else None,
                                  "meta": body.get("meta")})
     return Reply(status, data)

@@ -318,6 +318,30 @@ class AnswerWakeTest(WakeBase):
         # a different thread is unaffected
         self.assertEqual(self.send({"body": "unrelated", "thread": "other"})["wake"], "digest")
 
+    def test_fyi_on_a_question_thread_joins_the_digest_and_is_not_the_answer(self):
+        self.send({"body": "which branch?", "thread": "q3", "reply_expected": True}, frm="clozy", to="polisher")
+        fyi = self.send({"body": "FYI: checks running", "thread": "q3", "actionable": False, "urgent": True})
+        self.assertEqual(fyi["wake"], "digest")
+        m = self.msgs("id = ?", fyi["id"])[0]
+        self.assertEqual((m["actionable"], m["urgent"], m["held"], m["reply_expected"]), (0, 0, 1, 0))
+        self.flush(0)
+        self.assertEqual(self.hook.calls, [])
+        self.flush(61 * MIN)
+        self.assertEqual(self.hook.kinds(), ["bus_digest"])
+        item = self.hook.calls[0]["body"]["messages"][0]
+        self.assertEqual((item["id"], item["actionable"]), (fyi["id"], False))
+        # the real answer still wakes at once
+        self.assertEqual(self.send({"body": "use main", "thread": "q3"}, now=self.t0 + 62 * MIN)["wake"], "now")
+
+    def test_messages_default_to_actionable(self):
+        r = self.send({"body": "normal"})
+        self.assertEqual(self.msgs("id = ?", r["id"])[0]["actionable"], 1)
+        self.assertIs(self.bus.shape_msg(self.msgs("id = ?", r["id"])[0])["actionable"], True)
+
+    def test_actionable_column_migrates_with_default_one(self):
+        cols = {c["name"]: c for c in self.api.s.q("PRAGMA table_info(bus_messages)")}
+        self.assertEqual(cols["actionable"]["dflt_value"], "1")
+
     def test_without_a_question_a_reply_is_a_digest(self):
         self.send({"body": "just saying", "thread": "q2"}, frm="clozy", to="polisher")
         self.assertEqual(self.send({"body": "ok", "thread": "q2"})["wake"], "digest")

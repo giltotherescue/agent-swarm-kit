@@ -4,6 +4,19 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## Unreleased
+
+Informational bus messages, ported from agent-control PR 75 (wake filters). Only the bus part applies to the kit.
+
+- **`bus_messages.actionable`** (default 1, added in place on startup). `actionable: false` (`swarmctl bus send --fyi`) waits for a webhook
+  digest or rides the next wake, even on an unanswered question thread, and never counts as the answer. It is never urgent.
+- **Finish notices:** done, failed, waiting and blocked stay urgent and deduplicated. Cancellation is informational and no longer
+  falls back to the bot webhook or Chief copy when the bus send fails.
+- **Not ported (the kit has nothing to change):** the recovered-watchdog webhook suppression (no `watchdog_alerts` table or clearing
+  notice; the kit's watchdog alerts once per episode key), and relay routing for finish notices (the kit has no relay address,
+  `NOTIFY_DEFAULT_URL` or default target), as are progress notices (see docs/agent-bus.md "Not ported").
+- Docs: docs/agent-bus.md. The kit has no docs/reliability.md. Update `swarm_backend.py`, `swarm_bus.py` and `swarmctl` together.
+
 ## 0.8.1 (2026-11-21)
 
 Guideline for the periodic keep-moving check, from Gil (2026-11-21). Blanket timed wake-ups that message every project bot mostly

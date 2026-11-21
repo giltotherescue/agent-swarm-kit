@@ -144,6 +144,36 @@ class BusNoticeTest(NoticeBase):
         self.assertEqual([m["recipient"] for m in self.bus_msgs()], ["other"])
 
 
+class InformationalNoticeTest(NoticeBase):
+    def cancel(self, tid):
+        self.b.req("POST", "/tasks", {"id": tid, "prompt": "x", "owner": "clozy-bot"})
+        self.api.set_state(self.row(tid), "cancelled", "test")
+
+    def test_cancellation_is_informational_and_never_falls_back(self):
+        self.add_chief()
+        self.cancel("tc1")
+        self.cancel("tc1b")
+        m = self.bus_msgs()
+        self.assertEqual(len(m), 2)
+        self.assertTrue(all((x["urgent"], x["actionable"], x["held"], x["wake"]) == (0, 0, 1, "digest") for x in m))
+        self.api.bus.flush()
+        self.assertEqual(self.hook.calls, [])
+        self.assertEqual(self.notice_rows(), [], "no legacy or Chief fallback for a cancellation")
+
+    def test_cancellation_rides_the_next_done_wake_and_done_stays_deduplicated(self):
+        self.cancel("tc2")
+        self.finished("clozy-bot", "td2")
+        self.assertEqual([c["body"]["kind"] for c in self.hook.calls], [])
+        self.api.bus.flush()
+        self.assertEqual([c["body"]["kind"] for c in self.hook.calls], ["bus_message"])
+        self.assertEqual([x["meta"]["task_id"] for x in self.hook.calls[0]["body"]["pending"]], ["tc2"])
+        done = self.bus_msgs("actionable = 1")
+        self.assertEqual(len(done), 1)
+        self.assertEqual((done[0]["urgent"], done[0]["held"]), (1, 0))
+        self.api.notify_task(self.row("td2"))
+        self.assertEqual(len(self.bus_msgs("actionable = 1")), 1)
+
+
 class LegacyOwnerTest(NoticeBase):
     notices = "legacy"
 
