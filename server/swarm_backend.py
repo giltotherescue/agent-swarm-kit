@@ -702,10 +702,12 @@ class Backend:
     @staticmethod
     def has_push_evidence(task):
         """A pushed branch counts only when the current claim's finish reported it. A branch left over from an earlier claim says
-        nothing about the current head, unless nothing is unpushed. pushed_current NULL (rows from before this field existed) trusts the branch."""
+        nothing about the current head, unless nothing is unpushed. pushed_current NULL (rows from before this field existed) is treated
+        like 0: with known unpushed commits (a positive count) it is not evidence; a missing or zero count keeps the old trust."""
         if not task.get("pushed_branch"):
             return False
-        return task.get("pushed_current") != 0 or (task.get("unpushed_commits") or 0) == 0
+        unpushed = task.get("unpushed_commits")
+        return task.get("pushed_current") == 1 or not (isinstance(unpushed, int) and unpushed > 0)
 
     def landed(self, task):
         """True: on GitHub (and the PR confirmed when one was asked for). False: known not to be. None: unknown (old worker) or not applicable."""

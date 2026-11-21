@@ -54,6 +54,22 @@ class LandedTest(unittest.TestCase):
         self.assertIn("NOT on GitHub: 2 commit(s)", t["question"])
         self.assertIs(self.payload(t)["landed"], False)
 
+    def test_migrated_row_with_null_pushed_current_and_unpushed_commits_is_not_landed(self):
+        t = self.run_task(pushed_branch="agent/old", unpushed_commits=0)   # lands normally
+        self.assertEqual(t["state"], "done")
+        # A row from before the column existed: stale branch, NULL pushed_current, a new head with 2 unpushed commits.
+        self.api.s.run("UPDATE tasks SET pushed_current = NULL, unpushed_commits = 2, head_sha = ? WHERE id = ?", "c" * 40, t["id"])
+        t = self.row(t["id"])
+        self.assertIsNone(t["pushed_current"])
+        self.assertIs(self.api.landed(t), False)
+        self.assertIn("NOT on GitHub: 2 commit(s)", self.api.unlanded_detail(t, "w1"))
+        # The old-worker exemption stays when the count is missing or zero.
+        for n in (None, 0):
+            self.api.s.run("UPDATE tasks SET unpushed_commits = ? WHERE id = ?", n, t["id"])
+            t = self.row(t["id"])
+            self.assertIsNone(self.api.unlanded_detail(t, "w1"))
+            self.assertIs(self.api.landed(t), True)
+
     def test_current_claim_push_still_lands_after_an_earlier_claim(self):
         self.b.req("POST", "/tasks", {"id": "twoclaim2", "prompt": "Fix the thing", "repo": "acme/site", "owner": "clozy-bot"})
         c1 = self.b.claim()

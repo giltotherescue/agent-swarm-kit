@@ -853,7 +853,7 @@ class RetentionTest(BusCase):
 
 
 class PageTest(BusCase):
-    def test_page_is_admin_or_loopback_and_escapes(self):
+    def test_page_is_admin_only_and_escapes(self):
         self.send("chief", expect=201, to="quiet", body="<script>alert(1)</script>")
         status, html = self.b.call("GET", "/bus", tok=ADMIN)
         self.assertEqual(status, 200)
