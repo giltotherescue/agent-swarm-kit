@@ -4,6 +4,15 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## Unreleased: primary/fallback worker routing (agent-control PR 68)
+
+- **Optional primary worker.** New backend setting `SWARM_PRIMARY_WORKER`, empty by default (first-come, as before). When
+  set, other workers take an unpinned task only if the primary is stale (`SWARM_PRIMARY_STALE_SECONDS`, 90), never seen or
+  draining, the task has waited `SWARM_FALLBACK_AFTER_SECONDS` (120), the project is off the primary's allowlist, or the
+  task's workspace is on the claiming worker. Pins (`--worker`) override. See docs/multi-worker.md.
+- **No schema change.** Liveness reuses the existing `workers.last_seen`, already written on every claim and heartbeat.
+- **Not ported:** the `remote-run-broker` socket setting and LaunchAgent example; the kit ships no remote-run broker.
+
 ## Unreleased: review queue (agent-control PR 62)
 
 A simple port of agent-control's review queue. See [docs/review-queue.md](docs/review-queue.md).
