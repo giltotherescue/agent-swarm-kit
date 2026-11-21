@@ -6,29 +6,68 @@ from helpers import Backend  # noqa: F401
 from test_bus_notices import NoticeBase, FAKE_SECRET, CLOZY_HOOK
 
 TOKEN_PATH = "vendor/" + FAKE_SECRET + "/engine"
-SKIPPED = [{"path": TOKEN_PATH, "old": FAKE_SECRET, "new": "bbbbbbb"}, {"path": "engine", "old": "aaaaaaa", "new": "bbbbbbb"}]
+FIXTURE = "TOKEN=abcdefgh12345"   # agent-control PR 63's fixture, unchanged
+SKIPPED = [{"path": TOKEN_PATH, "old": FAKE_SECRET, "new": "bbbbbbb"}, {"path": FIXTURE, "old": FIXTURE, "new": FIXTURE},
+           {"path": "engine", "old": "aaaaaaa", "new": "bbbbbbb"}]
+LEAKS = (FAKE_SECRET, "abcdefgh12345", "abcdefgh", "A1b2C3d4")
+
+
+def leaks(text):
+    return [x for x in LEAKS if x in (text or "")]
 
 
 class BusGitlinkTest(NoticeBase):
-    def test_token_shaped_path_bus_notice_is_delivered_and_redacted(self):
-        t = self.finished("clozy-bot", "tg1", gitlink_skipped=SKIPPED)
+    def report(self, tid):
+        st, out = self.b.call("GET", f"/tasks/{tid}/report")
+        self.assertEqual(st, 200, out)
+        return out.decode() if isinstance(out, bytes) else out if isinstance(out, str) else json.dumps(out)
+
+    def test_token_shaped_path_bus_notice_is_delivered_and_redacted_in_every_sink(self):
+        t = self.finished("clozy-bot", "tg1", report="## Summary\nreview report\n", gitlink_skipped=SKIPPED)
         m = self.bus_msgs()
         self.assertEqual(len(m), 1, "delivered, not rejected by the secret check")
-        self.assertNotIn(FAKE_SECRET, m[0]["body"] + (m[0]["meta"] or ""))
-        self.assertRegex(m[0]["body"], r"WARNING: 2 submodule pin change\(s\).*\[redacted\].*engine \(aaaaaaa -> bbbbbbb\)")
+        self.assertEqual(leaks(m[0]["body"] + (m[0]["meta"] or "")), [])
+        self.assertRegex(m[0]["body"], r"WARNING: 3 submodule pin change\(s\).*\[redacted\].*TOKEN=\[redacted\].*engine \(aaaaaaa -> bbbbbbb\)")
         meta = json.loads(m[0]["meta"])
-        self.assertEqual(meta["gitlink_skipped_count"], 2)
-        self.assertEqual(meta["gitlink_skipped"][0], {"path": "[redacted]", "old": "[redacted]", "new": "bbbbbbb"})
-        # the stored record and the event are redacted too
-        self.assertNotIn(FAKE_SECRET, t["gitlink_skipped"])
+        self.assertEqual(meta["gitlink_skipped_count"], 3)
+        self.assertEqual(meta["gitlink_skipped"][0], {"path": "vendor/[redacted]/engine", "old": "[redacted]", "new": "bbbbbbb"})
+        self.assertEqual(meta["gitlink_skipped"][1], {"path": "TOKEN=[redacted]", "old": "[redacted]", "new": "[redacted]"})
+        # task record
+        self.assertEqual(leaks(t["gitlink_skipped"]), [])
+        self.assertEqual(t["gitlink_skipped_count"], 3)
+        rec = self.b.req("GET", "/tasks/tg1")["task"]
+        self.assertEqual(rec["gitlink_skipped"][2]["path"], "engine")
+        # event
         evs = self.api.s.q("SELECT text FROM events WHERE task_id = 'tg1' AND type = 'publish'")
         self.assertEqual(len(evs), 1)
-        self.assertNotIn(FAKE_SECRET, evs[0]["text"])
+        self.assertEqual(leaks(evs[0]["text"]), [])
         self.assertIn("engine (aaaaaaa -> bbbbbbb)", evs[0]["text"])
-        self.assertEqual(self.b.req("GET", "/tasks/tg1")["task"]["gitlink_skipped"][1]["path"], "engine")
+        # report: original text plus exactly one sanitized note
+        rep = self.report("tg1")
+        self.assertIn("review report", rep)
+        self.assertEqual(rep.count("gitlink pin not committed"), 1)
+        self.assertIn("TOKEN=[redacted]", rep)
+        self.assertEqual(leaks(rep), [])
+
+    def test_report_note_on_publish_failure_without_a_report(self):
+        self.finished("clozy-bot", "tg7", status="failed", outcome="publish_failed", error="git fetch failed",
+                      gitlink_skipped=SKIPPED[1:])
+        rep = self.report("tg7")
+        self.assertIn("gitlink pin not committed", rep)
+        self.assertEqual(leaks(rep), [])
+
+    def test_true_count_survives_colliding_and_overflowing_paths(self):
+        # 204 distinct pins whose display strings collide after redaction; the worker sends at most 200 plus the true count
+        many = [{"path": f"TOKEN=secret{i:04d}xx", "old": "a" * 7, "new": "b" * 7} for i in range(204)]
+        t = self.finished("clozy-bot", "tg8", gitlink_skipped=many[:200], gitlink_skipped_count=204)
+        self.assertEqual(t["gitlink_skipped_count"], 204)
+        meta = json.loads(self.bus_msgs()[0]["meta"])
+        self.assertEqual((meta["gitlink_skipped_count"], len(meta["gitlink_skipped"])), (204, 10))
+        self.assertIn("WARNING: 204 submodule pin change(s)", self.bus_msgs()[0]["body"])
+        self.assertIn("+194 more", self.bus_msgs()[0]["body"])
 
     def test_warning_precedes_a_long_report_excerpt(self):
-        self.finished("clozy-bot", "tg2", report="## Summary\n" + "x" * 3000 + "\n", gitlink_skipped=SKIPPED[1:])
+        self.finished("clozy-bot", "tg2", report="## Summary\n" + "x" * 3000 + "\n", gitlink_skipped=SKIPPED[2:])
         body = self.bus_msgs()[0]["body"]
         self.assertIn("WARNING: 1 submodule pin change(s)", body)
         self.assertLess(body.index("WARNING"), body.index("REPORT.md (excerpt)"))
@@ -47,7 +86,7 @@ class BusGitlinkTest(NoticeBase):
         self.assertTrue(len(meta["gitlink_skipped"][0]["path"]) <= 200)
 
     def test_failed_publish_still_carries_it(self):
-        self.finished("clozy-bot", "tg5", status="failed", outcome="publish_failed", error="git fetch failed", gitlink_skipped=SKIPPED[1:])
+        self.finished("clozy-bot", "tg5", status="failed", outcome="publish_failed", error="git fetch failed", gitlink_skipped=SKIPPED[2:])
         self.assertIn("WARNING: 1 submodule pin", self.bus_msgs()[0]["body"])
 
 
@@ -58,16 +97,17 @@ class LegacyGitlinkTest(NoticeBase):
         self.finished("clozy-bot", "tg6", gitlink_skipped=SKIPPED)
         rows = self.notice_rows()
         self.assertEqual(len(rows), 1)
-        self.assertNotIn(FAKE_SECRET, rows[0]["payload"])
+        self.assertEqual(leaks(rows[0]["payload"]), [])
         p = json.loads(rows[0]["payload"])
-        self.assertEqual(p["gitlink_skipped_count"], 2)
-        self.assertEqual(p["gitlink_skipped"][0]["path"], "[redacted]")
+        self.assertEqual(p["gitlink_skipped_count"], 3)
+        self.assertEqual(p["gitlink_skipped"][0]["path"], "vendor/[redacted]/engine")
+        self.assertEqual(p["gitlink_skipped"][1]["path"], "TOKEN=[redacted]")
         # and over the wire
         import swarm_backend as sb
         calls = []
         sb.deliver_once(self.api, poster=lambda url, data, headers: (calls.append((url, data)) or (200, b"{}")))
         self.assertEqual([c[0] for c in calls], [CLOZY_HOOK])
-        self.assertNotIn(FAKE_SECRET.encode(), calls[0][1])
+        self.assertEqual(leaks(calls[0][1].decode()), [])
 
 
 class EnqueueOptInTest(NoticeBase):
@@ -79,6 +119,29 @@ class EnqueueOptInTest(NoticeBase):
         r2 = self.b.req("POST", "/tasks", {"id": "ta2", "prompt": "no bump", "repo": "acme/site", "push": True})
         self.assertEqual(r2["task"]["allow_gitlink"], 0)
         self.assertNotEqual(r2["task"]["id"], "ta1", "the opt-in is part of the duplicate check")
+
+    def test_allow_gitlink_must_be_a_real_boolean(self):
+        base = {"repo": "acme/site", "push": True}
+        self.assertEqual(self.b.req("POST", "/tasks", dict(base, prompt="a", allow_gitlink="false"))["task"]["allow_gitlink"], 0)
+        self.assertEqual(self.b.req("POST", "/tasks", dict(base, prompt="b", allow_gitlink=False))["task"]["allow_gitlink"], 0)
+        self.assertEqual(self.b.req("POST", "/tasks", dict(base, prompt="c", allow_gitlink="true"))["task"]["allow_gitlink"], 1)
+        for bad in ("maybe", 2, [True], {"x": 1}):
+            st, out = self.b.call("POST", "/tasks", dict(base, prompt=f"d{bad!r}", allow_gitlink=bad))
+            self.assertEqual(st, 400, (bad, out))
+            self.assertIn("allow_gitlink", out["error"])
+
+
+class WorkerSourceTest(unittest.TestCase):
+    """The worker sanitizes the collector's list before the finish request carries it."""
+    def test_decide_sends_only_sanitized_entries_and_the_true_count(self):
+        import test_bus_worker as tbw
+        import swarm_worker as sw
+        raw = SKIPPED + [{"path": f"p{i}", "old": "", "new": ""} for i in range(250)]
+        state, extra = sw.Runner.decide(tbw.Stub(), 75, 0, "claude", "m", {"files": {}, "git": {"head": "a" * 40, "gitlink_skipped": raw}})
+        self.assertEqual(leaks(json.dumps(extra)), [])
+        self.assertEqual(extra["gitlink_skipped_count"], len(raw))
+        self.assertEqual(len(extra["gitlink_skipped"]), 200)
+        self.assertEqual(extra["gitlink_skipped"][1]["path"], "TOKEN=[redacted]")
 
 
 if __name__ == "__main__":

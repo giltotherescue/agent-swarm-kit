@@ -992,7 +992,7 @@ def main():
     e.add_argument("--command", help="script task: run this shell command with no model")
     e.add_argument("--attach", action="append"); e.add_argument("--key", help="idempotency key: same key returns the same task")
     e.add_argument("--allow-duplicate", action="store_true")
-    e.add_argument("--allow-gitlink", action="store_true", help="let the auto-commit keep submodule pin changes staged (default: left uncommitted)")
+    e.add_argument("--allow-gitlink", action="store_true", help="mark that submodule pin bumps are intended (metadata for a worker that auto-commits; the stock worker never auto-commits, so commit a pin bump yourself)")
     e.add_argument("--follow-up", metavar="TASK_ID", help="continue earlier work: same repo, branch, flags and folder")
     e.add_argument("--parent", help="link to a related task (just a label; use --follow-up to continue work)")
     e.add_argument("--worker", help="pin this task to a named worker (optional)")

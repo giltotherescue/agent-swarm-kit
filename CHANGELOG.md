@@ -8,11 +8,10 @@ See docs/updating-the-kit.md for how to update.
 
 Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).
 
-- **Submodule gitlinks are never auto-committed.** Wherever the kit commits leftover work (today the project-log export commit), added, modified and deleted gitlinks (index mode 160000) are unstaged and left in the worktree, found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A git error or a gitlink still staged aborts the commit.
-- **Skips are recorded.** A worker may report `gitlink_skipped` (path, old sha, new sha) on finish; it is stored on the task, posted as a `publish` event and added to bus notices (a WARNING line ahead of the report excerpt) and legacy webhook payloads (`gitlink_skipped`, at most 10 entries, and `gitlink_skipped_count` for all).
-- **Redacted before truncation.** Every gitlink field goes through the secret patterns before it is cut and before storage, bus or webhook; a secret-looking value becomes `[redacted]`. A token-shaped path no longer gets the bus notice rejected.
-- **Opt in for a deliberate pin bump:** `swarmctl enqueue --allow-gitlink` (task field `allow_gitlink`, inherited by follow-ups) or `AGENT_ALLOW_GITLINK=1`.
-- Not ported 1:1: the kit's worker never commits leftover work itself (it only warns about uncommitted files), so there is no worker-side commit to guard. See git-policy.md.
+- **Submodule gitlinks are never auto-committed.** The kit's one auto-commit, the project-log export, runs in a copy of the index and unstages added, modified and deleted gitlinks (index mode 160000), found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A pin replaced by files, a git error, a 60-second git timeout or a gitlink still staged aborts the commit and leaves the caller's index untouched. The stock worker still never commits leftover work.
+- **Skips are recorded.** A finish may carry `gitlink_skipped` (path, old sha, new sha; at most 200) and `gitlink_skipped_count` (the true total). They are stored on the task, posted as a `publish` event, appended once to the stored REPORT.md (also on publish failures) and added to bus notices (a WARNING line ahead of the report excerpt) and legacy webhook payloads (at most 10 entries, plus the true count).
+- **Redacted at the source, before truncation.** Every gitlink field and every log or error line that names one goes through the secret patterns and agent-control's key=value rule (`TOKEN=...` becomes `TOKEN=[redacted]`) on the full value, in the worker before sending, in the export before logging, and again in the backend before storage, bus or webhook. A token-shaped path no longer gets the bus notice rejected.
+- **`swarmctl enqueue --allow-gitlink`** records that a pin bump is intended (task field `allow_gitlink`, a JSON boolean, inherited by follow-ups; `"false"` and other non-boolean values never opt in). It is metadata for a worker that auto-commits; with the stock kit, commit an intentional pin bump explicitly.
 
 ## 0.8.0 (2026-11-21)
 

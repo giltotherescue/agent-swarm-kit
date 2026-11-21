@@ -1,19 +1,66 @@
 """Auto-commits never stage submodule gitlinks (agent-control PR 63, ported).
 
-Every place the kit commits leftover work for someone (today: the project-log export folder, and any future
-leftover-work commit) goes through commit_leftover(). After `git add -A` it unstages every staged entry whose
-index mode is 160000 on either side (added, modified, deleted), found from `git diff --cached --raw -z`, so it
-does not depend on .gitmodules. Opt in for an intentional pin bump with allow_gitlink=True (task field
-allow_gitlink, `swarmctl enqueue --allow-gitlink`) or AGENT_ALLOW_GITLINK=1 in the environment.
-Standard library only.
+The stock kit worker never commits leftover work; it publishes only the agent's own commits. The one place the kit
+commits for someone is the backend's project-log export folder, and it goes through commit_leftover(). That runs in a
+separate index (the caller's index is untouched unless the commit succeeds): `git add -A`, then every staged entry whose
+index mode is 160000 on either side (added, modified, deleted) is unstaged, found from `git diff --cached --raw -z`, so
+.gitmodules is not needed. A gitlink replaced by a directory of files, any git error, a timeout, or a gitlink still
+staged after unstaging aborts the commit (fails closed).
+
+`allow_gitlink` (task field, `swarmctl enqueue --allow-gitlink`) and AGENT_ALLOW_GITLINK=1 are metadata for a caller
+that auto-commits on a task's behalf; the stock export always passes allow_gitlink=False.
+
+Every gitlink field leaving this module (logs, errors, finish requests, task records, notices, reports) goes through
+redact() first, on the full value, and only then is cut. Standard library only.
 """
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 
 GITLINK_MODE = "160000"
 MAX_ITEMS = 10           # entries carried in a notice; the count always covers all of them
-MAX_STORED = 200
+MAX_STORED = 200         # entries kept on the task record; the count is stored separately
+GIT_TIMEOUT = 60         # seconds per git command, like the export's old limits
 REDACTED = "[redacted]"
+NOTE_MARK = "gitlink pin not committed"
+
+# The same key=value rule as agent-control's redact() (src/orchestrators.js ASSIGNMENT_RE).
+ASSIGNMENT_RE = re.compile(r"\b([A-Za-z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*)\s*[=:]\s*(\"[^\"]*\"|'[^']*'|\S+)", re.I)
+_patterns_cache = None
+
+
+def load_patterns():
+    """config/secret-patterns.txt (or SWARM_SECRET_PATTERNS_FILE): the list the runner and backend use."""
+    global _patterns_cache
+    if _patterns_cache is None:
+        path = os.environ.get("SWARM_SECRET_PATTERNS_FILE") or os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "..", "config", "secret-patterns.txt")
+        pats = []
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    line = line.split("  #", 1)[0].strip()
+                    if line and not line.startswith("#"):
+                        pats.append(re.compile(line))
+        except (OSError, re.error):
+            pass
+        _patterns_cache = pats
+    return _patterns_cache
+
+
+def redact(text, patterns=None):
+    """Replace secret-pattern matches with [redacted] and key=value secrets with KEY=[redacted]."""
+    s = str(text if text is not None else "")
+    for p in (load_patterns() if patterns is None else patterns):
+        s = p.sub(REDACTED, s)
+    return ASSIGNMENT_RE.sub(lambda m: m.group(1) + "=" + REDACTED, s)
+
+
+def _hit(text, patterns):
+    return any(p.search(text) for p in patterns) or bool(
+        [m for m in ASSIGNMENT_RE.finditer(text) if not m.group(2).strip("\"'").startswith(REDACTED)])
 
 
 def gitlink_allowed(task=None, env=None):
@@ -24,12 +71,18 @@ def gitlink_allowed(task=None, env=None):
     return v is True or str(v).strip().lower() in ("1", "true", "yes")
 
 
-def _git_raw(wd, args, check=True):
-    """git with raw bytes and literal pathspecs. Fails closed on error."""
-    r = subprocess.run(["git", *args], cwd=str(wd), capture_output=True, env=dict(os.environ, GIT_LITERAL_PATHSPECS="1"))
+def _git_raw(wd, args, check=True, index=None):
+    """git with raw bytes, literal pathspecs and a timeout. Fails closed; error text is redacted."""
+    env = dict(os.environ, GIT_LITERAL_PATHSPECS="1")
+    if index:
+        env["GIT_INDEX_FILE"] = index
+    name = "git " + " ".join(a for a in args[:3] if isinstance(a, str))
+    try:
+        r = subprocess.run(["git", *args], cwd=str(wd), capture_output=True, env=env, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{name} timed out after {GIT_TIMEOUT} seconds")
     if check and r.returncode:
-        raise RuntimeError("git " + " ".join(a for a in args[:3] if isinstance(a, str)) + " failed: "
-                           + r.stderr.decode("utf-8", "replace").strip()[-300:])
+        raise RuntimeError(name + " failed: " + redact(r.stderr.decode("utf-8", "replace").strip()[-300:]))
     return r
 
 
@@ -38,10 +91,9 @@ def _display_path(raw):
     return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in text)
 
 
-def staged_gitlinks(wd):
-    """Staged gitlink changes from index modes: [{"path","old","new","raw"}], shas short, "" when absent.
-    --ignore-submodules=none overrides diff.ignoreSubmodules / submodule.<name>.ignore. Raises on git errors."""
-    r = _git_raw(wd, ["diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none"])
+def _staged(wd, index=None):
+    """All staged entries: [(old_mode, new_mode, old_sha, new_sha, raw_path)]."""
+    r = _git_raw(wd, ["diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none"], index=index)
     parts = r.stdout.split(b"\0")
     out, i = [], 0
     while i + 1 < len(parts):
@@ -52,86 +104,126 @@ def staged_gitlinks(wd):
         f = head[1:].decode().split()
         if len(f) < 4:
             raise RuntimeError("unparseable git diff --raw entry")
-        om, nm, osha, nsha = f[:4]
-        if GITLINK_MODE not in (om, nm):
-            continue
-        zero = lambda x: not x.strip("0")  # noqa: E731
-        out.append({"path": _display_path(path), "raw": path,
-                    "old": "" if om != GITLINK_MODE or zero(osha) else osha[:7],
-                    "new": "" if nm != GITLINK_MODE or zero(nsha) else nsha[:7]})
+        out.append((f[0], f[1], f[2], f[3], path))
     return out
 
 
-def public_gitlink(g):
-    return {k: g[k] for k in ("path", "old", "new")}
+def staged_gitlinks(wd, index=None):
+    """Staged gitlink changes from index modes: [{"path","old","new","raw"}], shas short, "" when absent. Raw, unredacted:
+    callers must pass the result through public_gitlinks() before it leaves this module."""
+    zero = lambda x: not x.strip("0")  # noqa: E731
+    return [{"path": _display_path(p), "raw": p,
+             "old": "" if om != GITLINK_MODE or zero(osha) else osha[:7],
+             "new": "" if nm != GITLINK_MODE or zero(nsha) else nsha[:7]}
+            for om, nm, osha, nsha, p in _staged(wd, index) if GITLINK_MODE in (om, nm)]
 
 
-def format_note(items):
-    return "submodule pin change(s) left uncommitted: " + ", ".join(
-        f"{g['path']} ({g.get('old') or 'none'} -> {g.get('new') or 'none'})" for g in items)
+def unstage_gitlinks(wd, index=None):
+    """Unstage staged gitlink changes, leaving them in the worktree. Returns those unstaged (raw).
 
-
-def unstage_gitlinks(wd):
-    """Unstage staged gitlink changes, leaving them in the worktree. Returns those unstaged."""
-    items = staged_gitlinks(wd)
+    Never touches any other staged path: a gitlink replaced by files (engine -> engine/x) cannot be unstaged without
+    unstaging the files too, so that raises; and the set of other staged paths is checked unchanged afterwards."""
+    entries = _staged(wd, index)
+    items = staged_gitlinks(wd, index)
     if not items:
         return []
-    has_head = _git_raw(wd, ["rev-parse", "--verify", "-q", "HEAD"], check=False).returncode == 0
+    links = {g["raw"] for g in items}
+    others = sorted(p for om, nm, _o, _n, p in entries if p not in links)
     for g in items:
-        _git_raw(wd, ["reset", "-q", "--", g["raw"]] if has_head else ["rm", "-q", "--cached", "-f", "--", g["raw"]])
+        if any(p.startswith(g["raw"] + b"/") for p in others):
+            raise RuntimeError("refusing to auto-commit: a submodule pin was replaced by files at "
+                               + sanitize_field(g["path"], 200) + "; commit it explicitly")
+    has_head = _git_raw(wd, ["rev-parse", "--verify", "-q", "HEAD"], check=False, index=index).returncode == 0
+    for g in items:
+        _git_raw(wd, ["reset", "-q", "--", g["raw"]] if has_head else ["rm", "-q", "--cached", "-f", "--", g["raw"]], index=index)
+    if sorted(p for *_x, p in _staged(wd, index) if p not in links) != others:
+        raise RuntimeError("refusing to auto-commit: unstaging a submodule pin changed other staged paths")
     return items
 
 
 def commit_leftover(wd, message, allow_gitlink=None, skipped=None, log=None, identity=("swarm-backend", "swarm-backend@localhost")):
     """`git add -A` then commit, never staging gitlinks unless allowed. Returns True if a commit was made.
 
-    Skipped pins are appended to `skipped` ({"path","old","new"}) and reported through `log`. If git fails or a
-    gitlink is still staged after unstaging, this raises instead of committing (fail closed)."""
+    Works in a copy of the index; the caller's index is replaced only after a successful commit, so a failure leaves
+    it exactly as it was. Skipped pins are appended to `skipped` already sanitized ({"path","old","new"}) and reported
+    through `log` (sanitized). Raises RuntimeError (redacted text) instead of committing on any problem."""
     if allow_gitlink is None:
         allow_gitlink = gitlink_allowed()
     if not os.path.isdir(os.path.join(str(wd), ".git")):
         _git_raw(wd, ["init", "-q"])
-    _git_raw(wd, ["add", "-A"])
-    if not allow_gitlink:
-        dropped = unstage_gitlinks(wd)
-        if dropped:
-            pub = [public_gitlink(g) for g in dropped]
-            if skipped is not None:
-                skipped.extend(pub)
-            if log:
-                log(f"{message}: " + format_note(pub))
-        left = staged_gitlinks(wd)  # re-scan right before committing
-        if left:
-            raise RuntimeError("refusing to commit: gitlink(s) still staged after unstage: " + ", ".join(g["path"] for g in left))
-    if not _git_raw(wd, ["diff", "--cached", "--name-only"]).stdout.strip():
-        return False
-    _git_raw(wd, ["-c", "user.name=" + identity[0], "-c", "user.email=" + identity[1], "commit", "-q", "-m", message])
-    return True
+    git_dir = _git_raw(wd, ["rev-parse", "--absolute-git-dir"]).stdout.decode().strip()
+    real = os.path.join(git_dir, "index")
+    fd, tmp = tempfile.mkstemp(prefix="index.leftover.", dir=git_dir)
+    os.close(fd)
+    try:
+        if os.path.exists(real):
+            shutil.copy2(real, tmp)
+        else:
+            os.remove(tmp)
+        _git_raw(wd, ["add", "-A"], index=tmp)
+        if not allow_gitlink:
+            dropped = unstage_gitlinks(wd, index=tmp)
+            if dropped:
+                pub = public_gitlinks(dropped, limit=MAX_STORED)
+                if skipped is not None:
+                    skipped.extend(pub["items"])
+                if log:
+                    log(f"{message}: " + format_note(pub["items"][:MAX_ITEMS], pub["count"]))
+            left = staged_gitlinks(wd, index=tmp)  # re-scan right before committing
+            if left:
+                raise RuntimeError("refusing to commit: gitlink(s) still staged after unstage: "
+                                   + ", ".join(sanitize_field(g["path"], 200) for g in left[:MAX_ITEMS]))
+        if not _git_raw(wd, ["diff", "--cached", "--name-only"], index=tmp).stdout.strip():
+            return False
+        _git_raw(wd, ["-c", "user.name=" + identity[0], "-c", "user.email=" + identity[1], "commit", "-q", "-m", message], index=tmp)
+        os.replace(tmp, real)
+        return True
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
-def sanitize_gitlinks(items, secret_hit, limit=MAX_ITEMS):
-    """Notice-safe copy of a gitlink_skipped list: {"count", "items"}.
+def sanitize_field(v, n, patterns=None):
+    """One field, safe to show: control characters stripped, redacted on the FULL value, then cut to n. A value whose
+    redacted form does not fit, or whose cut still looks secret, becomes [redacted] whole."""
+    pats = load_patterns() if patterns is None else patterns
+    s = "".join(" " if (ord(c) < 32 or ord(c) == 127) else c for c in str(v if v is not None else ""))
+    r = redact(s, pats)
+    if r != s and len(r) > n:
+        return REDACTED
+    r = r[:n]
+    return REDACTED if _hit(r, pats) else r
 
-    Each field is control-stripped, then checked with the backend's secret patterns BEFORE truncation (a value that
-    looks like a secret is replaced whole by "[redacted]"), truncated, and checked again (a cut can leave a fragment).
-    The count covers every entry, shown or not."""
+
+def public_gitlinks(items, limit=MAX_ITEMS, patterns=None, count=None):
+    """Sanitized copy of a gitlink list: {"count", "items"}. count is the true number of skipped pins (all entries, or
+    `count` when the caller knows a larger true total); items holds at most `limit` sanitized entries."""
     raw = [g for g in (items if isinstance(items, list) else []) if isinstance(g, dict)]
+    total = max(len(raw), count) if isinstance(count, int) and not isinstance(count, bool) else len(raw)
+    return {"count": total,
+            "items": [{"path": sanitize_field(g.get("path"), 200, patterns), "old": sanitize_field(g.get("old"), 12, patterns),
+                       "new": sanitize_field(g.get("new"), 12, patterns)} for g in raw[:limit]]}
 
-    def clip(v, n):
-        s = "".join(" " if (ord(c) < 32 or ord(c) == 127) else c for c in str(v if v is not None else ""))
-        if secret_hit(s):
-            return REDACTED
-        s = s[:n]
-        return REDACTED if secret_hit(s) else s
-    return {"count": len(raw),
-            "items": [{"path": clip(g.get("path"), 200), "old": clip(g.get("old"), 12), "new": clip(g.get("new"), 12)}
-                      for g in raw[:limit]]}
+
+def sanitize_gitlinks(items, secret_hit=None, limit=MAX_ITEMS, patterns=None, count=None):
+    """Backward-compatible name for public_gitlinks (secret_hit is ignored; patterns carry the rules)."""
+    return public_gitlinks(items, limit=limit, patterns=patterns, count=count)
+
+
+def format_note(items, count=None):
+    """Note text from already sanitized items."""
+    count = len(items) if count is None else count
+    more = f", +{count - len(items)} more" if count > len(items) else ""
+    return f"{count} submodule pin change(s) left uncommitted: " + ", ".join(
+        f"{g['path']} ({g.get('old') or 'none'} -> {g.get('new') or 'none'})" for g in items) + more
 
 
 def warning_line(items, count):
     if not items:
         return ""
-    lst = ", ".join(f"{g['path']} ({g.get('old') or 'none'} -> {g.get('new') or 'none'})" for g in items)
-    more = f", +{count - len(items)} more" if count > len(items) else ""
-    return (f"WARNING: {count} submodule pin change(s) were NOT committed by the auto-commit: {lst}{more}. "
-            "Re-queue with allow_gitlink to commit a pin bump.")[:900]
+    return ("WARNING: " + format_note(items, count).replace("left uncommitted", "were NOT committed by the auto-commit")
+            + ". Commit an intentional pin bump explicitly.")[:900]
+
+
+def report_note(items, count):
+    return f"\n\n> Note ({NOTE_MARK}): the auto-commit " + format_note(items, count) + ". Commit an intentional pin bump explicitly.\n"

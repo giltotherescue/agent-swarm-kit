@@ -34,6 +34,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import swarm_gitlink  # noqa: E402
+
 VERSION = "0.8.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
@@ -687,7 +690,10 @@ class Runner(threading.Thread):
         if g.get("head"):
             extra["head_sha"] = g["head"]
         if g.get("gitlink_skipped"):
-            extra["gitlink_skipped"] = g["gitlink_skipped"]  # the backend redacts it before storing
+            # Sanitize here, before the finish request (and any log) carries it; the backend sanitizes again.
+            gl = swarm_gitlink.public_gitlinks(g["gitlink_skipped"], limit=swarm_gitlink.MAX_STORED,
+                                               count=g.get("gitlink_skipped_count"))
+            extra["gitlink_skipped"], extra["gitlink_skipped_count"] = gl["items"], gl["count"]
         if code == 75:
             return "limit", extra
         status_raw = safe_read(self.outbox, "AGENT_STATUS", 20000) if fresh("AGENT_STATUS") else None

@@ -109,8 +109,8 @@ The database stays as the newer version left it. Newer versions only add tables 
 
 Auto-commits never stage submodule pins (agent-control PR 63). Nothing to do unless you bump a submodule on purpose; see [git-policy.md](git-policy.md).
 
-- Pull and restart the backend (the database gets two new task columns on start) and the workers. `server/swarm_gitlink.py` is a new file; the usual copy step picks it up.
-- If a task must commit a submodule pin bump, queue it with `swarmctl enqueue --allow-gitlink` (or set `AGENT_ALLOW_GITLINK=1` in `/etc/agent-swarm/swarm.env` for every task).
+- Pull and restart the backend (the database gets three new task columns on start) and the workers. `server/swarm_gitlink.py` is a new file; the usual copy step picks it up.
+- The stock worker never auto-commits, so nothing changes for task commits. Commit an intentional submodule pin bump explicitly. `swarmctl enqueue --allow-gitlink` only records that a bump is intended, for a worker that auto-commits; it does not commit a pin by itself.
 
 ## Upgrading to 0.8.0
 

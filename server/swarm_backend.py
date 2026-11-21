@@ -194,7 +194,7 @@ MIGRATE_COLUMNS = {
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
               ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"),
               # 0.8.1 (agent-control PR 63): opt-in for pin bumps; submodule pins the auto-commit left uncommitted (JSON list)
-              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT")],
+              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT"), ("gitlink_skipped_count", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -419,6 +419,20 @@ class Reply:
 
 def new_id(prefix="t"):
     return prefix + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + secrets.token_hex(3)
+
+
+def parse_flag(value, field):
+    """A yes/no API field: a JSON boolean, 0/1, or the strings true/false/1/0/yes/no. Anything else is a 400, so "false"
+    can never switch something on."""
+    if value is None or value is False:
+        return 0
+    if value is True:
+        return 1
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "false", "0", "no", ""):
+        return 1 if value.strip().lower() in ("true", "1", "yes") else 0
+    raise ApiError(400, f"{field} must be true or false")
 
 
 def clean_text(value, limit, field):
@@ -693,12 +707,23 @@ class Backend:
         }
         if unread and task["state"] in TERMINAL:
             p["unread_messages"] = unread
-        gl = swarm_gitlink.sanitize_gitlinks(self.stored_gitlinks(task), self.secret_hit)
+        gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(task), patterns=self.secret_patterns,
+                                           count=task.get("gitlink_skipped_count"))
         if gl["count"]:
             p["gitlink_skipped"], p["gitlink_skipped_count"] = gl["items"], gl["count"]
         if task["state"] == "waiting":
             p["question"] = task.get("question")
         return p
+
+    def append_report_note(self, task_id, note):
+        """Add the (sanitized) gitlink skip note to the task's stored REPORT.md once; a task without a report gets one."""
+        f = self.s.one("SELECT name, data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", task_id)
+        text = bytes(f["data"]).decode(errors="replace") if f else ""
+        if swarm_gitlink.NOTE_MARK in text:
+            return
+        data = (text.rstrip() + note).lstrip("\n").encode()
+        self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
+                   task_id, "report", f["name"] if f else "REPORT.md", data, len(data), now())
 
     @staticmethod
     def stored_gitlinks(t):
@@ -880,7 +905,7 @@ class Backend:
         report_only = 1 if b.get("report_only") or command else 0
         untrusted = 1 if (b.get("untrusted_input") or b.get("untrusted")) else 0
         push_main = 1 if b.get("push_main") else 0
-        allow_gitlink = 1 if b.get("allow_gitlink") else 0
+        allow_gitlink = parse_flag(b.get("allow_gitlink"), "allow_gitlink")
         push = 1 if (b.get("push") or b.get("open_pr") or push_main) else 0
         if b.get("pr_number") is not None and not (report_only or untrusted):
             push = 1  # working on an existing PR means updating it
@@ -1334,13 +1359,16 @@ class Backend:
                           pending_answer=None)
             skipped = b.get("gitlink_skipped")
             if isinstance(skipped, list) and skipped:
-                # Redact (then truncate) before anything is stored: the task record, the event and every notice see only this.
-                gl = swarm_gitlink.sanitize_gitlinks(skipped, self.secret_hit, limit=swarm_gitlink.MAX_STORED)
-                seen = {g["path"]: g for g in self.stored_gitlinks(t)}
-                seen.update({g["path"]: g for g in gl["items"]})   # by path, latest wins
-                common["gitlink_skipped"] = json.dumps(list(seen.values())[:swarm_gitlink.MAX_STORED])
-                self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(gl["items"][:swarm_gitlink.MAX_ITEMS])
-                           + (f" (+{gl['count'] - swarm_gitlink.MAX_ITEMS} more)" if gl["count"] > swarm_gitlink.MAX_ITEMS else ""))
+                # Redact on the full value (then cut) before anything is stored: the task record, the event, the report note
+                # and every notice see only this. The latest finish's observation replaces an earlier one (it describes the
+                # worktree now); the true count is kept apart from the bounded list, never re-derived from display strings.
+                gl = swarm_gitlink.public_gitlinks(skipped, limit=swarm_gitlink.MAX_STORED, patterns=self.secret_patterns,
+                                                   count=b.get("gitlink_skipped_count"))
+                common["gitlink_skipped"] = json.dumps(gl["items"])
+                common["gitlink_skipped_count"] = gl["count"]
+                shown = gl["items"][:swarm_gitlink.MAX_ITEMS]
+                self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(shown, gl["count"]))
+                self.append_report_note(task_id, swarm_gitlink.report_note(shown, gl["count"]))
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
@@ -2738,7 +2766,8 @@ def git_commit(folder, message):
         swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
                                       log=lambda m: print("log export:", m, file=sys.stderr, flush=True))
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-        print("log export: git commit failed:", repr(e), file=sys.stderr, flush=True)
+        # commit_leftover already redacts its own messages; redact again so an OSError's path text is covered too.
+        print("log export: git commit failed:", type(e).__name__, swarm_gitlink.redact(str(e)), file=sys.stderr, flush=True)
 
 
 class FailLimiter:

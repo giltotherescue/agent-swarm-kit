@@ -125,10 +125,10 @@ class GitlinkTests(Base):
     def test_scan_error_fails_closed(self):
         (self.wd / "new.txt").write_text("n\n")
         orig, head = gl._git_raw, g(self.wd, "rev-parse", "HEAD")
-        def boom(wd, args, check=True):
+        def boom(wd, args, check=True, index=None):
             if args[:2] == ["diff", "--cached"] and "--raw" in args:
                 raise RuntimeError("simulated")
-            return orig(wd, args, check)
+            return orig(wd, args, check, index)
         gl._git_raw = boom
         try:
             with self.assertRaises(RuntimeError):
@@ -140,8 +140,10 @@ class GitlinkTests(Base):
     def test_still_staged_refuses_commit(self):
         (self.wd / "new.txt").write_text("n\n")
         orig, head = gl.unstage_gitlinks, g(self.wd, "rev-parse", "HEAD")
-        def readd(wd):
-            r = orig(wd); g(self.wd, "add", "engine"); return r
+        def readd(wd, index=None):
+            r = orig(wd, index=index)
+            subprocess.run(["git", "add", "engine"], cwd=str(self.wd), check=True, env=dict(os.environ, GIT_INDEX_FILE=index))
+            return r
         gl.unstage_gitlinks = readd
         try:
             with self.assertRaises(RuntimeError):
@@ -180,19 +182,131 @@ class GitlinkTests(Base):
         self.assertTrue(self.pin_modified())
 
 
+class IndexSafetyTests(Base):
+    def index_snapshot(self):
+        return g(self.wd, "ls-files", "-s")
+
+    def test_gitlink_replaced_by_files_fails_closed_and_keeps_index(self):
+        # tracked pin "engine" replaced by a plain directory holding a staged file, plus an unrelated staged "keep"
+        g(self.wd, "submodule", "deinit", "-q", "-f", "engine")
+        g(self.wd, "rm", "-q", "--cached", "engine")
+        import shutil; shutil.rmtree(self.wd / "engine")
+        (self.wd / "engine").mkdir(); (self.wd / "engine" / "new.txt").write_text("n\n")
+        (self.wd / "keep").write_text("k\n")
+        g(self.wd, "add", "engine/new.txt", "keep")
+        before, head = self.index_snapshot(), g(self.wd, "rev-parse", "HEAD")
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_commit(allow_gitlink=False)
+        self.assertIn("replaced by files", str(cm.exception))
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.index_snapshot(), before, "the caller's index is unchanged: engine/new.txt still staged")
+        self.assertIn("engine/new.txt", g(self.wd, "diff", "--cached", "--name-only").split())
+
+    def test_failure_leaves_caller_index_unchanged(self):
+        (self.wd / "new.txt").write_text("n\n")
+        before = self.index_snapshot()
+        orig = gl.unstage_gitlinks
+        gl.unstage_gitlinks = lambda wd, index=None: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.run_commit(allow_gitlink=False)
+        finally:
+            gl.unstage_gitlinks = orig
+        self.assertEqual(self.index_snapshot(), before)
+        self.assertFalse([n for n in os.listdir(self.wd / ".git") if n.startswith("index.leftover.")], "temp index removed")
+
+    def test_success_updates_the_real_index(self):
+        (self.wd / "new.txt").write_text("n\n")
+        self.assertTrue(self.run_commit(allow_gitlink=False))
+        self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "", "index matches the new HEAD")
+        self.assertIn("new.txt", g(self.wd, "ls-files").split())
+
+    def test_git_timeout_fails_closed(self):
+        (self.wd / "new.txt").write_text("n\n")
+        head, before = g(self.wd, "rev-parse", "HEAD"), self.index_snapshot()
+        real_run = subprocess.run
+        def slow(cmd, *a, **k):
+            if cmd[:2] == ["git", "add"]:
+                self.assertEqual(k.get("timeout"), gl.GIT_TIMEOUT)
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            return real_run(cmd, *a, **k)
+        gl.subprocess.run = slow
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                self.run_commit(allow_gitlink=False)
+        finally:
+            gl.subprocess.run = real_run
+        self.assertIn("timed out after 60 seconds", str(cm.exception))
+        self.assertEqual((g(self.wd, "rev-parse", "HEAD"), self.index_snapshot()), (head, before))
+
+
+class SourceRedactionTests(unittest.TestCase):
+    """A pin whose path holds a secret: skipped list, log line and error text are redacted at the source."""
+    FIXTURE = "TOKEN=abcdefgh12345"   # agent-control PR 63's fixture
+    GHP = "ghp_" + "A1b2C3d4" * 5
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        self.wd = t / "wd"; init(self.wd); commit(self.wd, "README.md", "r\n")
+        for name in (self.FIXTURE, "v/" + self.GHP):
+            d = self.wd / name; d.mkdir(parents=True); init(d); commit(d, "x", "x\n")
+        (self.wd / "f.txt").write_text("f\n")
+
+    def test_skipped_and_log_are_redacted(self):
+        skipped, logs = [], []
+        self.assertTrue(gl.commit_leftover(self.wd, "m", allow_gitlink=False, skipped=skipped, log=logs.append))
+        blob = repr(skipped) + "\n".join(logs)
+        self.assertNotIn("abcdefgh12345", blob)
+        self.assertNotIn("A1b2C3d4", blob)
+        self.assertEqual(sorted(s["path"] for s in skipped), ["TOKEN=[redacted]", "v/[redacted]"])
+
+    def test_backend_export_stderr_is_redacted(self):
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            sb.git_commit(str(self.wd), "Project log export")
+        self.assertIn("2 submodule pin change(s) left uncommitted", err.getvalue())
+        self.assertNotIn("abcdefgh12345", err.getvalue())
+        self.assertNotIn("A1b2C3d4", err.getvalue())
+
+    def test_error_diagnostics_are_redacted(self):
+        orig = gl.unstage_gitlinks
+        gl.unstage_gitlinks = lambda wd, index=None: []   # leaves the pins staged -> "still staged" error
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                gl.commit_leftover(self.wd, "m", allow_gitlink=False)
+        finally:
+            gl.unstage_gitlinks = orig
+        self.assertNotIn("abcdefgh12345", str(cm.exception))
+        self.assertNotIn("A1b2C3d4", str(cm.exception))
+
+
 class SanitizeTests(unittest.TestCase):
     hit = staticmethod(lambda t: sb.Backend.secret_hit(type("B", (), {"secret_patterns": sb.load_secret_patterns()})(), t))
     TOKEN = "ghp_" + "A1b2C3d4" * 5
 
     def test_redacts_before_truncating_and_counts_all(self):
-        # token starts at char 190: a 200-char cut would leave a fragment too short to match the pattern.
+        # token starts at char 190: a 200-char cut first would leave a fragment too short to match the pattern.
         path = "v" * 190 + self.TOKEN
         out = gl.sanitize_gitlinks([{"path": path, "old": self.TOKEN, "new": "bbbbbbb"}] * 25, self.hit)
         self.assertEqual(out["count"], 25)
         self.assertEqual(len(out["items"]), 10)
         for it in out["items"]:
-            self.assertEqual((it["path"], it["old"], it["new"]), ("[redacted]", "[redacted]", "bbbbbbb"))
+            self.assertEqual((it["path"], it["old"], it["new"]), ("v" * 190 + "[redacted]", "[redacted]", "bbbbbbb"))
         self.assertNotIn("A1b2C3d4", repr(out))
+
+    def test_assignment_fixture_from_pr63(self):
+        out = gl.public_gitlinks([{"path": "TOKEN=abcdefgh12345", "old": "TOKEN=abcdefgh12345", "new": "a"},
+                                  {"path": "x/API_KEY: 'zz9zz9zz'/y", "old": "b", "new": "c"}])
+        self.assertNotIn("abcdefgh12345", repr(out))
+        self.assertNotIn("zz9zz9zz", repr(out))
+        self.assertEqual(out["items"][0], {"path": "TOKEN=[redacted]", "old": "[redacted]", "new": "a"})
+        self.assertEqual(out["items"][1]["path"], "x/API_KEY=[redacted]/y")
+
+    def test_true_count_is_kept_apart_from_the_list(self):
+        out = gl.public_gitlinks([{"path": "p", "old": "", "new": ""}] * 3, limit=2, count=204)
+        self.assertEqual((out["count"], len(out["items"])), (204, 2))
 
     def test_bounded_and_control_stripped(self):
         out = gl.sanitize_gitlinks([{"path": "p\n" + "y" * 500, "old": "a" * 40, "new": "b" * 40}], self.hit)
