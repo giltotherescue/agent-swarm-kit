@@ -6,6 +6,11 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+Guideline for the periodic keep-moving check, from Gil (2026-11-21). Blanket timed wake-ups that message every project bot mostly
+burn tokens, so the check should be a cheap queue script that messages a bot only when it is idle (no running or queued tasks, and
+nothing created or finished in the last 4 hours), stays silent when nobody is idle, and wakes nobody if the check fails. Docs only,
+with an example script. See [docs/routines.md](docs/routines.md#keep-moving-check-wake-only-idle-bots).
+
 Owner required on enqueue, ported from agent-control PR 72.
 
 - **`POST /tasks` rejects a missing or empty `owner`** (400, says to pass `--owner <bot id or alias>`). A project bot token still
