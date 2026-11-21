@@ -96,7 +96,7 @@ def _git_raw(wd, args, check=True, index=None, input=None):
         shown = shown[2:]            # "-c key=value" pairs are not the command
     name = "git " + " ".join(a for a in shown[:3] if isinstance(a, str))
     try:
-        r = subprocess.run(["git", *args], cwd=str(wd), capture_output=True, env=env, timeout=GIT_TIMEOUT, input=input)
+        r = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=str(wd), capture_output=True, env=env, timeout=GIT_TIMEOUT, input=input)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} timed out after {GIT_TIMEOUT} seconds")
     if check and r.returncode:
@@ -186,6 +186,9 @@ def commit_leftover(wd, message, allow_gitlink=None, skipped=None, log=None, ide
         _git_raw(wd, ["init", "-q"])
     git_dir = _git_raw(wd, ["rev-parse", "--absolute-git-dir"]).stdout.decode().strip()
     real = os.path.join(git_dir, "index")
+    # Expected HEAD, read ONCE before the index is copied or staged: it is both the commit parent and the update-ref
+    # compare-and-swap value, so a concurrent ordinary commit makes update-ref fail instead of being reversed.
+    old = _git_raw(wd, ["rev-parse", "--verify", "-q", "HEAD"], check=False).stdout.decode().strip()
     fd, tmp = tempfile.mkstemp(prefix="index.leftover.", dir=git_dir)
     os.close(fd)
     try:
@@ -210,16 +213,14 @@ def commit_leftover(wd, message, allow_gitlink=None, skipped=None, log=None, ide
             return False
         # Plumbing, not `git commit`: exporter commits intentionally run NO repository hooks. A pre-commit hook could
         # stage the very pin skipped above (`git add -u`), and a slow post-commit hook could time out after HEAD moved.
-        # write-tree publishes exactly the inspected index; update-ref (hooks disabled too) is a compare-and-swap on
+        # write-tree publishes exactly the inspected index; update-ref (every exporter git command runs with hooks disabled, see _git_raw) is a compare-and-swap on
         # HEAD, so on any failure HEAD and the real index are both unchanged.
         tree = _git_raw(wd, ["write-tree"], index=tmp).stdout.decode().strip()
-        old = _git_raw(wd, ["rev-parse", "--verify", "-q", "HEAD"], check=False).stdout.decode().strip()
         ident = ["-c", "user.name=" + identity[0], "-c", "user.email=" + identity[1]]
         msg = _git_raw(wd, ["stripspace"], input=message.encode()).stdout  # what `git commit -m` does to the message
         new = _git_raw(wd, [*ident, "commit-tree", tree, *(["-p", old] if old else [])], input=msg).stdout.decode().strip()
         subject = (msg.decode("utf-8", "replace").splitlines() or [""])[0]
-        # core.hooksPath=/dev/null: update-ref would otherwise run a reference-transaction hook
-        _git_raw(wd, ["-c", "core.hooksPath=/dev/null", "update-ref", "-m",
+        _git_raw(wd, ["update-ref", "-m",
                       ("commit: " if old else "commit (initial): ") + subject, "HEAD", new, old])
         os.replace(tmp, real)
         return True

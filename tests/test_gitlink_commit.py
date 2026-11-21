@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Auto-commit never stages submodule gitlinks unless opted in (agent-control PR 63): git level."""
 import os, subprocess, sys, tempfile, unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -254,7 +255,7 @@ class IndexSafetyTests(Base):
         head, before = g(self.wd, "rev-parse", "HEAD"), self.index_snapshot()
         real_run = subprocess.run
         def slow(cmd, *a, **k):
-            if cmd[:2] == ["git", "add"]:
+            if "add" in cmd[:5]:
                 self.assertEqual(k.get("timeout"), gl.GIT_TIMEOUT)
                 raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
             return real_run(cmd, *a, **k)
@@ -306,7 +307,6 @@ class SourceRedactionTests(unittest.TestCase):
             if "commit-tree" in cmd:
                 return subprocess.CompletedProcess(cmd, 1, b"", ("TOKEN=abcdefgh12345\n" + "p" * 286).encode())
             return real_run(cmd, *a, **k)
-        from unittest.mock import patch
         return patch.object(gl.subprocess, "run", fake)
 
     def test_failing_git_stderr_is_redacted_before_it_is_cut(self):
@@ -467,6 +467,35 @@ class ExporterHookTests(CliBase):
         self.assertEqual(g(self.wd, "show", ":README.md"), "changed", "the real index is consistent with HEAD")
         self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "")
 
+    def test_index_hook_is_not_run_by_staging(self):
+        # recheck 5 P2: a post-index-change hook ran (and could time out) on `git add -A`
+        marker = Path(self.tmp.name) / "index-hook-ran"
+        self.hook("post-index-change", f'echo ran >> "{marker}"\nsleep 5\n')
+        (self.wd / "new.txt").write_text("n\n")
+        self.assertTrue(self.run_commit(allow_gitlink=False))
+        self.assertFalse(marker.exists(), "no repository hook runs for any exporter git command")
+
+    def test_concurrent_commit_after_staging_is_not_reversed(self):
+        # recheck 5 P2: HEAD was read after building the tree, so a concurrent commit became the parent and was reversed
+        (self.wd / "new.txt").write_text("n\n")
+        real_run, moved = subprocess.run, []
+        def racing(cmd, *a, **k):
+            r = real_run(cmd, *a, **k)
+            if "write-tree" in cmd and not moved:
+                (self.wd / "manual.md").write_text("manual\n")
+                for c in (["add", "manual.md"], ["commit", "-q", "-m", "manual"]):
+                    real_run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", *c],
+                             cwd=str(self.wd), check=True, capture_output=True)
+                moved.append(g(self.wd, "rev-parse", "HEAD"))
+            return r
+        with patch.object(gl.subprocess, "run", racing):
+            try:
+                self.run_commit(allow_gitlink=False)
+            except RuntimeError:
+                pass
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD"), moved[0], "the concurrent commit stays HEAD")
+        self.assertIn("manual.md", g(self.wd, "ls-tree", "--name-only", "HEAD").splitlines())
+
     def test_moved_head_is_not_overwritten(self):
         # update-ref is a compare-and-swap: if HEAD moves between inspection and publish, nothing is published
         (self.wd / "new.txt").write_text("n\n")
@@ -479,7 +508,6 @@ class ExporterHookTests(CliBase):
                           "--allow-empty", "-m", "race"], cwd=str(self.wd), check=True, capture_output=True)
                 moved.append(g(self.wd, "rev-parse", "HEAD"))
             return real_run(cmd, *a, **k)
-        from unittest.mock import patch
         with patch.object(gl.subprocess, "run", racing), self.assertRaises(RuntimeError):
             self.run_commit(allow_gitlink=False)
         self.assertEqual(g(self.wd, "rev-parse", "HEAD"), moved[-1], "the concurrent commit is kept")
@@ -489,9 +517,8 @@ class ExporterHookTests(CliBase):
         # replaces the old pre-commit-hook timeout probe: a real git process (write-tree, after the inspection and
         # before publishing) outlives the timeout; HEAD and the real index stay byte-identical
         import shutil
-        from unittest.mock import patch
         wrap = Path(self.tmp.name) / "slowgit"; wrap.mkdir()
-        (wrap / "git").write_text(f'#!/bin/sh\n[ "$1" = write-tree ] && sleep 2\nexec {shutil.which("git")} "$@"\n')
+        (wrap / "git").write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = write-tree ] && sleep 2; done\nexec {shutil.which("git")} "$@"\n')
         (wrap / "git").chmod(0o755)
         before = (g(self.wd, "rev-parse", "HEAD"), (self.wd / ".git" / "index").read_bytes())
         with patch.dict(os.environ, {"PATH": f"{wrap}:{os.environ['PATH']}"}), patch.object(gl, "GIT_TIMEOUT", 0.5), \
@@ -500,7 +527,6 @@ class ExporterHookTests(CliBase):
         self.assertEqual((g(self.wd, "rev-parse", "HEAD"), (self.wd / ".git" / "index").read_bytes()), before)
 
     def test_identity_and_message_unchanged(self):
-        from unittest.mock import patch
         clean = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
         with patch.dict(os.environ, clean, clear=True):
             self.assertTrue(gl.commit_leftover(self.wd, "  export msg  \n\n\n", allow_gitlink=False))
