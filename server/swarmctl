@@ -117,7 +117,15 @@ def local_path_warnings(prompt, attached):
     return out
 
 
+def need_owner(a):
+    """Fail fast without an owner: --owner wins, else ENQUEUE_OWNER. A follow-up inherits its parent's owner."""
+    a.owner = (a.owner or "").strip() or os.environ.get("ENQUEUE_OWNER", "").strip() or None
+    if not a.owner and not getattr(a, "follow_up", None):
+        sys.exit("error: no owner. Pass --owner <bot id or alias>, or set ENQUEUE_OWNER.")
+
+
 def cmd_enqueue(a):
+    need_owner(a)
     body = {"prompt": read_prompt(a.prompt), "project": a.project, "repo": a.repo, "provider": a.provider,
             "model": a.model, "owner": a.owner, "kind": a.kind, "report_only": a.report_only, "push": a.push,
             "open_pr": a.pr, "pr_number": a.pr_number, "branch": a.branch, "ask_human": a.ask_human,
@@ -143,6 +151,7 @@ def cmd_enqueue(a):
 
 
 def cmd_review(a):
+    need_owner(a)
     tmpl = open(os.path.join(KIT_DIR, "templates", "review-prompt.md")).read()
     prompt = tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)) + ("\n\n" + read_prompt(a.extra) if a.extra else "")
     r = call("POST", "/tasks", {k: v for k, v in {"prompt": prompt, "repo": a.repo, "pr_number": a.pr_number, "kind": "review",

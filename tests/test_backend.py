@@ -68,6 +68,9 @@ class BackendTest(unittest.TestCase):
     def req(cls, method, path, body=None, tok="admin-test-token", expect=200, raw=None, headers=None):
         h = {"Authorization": "Bearer " + tok, "Content-Type": "application/json"}
         h.update(headers or {})
+        if (method == "POST" and path == "/tasks" and tok == "admin-test-token" and isinstance(body, dict)
+                and "owner" not in body and not body.get("follow_up")):
+            body = dict(body, owner="tester")  # enqueue needs an owner
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         r = urllib.request.Request(cls.base + path, data=data, method=method, headers=h)
         try:
@@ -144,7 +147,8 @@ class BackendTest(unittest.TestCase):
         self.assertTrue(got[0][1].startswith(tid + ":done:"))
 
     def test_ownerless_and_human_questions_go_to_chief(self):
-        tid = self.req("POST", "/tasks", {"prompt": "no owner here"})["task"]["id"]
+        tid = self.req("POST", "/tasks", {"prompt": "no owner here", "owner": "ghost"})["task"]["id"]
+        self.api.s.run("UPDATE tasks SET owner = NULL WHERE id = ?", tid)  # a legacy ownerless row still routes to the Chief
         self.work(tid, "done")
         got = self.deliver()
         self.assertEqual([(g[0], g[3]["reason"]) for g in got], [("/chief", "no_owner")])

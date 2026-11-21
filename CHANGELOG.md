@@ -6,6 +6,14 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+Owner required on enqueue, ported from agent-control PR 72.
+
+- **`POST /tasks` rejects a missing or empty `owner`** (400, says to pass `--owner <bot id or alias>`). A project bot token still
+  defaults to its own id; a follow-up inherits its parent's owner. Chains and other server-created tasks are not affected.
+- **`swarmctl enqueue` and `swarmctl review` fail fast without `--owner`** unless `ENQUEUE_OWNER` is set; an explicit `--owner` wins.
+  A `--follow-up` needs neither.
+- The kit has no bot alias table (only bus agent names and aliases) and no dashboard, so there is no `swarm` alias to add.
+
 Parent report and artifacts for follow-up and child tasks, ported from agent-control PR 71.
 
 - **`.task-context/parent/`** holds the parent's uploaded `REPORT.md` and artifacts (sanitized names; unsafe ones skipped and

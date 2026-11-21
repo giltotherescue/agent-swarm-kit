@@ -196,7 +196,7 @@ class SwarmctlTest(unittest.TestCase):
         cls.bin = os.path.join(cls.home, "bin")
         os.makedirs(cls.bin)
         os.symlink(os.path.join(SERVER, "swarmctl"), os.path.join(cls.bin, "swarmctl"))  # like /usr/local/bin/swarmctl
-        cls.env = dict(os.environ, HOME=cls.home, SWARM_URL=cls.b.base, SWARM_TOKEN_FILE=tok)
+        cls.env = dict(os.environ, HOME=cls.home, SWARM_URL=cls.b.base, SWARM_TOKEN_FILE=tok, ENQUEUE_OWNER="tester")
         cls.ctl = load("swarmctl_mod", os.path.join(SERVER, "swarmctl"))
 
     @classmethod

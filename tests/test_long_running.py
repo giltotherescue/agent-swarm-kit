@@ -68,7 +68,7 @@ class LongRunningTest(unittest.TestCase):
         with open(tokf, "w") as fh:
             fh.write(self.bot)
         r = subprocess.run([sys.executable, SWARMCTL, "enqueue", "--chain", "--max-cycles", "0", "-"], input="zero via swarmctl",
-                           env=dict(os.environ, SWARM_URL=self.b.base, SWARM_TOKEN_FILE=tokf, HOME=tmp),
+                           env=dict(os.environ, SWARM_URL=self.b.base, SWARM_TOKEN_FILE=tokf, HOME=tmp, ENQUEUE_OWNER="app-bot"),
                            capture_output=True, text=True, timeout=30)
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("max_cycles must be between 1", r.stderr)

@@ -905,15 +905,19 @@ class Backend:
             raise ApiError(400, "allow_gitlink must be true or false; omit it to inherit a follow-up's parent value")
         follow = clean_text(b.get("follow_up"), 80, "follow_up")
         if follow:
-            return self.follow_up(who, follow, b)
-        return self._create(who, b)
+            return self.follow_up(who, follow, b, public=True)
+        return self._create(who, b, public=True)
 
-    def _create(self, who, b, follow_up=False, held_behind=None):
+    def _create(self, who, b, follow_up=False, held_behind=None, public=False):
         prompt = clean_text(b.get("prompt"), 200_000, "prompt")
         command = clean_text(b.get("command"), 4000, "command")
         if not prompt:
             raise ApiError(400, "prompt is required (for a script task, say what the command is for)")
         owner = clean_text(b.get("owner"), 80, "owner") or who["bot"]
+        if public and not owner:
+            # Only the public path asks for an owner. Chains and other server-created tasks go through follow_up(public=False).
+            raise ApiError(400, "owner is required: pass `--owner <bot id or alias>` (JSON field `owner`). A follow-up or child "
+                                "inherits its parent's owner. The kit has no bot alias table; an owner is a bot id or a bus agent name/alias")
         if who["role"] == "bot" and owner and owner.lower() != who["bot"].lower():
             raise ApiError(403, "a project bot can only queue tasks it owns")
         project = clean_text(b.get("project"), 80, "project")
@@ -1112,7 +1116,7 @@ class Backend:
             return None, f"Chain stopped: cycle {n} could not be queued ({e.message})."
         return r["task"]["id"], f"Next: cycle {n} queued as {r['task']['id']}."
 
-    def follow_up(self, who, parent_id, b):
+    def follow_up(self, who, parent_id, b, public=False):
         """--follow-up: continue earlier work. See docs/concepts.md for the rules."""
         parent = self.get_task(who, parent_id)
         st = parent["state"]
@@ -1147,7 +1151,7 @@ class Backend:
         body["_workspace_host"] = parent.get("workspace_host")
         held = self.s.one("SELECT id FROM tasks WHERE parent_id = ? AND follow_up = 1 AND state NOT IN ('done','failed','cancelled')"
                           " ORDER BY created_at DESC LIMIT 1", parent["id"])
-        return self._create(who, body, follow_up=True, held_behind=held["id"] if held else None)
+        return self._create(who, body, follow_up=True, held_behind=held["id"] if held else None, public=public)
 
     def public_task(self, t, events=False):
         out = {k: v for k, v in t.items() if k not in ("prompt_hash", "session_id")}

@@ -38,8 +38,11 @@ class Backend:
         self.srv.shutdown()
         self.srv.server_close()
 
-    def call(self, method, path, body=None, tok=ADMIN, raw=None, headers=None):
-        """Returns (status, parsed body)."""
+    def call(self, method, path, body=None, tok=ADMIN, raw=None, headers=None, bare=False):
+        """Returns (status, parsed body). The admin token queueing a task gets owner "tester" unless bare=True (enqueue needs an owner)."""
+        if (not bare and method == "POST" and path == "/tasks" and tok == ADMIN and isinstance(body, dict)
+                and "owner" not in body and not body.get("follow_up")):
+            body = dict(body, owner="tester")
         h = {"Content-Type": "application/json"}
         if tok is not None:
             h["Authorization"] = "Bearer " + tok
