@@ -222,6 +222,13 @@ def cmd_prepare(p, task, name, branch, origin, drop_checkpoint=False):
         for f in os.listdir(att):
             if NAME_RE.fullmatch(f):
                 copy_in(os.path.join(att, f), os.path.join(ctx, "attachments", f))
+    copy_in(os.path.join(inbox, "README"), os.path.join(ctx, "README"))
+    par = os.path.join(inbox, "parent")
+    if os.path.isdir(par):
+        os.makedirs(os.path.join(ctx, "parent"), exist_ok=True)
+        for f in os.listdir(par):
+            if NAME_RE.fullmatch(f) and ".." not in f:
+                copy_in(os.path.join(par, f), os.path.join(ctx, "parent", f))
     msg = os.path.join(ctx, "messages.md")
     if os.path.lexists(msg):
         os.remove(msg)

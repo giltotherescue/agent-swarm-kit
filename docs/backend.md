@@ -67,9 +67,9 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/tasks/ID/answer` | yes | yes | yes | no | no | no | Answer a waiting task. Bot: own only, never for the human |
 | POST | `/tasks/ID/message` | yes | yes | yes | no | no | no | Message a queued or running task. Bot: own only |
 | POST | `/tasks/ID/cancel` | yes | yes | yes | no | no | no | Cancel now. Bot: own only |
-| GET | `/tasks/ID/report` | yes | yes | yes | no | no | yes | REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns |
-| GET | `/tasks/ID/artifacts or attachments` | yes | yes | yes | no | yes | no | List files. Bot and task token: own only |
-| GET | `/tasks/ID/artifacts or attachments/ID` | yes | yes | yes | no | yes | no | Download one file. Bot and task token: own only |
+| GET | `/tasks/ID/report` | yes | yes | yes | no | yes | yes | REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns. Task token: own task or its parent |
+| GET | `/tasks/ID/artifacts or attachments` | yes | yes | yes | no | yes | no | List files. Bot and task token: own only (a task token may also list its parent's artifacts) |
+| GET | `/tasks/ID/artifacts or attachments/ID` | yes | yes | yes | no | yes | no | Download one file. Bot and task token: own only (a task token may also read its parent's artifacts) |
 | GET | `/tasks/ID/bundle` | no | no | no | no | yes | no | The task's own saved work bundle (resume on a fresh folder) |
 | GET | `/tasks/ID/parent-bundle` | no | no | no | no | yes | no | A follow-up's parent work bundle (unpushed parent work) |
 | PUT | `/tasks/ID/files/KIND/ID` | no | no | no | no | yes | no | Upload a report, artifact or work bundle (raw body, `X-Claim-Id` header) |
