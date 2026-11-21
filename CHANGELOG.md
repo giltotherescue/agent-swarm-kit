@@ -4,7 +4,7 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
-## 0.8.1 (unreleased)
+## 0.8.1 (2026-11-21)
 
 Owner required on enqueue, ported from agent-control PR 72.
 
