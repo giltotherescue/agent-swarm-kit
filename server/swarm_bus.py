@@ -434,13 +434,44 @@ class Bus:
                 self.settle_failure(h, res, t, by_age=False)
         return res
 
+    # ---------------- logs ----------------
+    CREDENTIAL_RE = re.compile(r"bearer|authorization|secret|token|passw|api[_-]?key|\bab_", re.I)
+
+    def safe_err(self, e):
+        """A log-safe description of an exception: its category plus redacted, bounded text. Text that mentions a credential is withheld."""
+        name = type(e).__name__[:40]
+        text = str(e)
+        if self.be.secret_hit(text) or self.CREDENTIAL_RE.search(text):
+            return f"{name}: [text withheld]"
+        return f"{name}: {re.sub(r'[\x00-\x1f\x7f]+', ' ', self.be.scrub(text))[:160]}"
+
+    def log(self, what, mid, e):
+        print(what, mid, self.safe_err(e), file=sys.stderr, flush=True)
+
     # ---------------- tmux ----------------
     def tmux_enqueue(self, m, a):
+        """Enqueue the tmux copy once: keyed by bus_message_id, so retries, the duplicate path and the flush repair never double up."""
         head = f'bus #{m["id"]} thread {m["thread"]} | reply: swarmctl bus send {m["sender"]} "..." | after acting: swarmctl bus ack {m["id"]}'
         if len(head) + 2 + len(m["body"]) > TMUX_TOTAL_MAX:
             raise ValueError("bus message too long for a tmux paste")  # unreachable: BODY_MAX leaves room
-        self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text, bus_message_id) VALUES(?,?,?,?,?)",
-                   a["orchestrator"], self.now(), str(m["sender"])[:80], f"{head}\n\n{m['body']}", m["id"])
+        self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text, bus_message_id) SELECT ?,?,?,?,? WHERE NOT EXISTS"
+                   " (SELECT 1 FROM orchestrator_messages WHERE bus_message_id = ?)",
+                   a["orchestrator"], self.now(), str(m["sender"])[:80], f"{head}\n\n{m['body']}", m["id"], m["id"])
+
+    def repair_tmux(self, m, a):
+        """Re-enqueue a stored, still queued tmux-wake message whose orchestrator message row is missing. Never raises."""
+        try:
+            if m and m["state"] == "queued" and not m["noop"] and a and a["wake"] == "tmux" and a["orchestrator"]:
+                self.tmux_enqueue(m, a)
+        except Exception as e:
+            self.log("bus tmux repair failed", m and m["id"], e)
+
+    def repair_stored_tmux(self, dup):
+        """Duplicate path: repair for the STORED row's recipient (the duplicate key is sender/client_msg_id only), never the new request's."""
+        try:
+            self.repair_tmux(dup, self.s.one("SELECT * FROM agents WHERE name = ?", dup["recipient"]))
+        except Exception as e:
+            self.log("bus tmux repair failed", dup["id"], e)
 
     def on_orchestrator_delivered(self, om_id):
         """The supervisor typed an orchestrator message into the pane: mark its bus row delivered."""
@@ -506,6 +537,7 @@ class Bus:
         if cmid:
             dup = self.s.one("SELECT * FROM bus_messages WHERE sender = ? AND client_msg_id = ?", sender, cmid)
             if dup:
+                self.repair_stored_tmux(dup)
                 return 200, out(dup, duplicate=True, **({"wake": dup["wake"]} if dup["wake"] else {}))
         noop = m.get("noop") is True
         # Urgent when asked, when meta.blocker is true, or when an orchestrator asks a question (reply_expected true).
@@ -538,24 +570,38 @@ class Bus:
                     sender, to["name"], thread, cmid, body, meta, 1 if urgent else 0, wake, 1 if wake == "digest" else 0, 1 if noop else 0,
                     1 if reply_expected else 0, "delivered" if noop else "queued", at() if noop else None, at()).lastrowid
                 row = self.s.one("SELECT * FROM bus_messages WHERE id = ?", mid)
-                if not noop and to["wake"] == "tmux" and to["orchestrator"]:
-                    self.tmux_enqueue(row, to)
         except Exception as e:
             dup = self.s.one("SELECT * FROM bus_messages WHERE sender = ? AND client_msg_id = ?", sender, cmid) \
                 if cmid and "UNIQUE" in str(e).upper() else None
             if not dup:
                 raise
+            self.repair_stored_tmux(dup)
             return 200, out(dup, duplicate=True, **({"wake": dup["wake"]} if dup["wake"] else {}))
-        if not noop and to["wake"] == "webhook" and not row["held"]:
+        # The row is stored: from here nothing may turn this into a failure (a caller that falls back on failure, such as finish
+        # notices, would deliver twice). Dispatch and bookkeeping errors are logged; flush() repairs and retries.
+        if not noop and to["wake"] == "tmux" and to["orchestrator"]:
+            try:
+                self.tmux_enqueue(row, to)
+            except Exception as e:
+                self.log("bus tmux dispatch failed", row["id"], e)
+        elif not noop and to["wake"] == "webhook" and not row["held"]:
             self.wake.set()  # the delivery loop fires the webhook now
-        cur = self.s.one("SELECT * FROM bus_messages WHERE id = ?", row["id"])
         extra = {"wake": wake}
-        if reach["reachable"] and to["unreachable_since"]:
-            self.clear_unreachable(to["name"])
-        if not reach["reachable"]:
-            extra["warning"] = (f"{to['name']} is unreachable: {reach['reason']}. Stored; it will be delivered when {to['name']} is reachable.")
-            if sender != SYSTEM:
-                self.alert_unreachable(to, row, reach, now=now)
+        cur = row
+        # Reachability bookkeeping is independent of the optional re-read; a failed episode start is found by the flush sweep.
+        try:
+            if reach["reachable"] and to["unreachable_since"]:
+                self.clear_unreachable(to["name"])
+            if not reach["reachable"]:
+                extra["warning"] = (f"{to['name']} is unreachable: {reach['reason']}. Stored; it will be delivered when {to['name']} is reachable.")
+                if sender != SYSTEM:
+                    self.alert_unreachable(to, row, reach, now=now)
+        except Exception as e:
+            self.log("bus post-store bookkeeping failed", row["id"], e)
+        try:
+            cur = self.s.one("SELECT m.* FROM bus_messages m WHERE m.id = ?", row["id"]) or row   # optional re-read, after the commit
+        except Exception as e:
+            self.log("bus post-store read failed", row["id"], e)
         return 201, out(cur, **extra)
 
     # ---------------- alerts ----------------
@@ -713,6 +759,24 @@ class Bus:
                     self.alert_unreachable(a, None, r, now=now)
             except Exception as e:
                 print("bus episode check failed", repr(e), file=sys.stderr, flush=True)
+        # Repair: a stored tmux-wake message whose orchestrator message row is missing (dispatch failed after the row committed).
+        for m in self.s.q("SELECT m.* FROM bus_messages m JOIN agents a ON a.name = m.recipient AND a.wake = 'tmux' AND a.orchestrator IS NOT NULL"
+                          " WHERE m.state = 'queued' AND m.noop = 0 AND m.created_at <= ? AND NOT EXISTS"
+                          " (SELECT 1 FROM orchestrator_messages o WHERE o.bus_message_id = m.id) ORDER BY m.id LIMIT 50", n - 30):
+            self.repair_tmux(m, self.s.one("SELECT * FROM agents WHERE name = ?", m["recipient"]))
+            stats["tmux_repaired"] = stats.get("tmux_repaired", 0) + 1
+        # Episode discovery: queued mail from a non-system sender and no open episode (the write at send time failed). Webhook agents are
+        # excluded (failed delivery starts theirs); humans never alert.
+        for x in self.s.q("SELECT DISTINCT a.name FROM agents a JOIN bus_messages m ON m.recipient = a.name AND m.state = 'queued' AND m.noop = 0"
+                          " AND m.sender != ? WHERE a.unreachable_since IS NULL AND a.retired_at IS NULL AND a.kind != 'human'"
+                          " AND a.wake != 'webhook' LIMIT 50", SYSTEM):
+            try:
+                a = self.s.one("SELECT * FROM agents WHERE name = ?", x["name"])
+                r = self.reachability(a)
+                if not r["reachable"]:
+                    self.alert_unreachable(a, None, r, now=now)
+            except Exception as e:
+                self.log("bus episode discovery failed", None, e)
         for m in self.s.q("SELECT * FROM bus_messages WHERE alerted_at IS NULL AND (state = 'failed' OR (state = 'queued' AND urgent = 1"
                           " AND sender != ? AND created_at <= ?)) ORDER BY id LIMIT 50", SYSTEM, n - URGENT_ALERT):
             claimed = None
