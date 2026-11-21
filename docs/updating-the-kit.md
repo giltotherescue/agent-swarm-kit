@@ -105,6 +105,38 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.8.0
+
+Run the setup script as usual. The backend adds the Agent Bus tables (`agents`, `agent_aliases`, `bus_messages`,
+`bus_attempts`) and a few columns (`orchestrator_messages.bus_message_id`, `tasks.head_sha`,
+`tasks.unpushed_commits`) by itself at start; nothing is changed or removed, and starting twice is safe.
+Nothing turns on by itself: no agent is registered, so no message is sent and finish notices go where they went
+before. Two behaviour changes apply to everyone:
+
+- **Done means landed.** A code task whose commits exist only on the worker (nothing pushed) now ends `waiting`
+  with outcome `blocked` and the question "Work is committed on WORKER but NOT on GitHub", instead of `done`.
+  Re-queue it with `--push` or `--pr`, or recover the branch from the task's bundle. A task that asked for a PR
+  and pushed but has no confirmed PR also waits. Report-only, untrusted, review and script tasks are exempt. Runners
+  from before 0.8.0 do not report the commit count, so for them nothing changes until they are updated.
+- The `swarmctl` and `swarm_worker.py` versions are 0.8.0 together; update every worker.
+
+To use the bus ([agent-bus.md](agent-bus.md)): register agents with `swarmctl bus register` and give each a token
+with `swarmctl bus token NAME`. The backend makes its token secret in `bus-token-secret` beside the bot keys folder
+on first use (mode 600); it is part of your config, not the backup: copy it if you restore onto a new server,
+or re-issue tokens. Restart each orchestrator once so its session gets a bus token
+(`swarmctl orchestrator restart NAME`); the supervisors are updated by the setup script's restart. The `/bus` page is
+read-only and needs the admin token (a request from loopback, such as through Tailscale `serve`, gets 401 without it). To go back to 0.7.x:
+the new tables and columns stay unused in the database, which older versions ignore.
+
+## Upgrading to 0.7.1
+
+Re-run setup as above. No database change and no setting is required. Supervisors are restarted by the setup
+script; running sessions are adopted. After upgrading, an orchestrator that sits at a Claude sign-in screen is
+stopped with state `needs-login` (run `sudo swarmctl login claude` on its worker, then `swarmctl orchestrator
+start NAME`), and `swarmctl orchestrator delete` is refused while a session is still running or stopping.
+If a first boot was interrupted by a reboot, `swarm-firstboot-resume.service` now finishes it or writes a
+`stopped` status that says what to run.
+
 ## Upgrading to 0.7.0
 
 Run the setup script as usual. The backend adds the `orchestrators`, `orchestrator_events` and

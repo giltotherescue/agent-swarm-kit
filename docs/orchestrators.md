@@ -17,7 +17,7 @@ you ask.
 | Uses a task slot | Yes, one per running cycle | No. It runs beside the runner, not inside it |
 | Worker updates | Happen between cycles | Never stop it; its supervisor adopts the running session |
 | Publishing | The runner pushes and opens PRs, after the secret scan | The agent has no push access of its own (see [What it can do](#what-it-can-do)) |
-| Messages | `swarmctl message` into the next cycle's messages file | Typed into the session when the agent is idle, or by Agent Relay |
+| Messages | `swarmctl message` into the next cycle's messages file | Typed into the session when the agent is idle, by the [Agent Bus](agent-bus.md), or by Agent Relay |
 | Cost of a stuck agent | One short cycle | Until someone notices (heartbeat and crash-loop notices help) |
 
 ## How it works
@@ -186,6 +186,7 @@ In `/etc/agent-swarm/swarm.env` (all optional):
 | `SWARM_ORCH_CRASH_LIMIT`, `SWARM_ORCH_CRASH_WINDOW` | 5, 1800 | Crashes within this many seconds that make a crash loop |
 | `SWARM_ORCH_SCOPE` | `SWARM_TASK_SCOPE` (1) | Run the session in its own systemd user scope |
 | `SWARM_ORCH_POLL_SECONDS` | 10 | How often the supervisor looks at the session (was 5 before 0.7.1) |
+| `SWARM_ORCH_MESSAGE_POLL_SECONDS` | 10 | While the pane is idle and nothing waits, how often the supervisor asks the backend for the next message (0.8.0; see [agent-bus.md](agent-bus.md)) |
 | `SWARM_ORCH_SCREEN_SECONDS` | 10 | How long a sign-in screen may stay up before the session is ended |
 | `SWARM_ORCH_LOGIN_MARKERS`, `SWARM_ORCH_BLOCK_MARKERS` | see `server/swarm_orchestrator.py` | Text (several separated by a vertical bar) that marks a sign-in screen or a screen it does not answer |
 | `SWARM_ORCH_LOGIN_CHECK` | 1 | 0 skips the sign-in check before a start (the screen check still runs) |

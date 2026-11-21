@@ -54,60 +54,71 @@ A task token stops working as soon as the task leaves `running` (done, failed, w
 
 ## Who can call what
 
-The table below is generated from the code (`python3 server/swarm_backend.py --permissions`) and a test checks that this doc matches it. "yes" means the token type may call the route; "no" means the backend answers 403 before it reads the request body. Columns: admin token, chief bot, project bot, worker token, task token.
+The table below is generated from the code (`python3 server/swarm_backend.py --permissions`) and a test checks that this doc matches it. "yes" means the token type may call the route; "no" means the backend answers 403 before it reads the request body. Columns: admin token, chief bot, project bot, worker token, task token, bus agent token.
 
-| Method | Path | admin | chief | bot | worker | task | What it does |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/health` | public | public | public | public | public | Liveness check, returns the version |
-| GET | `/status` | yes | yes | yes | no | no | Counts, running and waiting tasks, items due, warnings. A project bot sees only its own |
-| POST | `/tasks` | yes | yes | yes | no | no | Queue a task, or a follow-up with `follow_up` |
-| GET | `/tasks` | yes | yes | yes | no | no | List tasks. A project bot sees only its own |
-| GET | `/tasks/ID` | yes | yes | yes | no | yes | One task with its event thread. Bot: own only. Task token: own task only |
-| POST | `/tasks/ID/answer` | yes | yes | yes | no | no | Answer a waiting task. Bot: own only, never for the human |
-| POST | `/tasks/ID/message` | yes | yes | yes | no | no | Message a queued or running task. Bot: own only |
-| POST | `/tasks/ID/cancel` | yes | yes | yes | no | no | Cancel now. Bot: own only |
-| GET | `/tasks/ID/report` | yes | yes | yes | no | no | REPORT.md as text. Bot: own only |
-| GET | `/tasks/ID/artifacts or attachments` | yes | yes | yes | no | yes | List files. Bot and task token: own only |
-| GET | `/tasks/ID/artifacts or attachments/ID` | yes | yes | yes | no | yes | Download one file. Bot and task token: own only |
-| GET | `/tasks/ID/bundle` | no | no | no | no | yes | The task's own saved work bundle (resume on a fresh folder) |
-| GET | `/tasks/ID/parent-bundle` | no | no | no | no | yes | A follow-up's parent work bundle (unpushed parent work) |
-| PUT | `/tasks/ID/files/KIND/ID` | no | no | no | no | yes | Upload a report, artifact or work bundle (raw body, `X-Claim-Id` header) |
-| POST | `/worker/claim` | no | no | no | yes | no | Take the oldest due queued task. Returns a task token for it |
-| GET | `/worker/task-states` | no | no | no | yes | no | States only (no content) for `ids=a,b,c`, used by cleanup |
-| POST | `/tasks/ID/heartbeat` | no | no | no | no | yes | Extend the lease, get new messages, acknowledge delivered ones |
-| POST | `/tasks/ID/publish-check` | no | no | no | no | yes | Right before a push: is the claim live and is publishing still allowed |
-| POST | `/tasks/ID/finish` | no | no | no | no | yes | End the run: `done`, `waiting`, `next`, `limit` or `failed`. Idempotent per claim |
-| GET | `/bots` | yes | yes | no | no | no | List bots (URLs shortened except for admin, keys never shown) |
-| GET | `/bots/ID` | yes | yes | yes | no | no | One bot. Bot: itself only |
-| PUT | `/bots/ID` | yes | yes | yes | no | no | Set `notify_url` and `notify_auth` (stored in a key file). Bot: itself only; only admin or chief set `role` |
-| POST | `/bots/ID/token` | yes | no | no | no | no | Make a new token for the bot. Shown once |
-| POST | `/bots/ID/test` | yes | yes | yes | no | no | Send one test notice to the bot's inbox. Bot: itself only |
-| GET | `/projects` | yes | yes | yes | no | no | Project settings. Bot: only projects it is bound to |
-| PUT | `/projects/ID` | yes | yes | no | no | no | Set repo, extra repos, bound bots, provider, model, `allow_push`, `allow_push_main` |
-| GET | `/waiting` | yes | yes | yes | no | no | The Waiting on you list. Bot: its own items only |
-| POST | `/waiting` | yes | yes | yes | no | no | File an item. A linked task must belong to the filing bot |
-| POST | `/waiting/ID` | yes | yes | yes | no | no | answer, snooze, drop (human, through admin or chief); done, withdraw, update (filing bot too) |
-| POST | `/alerts` | yes | no | no | yes | no | Body `{key, text}`. One alert to the Chief of Staff per key |
-| POST | `/log` | yes | yes | yes | no | yes | Add a project log entry. Bot: projects it is bound to. Task token: its own task's project |
-| GET | `/log` | yes | yes | yes | no | no | Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only |
-| GET | `/log/export` | yes | yes | yes | no | no | One project's log as a Markdown digest. Bot: its bound projects only |
-| POST | `/activity-log` | yes | yes | yes | no | yes | Append one activity entry. Bot: bound projects only. Task: own project with opt-in |
-| GET | `/activity-log` | yes | yes | yes | no | no | Read recent activity (`project`, `limit`, `bot`, `kind`, `decider`, `since`). Bot: bound projects only |
-| GET | `/activity-log/export` | yes | yes | yes | no | no | Export a Central Time month (`project`, `month`) as Markdown |
-| GET | `/activity-log/snapshot` | yes | yes | yes | no | no | Nightly activity files changed since the last published entry (`project`, `after` overrides it) |
-| POST | `/activity-log/published` | yes | yes | no | no | no | Save the nightly export position (`project`, `through`) after a verified push |
-| GET | `/log/items` | yes | yes | yes | no | no | Current state of each item (deliverable) in a project. Bot: bound projects only |
-| GET | `/log/rules` | yes | yes | yes | no | no | A project's standing rules, rule changes waiting for review, and the changelog (`format=md` for the rules doc) |
-| GET | `/log/brief` | yes | yes | yes | no | no | Read before drafting: standing rules plus the last 14 days of feedback, as Markdown |
-| GET | `/orchestrators` | yes | yes | yes | no | no | List orchestrators with state, worker and last heartbeat. Bot: the ones it owns |
-| POST | `/orchestrators` | yes | no | no | no | no | Create an orchestrator pinned to one worker (secret bundles by name only). `start: true` starts it |
-| GET | `/orchestrators/ID` | yes | yes | yes | no | no | One orchestrator with its brief and last 20 events. Bot: own only |
-| PUT | `/orchestrators/ID` | yes | no | no | no | no | Change an orchestrator's settings; they apply at the next start or restart |
-| POST | `/orchestrators/ID/ACTION` | yes | no | no | no | no | Set it to run, stop it gracefully, restart it (also clears a crash loop), or delete a stopped one |
-| GET | `/orchestrators/ID/logs` | yes | yes | yes | no | no | The last lines of its terminal (`lines`, up to 500), secret-scanned. Bot: own only |
-| POST | `/orchestrators/ID/messages` | yes | yes | yes | no | no | Queue one message (`text`, up to 4000 characters); typed into the session when the agent is idle. One at a time. Bot: own only |
-| POST | `/worker/orchestrators/ID/heartbeat` | no | no | no | yes | no | Supervisor on the pinned worker only: report state and the terminal tail, get the desired state, settings and one pending message |
-| GET | `/notices` | yes | yes | no | no | no | The last 100 deliveries with state and last error |
+| Method | Path | admin | chief | bot | worker | task | agent | What it does |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GET | `/health` | public | public | public | public | public | public | Liveness check, returns the version |
+| GET | `/status` | yes | yes | yes | no | no | no | Counts, running and waiting tasks, items due, warnings. A project bot sees only its own |
+| POST | `/tasks` | yes | yes | yes | no | no | no | Queue a task, or a follow-up with `follow_up` |
+| GET | `/tasks` | yes | yes | yes | no | no | no | List tasks. A project bot sees only its own |
+| GET | `/tasks/ID` | yes | yes | yes | no | yes | yes | One task with its event thread. Bot: own only. Task token: own task only. Bus agent: tasks its bot owns |
+| POST | `/tasks/ID/answer` | yes | yes | yes | no | no | no | Answer a waiting task. Bot: own only, never for the human |
+| POST | `/tasks/ID/message` | yes | yes | yes | no | no | no | Message a queued or running task. Bot: own only |
+| POST | `/tasks/ID/cancel` | yes | yes | yes | no | no | no | Cancel now. Bot: own only |
+| GET | `/tasks/ID/report` | yes | yes | yes | no | no | yes | REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns |
+| GET | `/tasks/ID/artifacts or attachments` | yes | yes | yes | no | yes | no | List files. Bot and task token: own only |
+| GET | `/tasks/ID/artifacts or attachments/ID` | yes | yes | yes | no | yes | no | Download one file. Bot and task token: own only |
+| GET | `/tasks/ID/bundle` | no | no | no | no | yes | no | The task's own saved work bundle (resume on a fresh folder) |
+| GET | `/tasks/ID/parent-bundle` | no | no | no | no | yes | no | A follow-up's parent work bundle (unpushed parent work) |
+| PUT | `/tasks/ID/files/KIND/ID` | no | no | no | no | yes | no | Upload a report, artifact or work bundle (raw body, `X-Claim-Id` header) |
+| POST | `/worker/claim` | no | no | no | yes | no | no | Take the oldest due queued task. Returns a task token for it |
+| GET | `/worker/task-states` | no | no | no | yes | no | no | States only (no content) for `ids=a,b,c`, used by cleanup |
+| POST | `/tasks/ID/heartbeat` | no | no | no | no | yes | no | Extend the lease, get new messages, acknowledge delivered ones |
+| POST | `/tasks/ID/publish-check` | no | no | no | no | yes | no | Right before a push: is the claim live and is publishing still allowed |
+| POST | `/tasks/ID/finish` | no | no | no | no | yes | no | End the run: `done`, `waiting`, `next`, `limit` or `failed`. Idempotent per claim |
+| GET | `/bots` | yes | yes | no | no | no | no | List bots (URLs shortened except for admin, keys never shown) |
+| GET | `/bots/ID` | yes | yes | yes | no | no | no | One bot. Bot: itself only |
+| PUT | `/bots/ID` | yes | yes | yes | no | no | no | Set `notify_url` and `notify_auth` (stored in a key file). Bot: itself only; only admin or chief set `role` |
+| POST | `/bots/ID/token` | yes | no | no | no | no | no | Make a new token for the bot. Shown once |
+| POST | `/bots/ID/test` | yes | yes | yes | no | no | no | Send one test notice to the bot's inbox. Bot: itself only |
+| GET | `/projects` | yes | yes | yes | no | no | no | Project settings. Bot: only projects it is bound to |
+| PUT | `/projects/ID` | yes | yes | no | no | no | no | Set repo, extra repos, bound bots, provider, model, `allow_push`, `allow_push_main` |
+| GET | `/waiting` | yes | yes | yes | no | no | no | The Waiting on you list. Bot: its own items only |
+| POST | `/waiting` | yes | yes | yes | no | no | no | File an item. A linked task must belong to the filing bot |
+| POST | `/waiting/ID` | yes | yes | yes | no | no | no | answer, snooze, drop (human, through admin or chief); done, withdraw, update (filing bot too) |
+| POST | `/alerts` | yes | no | no | yes | no | no | Body `{key, text}`. One alert to the Chief of Staff per key |
+| POST | `/log` | yes | yes | yes | no | yes | no | Add a project log entry. Bot: projects it is bound to. Task token: its own task's project |
+| GET | `/log` | yes | yes | yes | no | no | no | Read project log entries (`project`, `kind`, `since`, `limit`). Bot: its bound projects only |
+| GET | `/log/export` | yes | yes | yes | no | no | no | One project's log as a Markdown digest. Bot: its bound projects only |
+| POST | `/activity-log` | yes | yes | yes | no | yes | no | Append one activity entry. Bot: bound projects only. Task: own project with opt-in |
+| GET | `/activity-log` | yes | yes | yes | no | no | no | Read recent activity (`project`, `limit`, `bot`, `kind`, `decider`, `since`). Bot: bound projects only |
+| GET | `/activity-log/export` | yes | yes | yes | no | no | no | Export a Central Time month (`project`, `month`) as Markdown |
+| GET | `/activity-log/snapshot` | yes | yes | yes | no | no | no | Nightly activity files changed since the last published entry (`project`, `after` overrides it) |
+| POST | `/activity-log/published` | yes | yes | no | no | no | no | Save the nightly export position (`project`, `through`) after a verified push |
+| GET | `/log/items` | yes | yes | yes | no | no | no | Current state of each item (deliverable) in a project. Bot: bound projects only |
+| GET | `/log/rules` | yes | yes | yes | no | no | no | A project's standing rules, rule changes waiting for review, and the changelog (`format=md` for the rules doc) |
+| GET | `/log/brief` | yes | yes | yes | no | no | no | Read before drafting: standing rules plus the last 14 days of feedback, as Markdown |
+| GET | `/orchestrators` | yes | yes | yes | no | no | no | List orchestrators with state, worker and last heartbeat. Bot: the ones it owns |
+| POST | `/orchestrators` | yes | no | no | no | no | no | Create an orchestrator pinned to one worker (secret bundles by name only). `start: true` starts it |
+| GET | `/orchestrators/ID` | yes | yes | yes | no | no | no | One orchestrator with its brief and last 20 events. Bot: own only |
+| PUT | `/orchestrators/ID` | yes | no | no | no | no | no | Change an orchestrator's settings; they apply at the next start or restart |
+| POST | `/orchestrators/ID/ACTION` | yes | no | no | no | no | no | Set it to run, stop it gracefully, restart it (also clears a crash loop), or delete a stopped one |
+| GET | `/orchestrators/ID/logs` | yes | yes | yes | no | no | no | The last lines of its terminal (`lines`, up to 500), secret-scanned. Bot: own only |
+| POST | `/orchestrators/ID/messages` | yes | yes | yes | no | no | no | Queue one message (`text`, up to 4000 characters); typed into the session when the agent is idle. One at a time. Bot: own only |
+| POST | `/worker/orchestrators/ID/heartbeat` | no | no | no | yes | no | no | Supervisor on the pinned worker only: report state and the terminal tail, get the desired state, settings and one pending message |
+| GET | `/notices` | yes | yes | no | no | no | no | The last 100 deliveries with state and last error |
+| POST | `/bus/send` | yes | no | no | no | no | yes | Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `noop`, `reply_expected`, `meta`). Stored first, then woken. Admin sets `from` |
+| GET | `/bus/inbox` | yes | no | no | no | no | yes | An agent's undelivered and unread messages (`all=1`, `after`, `limit`). Reading marks them delivered. Admin names `agent` |
+| GET | `/bus/messages/ID` | yes | no | no | no | no | yes | One message with its delivery attempts. Agent: sender or recipient |
+| POST | `/bus/messages/ID/ack` | yes | no | no | no | no | yes | Mark a message read. `first` is true only once; also returns `newer_in_thread`. Agent: recipient only |
+| GET | `/bus/threads/ID` | yes | no | no | no | no | yes | The last messages of a thread (`limit`, up to 100). Agent: only ones it sent or received |
+| GET | `/bus/agents` | yes | no | no | no | no | yes | Agents with kind, wake, aliases and whether they are reachable |
+| PUT | `/bus/agents/ID` | yes | no | no | no | no | no | Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`) |
+| DELETE | `/bus/agents/ID` | yes | no | no | no | no | no | Retire an agent. Its history stays |
+| GET | `/bus/agents/ID/token` | yes | no | no | yes | no | no | The agent's token. Admin: any. Worker token: the `worker` query is required and the agent's orchestrator must be pinned to that worker name (the name is self-declared: the kit has one shared worker token) |
+| POST | `/bus/agents/ID/token/rotate` | yes | no | no | no | no | no | Revoke every token of the agent and return a new one |
+| GET | `/bus` | yes | no | no | no | no | no | Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception) |
 
 Body fields for `POST /tasks`: `prompt` (required), `project`, `repo`, `provider`, `model`, `owner`, `kind`, `title`, `report_only`, `push`, `push_main`, `open_pr`, `pr_number`, `branch`, `ask_human`, `untrusted_input`, `command`, `idempotency_key`, `allow_duplicate`, `follow_up`, `max_attempts`, `attachments` (`[{name, content_base64}]`, 20 files, 25 MB each).
 

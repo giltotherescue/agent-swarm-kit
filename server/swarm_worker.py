@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
@@ -681,6 +681,11 @@ class Runner(threading.Thread):
         extra = {"session_provider": provider, "session_model": model, "session_id": sid, "workdir": self.workname}
         bundle = self.upload(summary)
         extra["unpushed"] = bool(g.get("unpushed"))
+        # agent-exec collect computes both: `git rev-list --count HEAD --not --remotes` and `git rev-parse HEAD`
+        if isinstance(g.get("unpushed"), int) and not isinstance(g.get("unpushed"), bool):
+            extra["unpushed_commits"] = g["unpushed"]
+        if g.get("head"):
+            extra["head_sha"] = g["head"]
         if code == 75:
             return "limit", extra
         status_raw = safe_read(self.outbox, "AGENT_STATUS", 20000) if fresh("AGENT_STATUS") else None

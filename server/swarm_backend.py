@@ -55,7 +55,9 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
-VERSION = "0.7.1"
+import swarm_bus
+
+VERSION = "0.8.0"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -155,18 +157,41 @@ CREATE TABLE IF NOT EXISTS orchestrator_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, at INTEGER, type TEXT, actor TEXT, text TEXT, meta TEXT);
 CREATE TABLE IF NOT EXISTS orchestrator_messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, at INTEGER, sender TEXT, text TEXT, delivered_at INTEGER);
+-- Agent Bus (docs/agent-bus.md). Same tables and columns as agent-control migration 0026; the 0027 wake-policy columns
+-- are added by MIGRATE_COLUMNS below, so a new and an existing database take the same path.
+CREATE TABLE IF NOT EXISTS agents(
+  name TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('bot','orchestrator','human','service')),
+  wake TEXT NOT NULL CHECK (wake IN ('webhook','tmux','poll')),
+  bot_id TEXT, orchestrator TEXT, description TEXT,
+  token_gen INTEGER NOT NULL DEFAULT 1,
+  notices TEXT NOT NULL DEFAULT 'legacy' CHECK (notices IN ('legacy','bus')),
+  last_seen_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, retired_at INTEGER);
+CREATE TABLE IF NOT EXISTS agent_aliases(alias TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS bus_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, thread TEXT NOT NULL,
+  client_msg_id TEXT, body TEXT NOT NULL, meta TEXT, urgent INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','delivered','read','failed')),
+  created_at INTEGER NOT NULL, delivered_at INTEGER, read_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER, lease_until INTEGER, last_error TEXT, alerted_at INTEGER,
+  UNIQUE (sender, client_msg_id));
+CREATE TABLE IF NOT EXISTS bus_attempts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL,
+  transport TEXT NOT NULL CHECK (transport IN ('webhook','tmux','poll')),
+  started_at INTEGER NOT NULL, finished_at INTEGER, ok INTEGER NOT NULL DEFAULT 0, http_status INTEGER, error TEXT);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
 MIGRATE_COLUMNS = {
     "tasks": [("claim_id", "TEXT"), ("claimed_at", "INTEGER"), ("follow_up", "INTEGER DEFAULT 0"),
-              ("held_behind", "TEXT"), ("push_main", "INTEGER DEFAULT 0"), ("pushed_branch", "TEXT"),
+              ("held_behind", "TEXT"), ("push_main", "INTEGER DEFAULT 0"), ("pushed_branch", "TEXT"), ("pushed_current", "INTEGER"),
               ("workdir", "TEXT"), ("workspace_host", "TEXT"), ("session_model", "TEXT"),
               ("unpushed", "INTEGER DEFAULT 0"), ("human_snooze_until", "INTEGER"),
               ("waiting_since", "INTEGER"), ("reminded_at", "INTEGER"), ("escalated_at", "INTEGER"),
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
               ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
-              ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER")],
+              ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
+              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -174,6 +199,12 @@ MIGRATE_COLUMNS = {
                     ("about", "INTEGER")],
     "notices": [("event", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "workers": [("projects", "TEXT")],
+    # 0.8.0 Agent Bus: links a message typed into an orchestrator pane to its bus row; then the wake policy (agent-control 0027).
+    "orchestrator_messages": [("bus_message_id", "INTEGER")],
+    "agents": [("digest_minutes", "INTEGER NOT NULL DEFAULT 60"), ("last_digest_at", "INTEGER"), ("unreachable_since", "INTEGER"),
+               ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER")],
+    "bus_messages": [("wake", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0"), ("noop", "INTEGER NOT NULL DEFAULT 0"),
+                     ("reply_expected", "INTEGER NOT NULL DEFAULT 0")],
 }
 
 SCHEMA_INDEXES = """
@@ -197,11 +228,18 @@ CREATE INDEX IF NOT EXISTS activity_cursor ON activity_log(project, id);
 CREATE INDEX IF NOT EXISTS activity_dedupe ON activity_log(project, bot, dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orch_events_name ON orchestrator_events(name, id);
 CREATE INDEX IF NOT EXISTS orch_messages_name ON orchestrator_messages(name, delivered_at, id);
+CREATE INDEX IF NOT EXISTS idx_bus_messages_recipient ON bus_messages(recipient, id);
+CREATE INDEX IF NOT EXISTS idx_bus_messages_thread ON bus_messages(thread, id);
+CREATE INDEX IF NOT EXISTS idx_bus_messages_state ON bus_messages(state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_bus_attempts_message ON bus_attempts(message_id, id);
+CREATE INDEX IF NOT EXISTS bus_messages_created ON bus_messages(created_at);
+CREATE INDEX IF NOT EXISTS bus_attempts_started ON bus_attempts(started_at);
+CREATE INDEX IF NOT EXISTS bus_messages_held ON bus_messages(recipient, held, state);
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
-# 7 = orchestrators (0.7.0).
-SCHEMA_VERSION = 7
+# 7 = orchestrators (0.7.0). 8 = agent bus and wake policy (0.8.0).
+SCHEMA_VERSION = 8
 ACTIVITY_KINDS = ("activity", "shipped", "blocked", "decision")
 DECIDERS = ("owner", "delegated", "bot")
 CROSS_PROJECT = "cross-project"  # swarm-wide entries: any bot may write, only admin and chief read
@@ -367,6 +405,13 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.extra = extra or {}
+
+
+class Reply:
+    """A route result with its own HTTP status (the bus answers 201, 404 with hints, 429, ...)."""
+    def __init__(self, status, data):
+        self.status = status
+        self.data = data
 
 
 def new_id(prefix="t"):
@@ -549,6 +594,8 @@ class Backend:
         self.started_at = now()
         self.limiter = FailLimiter(env_int("SWARM_AUTH_FAIL_LIMIT", 20))
         self.secret_patterns = load_secret_patterns()
+        self.bus = swarm_bus.Bus(self, {"valid_notify_url": valid_notify_url, "post_json": post_json, "fingerprint": fingerprint,
+                                        "VERSION": VERSION})
 
     # ---------- auth ----------
     def who(self, header):
@@ -561,6 +608,10 @@ class Backend:
             return {"role": "admin", "bot": None}
         if self.worker_token and hmac.compare_digest(tok, self.worker_token):
             return {"role": "worker", "bot": None}
+        if tok.startswith("ab_"):
+            a = self.bus.agent_from_token(tok)
+            if a:
+                return {"role": "agent", "bot": None, "agent": a}
         if tok.startswith("swt_"):
             c = self.s.one("SELECT * FROM claims WHERE token_hash = ?", token_hash(tok))
             if c:
@@ -588,6 +639,9 @@ class Backend:
             return True
         if who["role"] == "task":
             return task["id"] == who["task"]
+        if who["role"] == "agent":  # a bus agent reads the tasks its own bot owns
+            a = self.bus.owner_agent(task.get("owner"), bus_only=False)
+            return bool(a and a["name"] == who["agent"]["name"])
         return who["role"] == "bot" and (task.get("owner") or "").lower() == who["bot"].lower()
 
     def get_task(self, who, task_id):
@@ -631,6 +685,7 @@ class Backend:
             "outcome": task.get("outcome"), "waiting_on": task.get("waiting_on"),
             "summary": (task.get("summary") or task.get("error") or "")[:500] or None,
             "pr_url": task.get("pr_url"), "parent_id": task.get("parent_id"),
+            "head_sha": task.get("head_sha"), "landed": self.landed(task),
             "report_url": f"{self.public_url}/tasks/{task['id']}/report" if self.public_url else None,
         }
         if unread and task["state"] in TERMINAL:
@@ -638,6 +693,41 @@ class Backend:
         if task["state"] == "waiting":
             p["question"] = task.get("question")
         return p
+
+    @staticmethod
+    def cannot_push(task):
+        """Tasks that can never publish are exempt from the landed rules: report-only, untrusted input, reviews and scripts."""
+        return bool(task.get("report_only") or task.get("untrusted") or task.get("kind") in ("script", "review"))
+
+    @staticmethod
+    def has_push_evidence(task):
+        """A pushed branch counts only when the current claim's finish reported it. A branch left over from an earlier claim says
+        nothing about the current head, unless nothing is unpushed. pushed_current NULL (rows from before this field existed) is treated
+        like 0: with known unpushed commits (a positive count) it is not evidence; a missing or zero count keeps the old trust."""
+        if not task.get("pushed_branch"):
+            return False
+        unpushed = task.get("unpushed_commits")
+        return task.get("pushed_current") == 1 or not (isinstance(unpushed, int) and unpushed > 0)
+
+    def landed(self, task):
+        """True: on GitHub (and the PR confirmed when one was asked for). False: known not to be. None: unknown (old worker) or not applicable."""
+        if self.has_push_evidence(task) and task.get("kind") == "code":
+            return bool(not task.get("open_pr") or task.get("pr_url"))
+        if (task.get("unpushed_commits") or 0) > 0 and task.get("kind") == "code" and not self.cannot_push(task):
+            return False
+        return None
+
+    def unlanded_detail(self, t, worker):
+        """Done means landed (code tasks): commits only on the worker, or a requested PR never confirmed, is not done. Inert for an
+        old worker (no unpushed_commits field), ops and review tasks and tasks without commits."""
+        if t.get("kind") != "code" or self.cannot_push(t):
+            return None
+        if (t.get("unpushed_commits") or 0) > 0 and not self.has_push_evidence(t):
+            return (f"Work is committed on {worker or 'the worker'} but NOT on GitHub: {t['unpushed_commits']} commit(s) not pushed. "
+                    "Re-queue with --push or --pr, or recover the branch.")
+        if t.get("open_pr") and self.has_push_evidence(t) and not t.get("pr_url"):
+            return f"Pushed {t['pushed_branch']} but no PR was confirmed on GitHub."
+        return None
 
     def queue_notice(self, event_id, target_bot, reason, payload):
         """Insert one delivery. The UNIQUE key keeps one row per event per bot (delivery is at least once)."""
@@ -656,13 +746,23 @@ class Backend:
     def bot(self, bot_id):
         return self.s.one("SELECT * FROM bots WHERE lower(id) = lower(?)", bot_id) if bot_id else None
 
-    def notify_task(self, task):
-        """Route a task event: owner bot first, Chief of Staff only for ownerless, waiting-on-human or fallback."""
+    def notify_task(self, task, no_bus=False):
+        """Route a task event: owner bot first, Chief of Staff only for ownerless, waiting-on-human or fallback.
+        An owner that resolves to a bus agent with notices=bus gets the notice on the bus only (no bot webhook, no Chief copy);
+        if the bus send fails, the normal path below runs, Chief copy included."""
         if task["state"] not in NOTIFY_STATES:
             return
         seq = self.s.one("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'state' AND text = ?",
                          task["id"], task["state"])["n"]
         event_id = f"{task['id']}:{task['state']}:{seq}"
+        if not no_bus and task.get("owner"):
+            agent = None
+            try:
+                agent = self.bus.owner_agent(task["owner"])
+            except Exception as e:
+                print("bus owner lookup failed:", repr(e), file=sys.stderr, flush=True)
+            if agent and self.bus.send_notice(agent, task, dict(self.payload(task, event_id, "owner"), notify_target="bus")):
+                return
         owner = self.bot(task.get("owner"))
         chief = self.chief()
         if owner and owner.get("notify_url"):
@@ -1207,7 +1307,11 @@ class Backend:
                           session_id=clean_text(b.get("session_id"), 200, "session_id") or t["session_id"],
                           workdir=clean_text(b.get("workdir"), 120, "workdir") or t["workdir"],
                           pushed_branch=clean_text(b.get("pushed_branch"), 200, "pushed_branch") or t["pushed_branch"],
+                          pushed_current=1 if clean_text(b.get("pushed_branch"), 200, "pushed_branch") else 0,
                           unpushed=1 if b.get("unpushed") else 0,
+                          head_sha=clean_text(b.get("head_sha"), 64, "head_sha") or t["head_sha"],
+                          unpushed_commits=b["unpushed_commits"] if isinstance(b.get("unpushed_commits"), int)
+                          and not isinstance(b.get("unpushed_commits"), bool) and b["unpushed_commits"] >= 0 else t["unpushed_commits"],
                           workspace_host=c["worker"] if (b.get("workdir") or t["workdir"]) else t["workspace_host"],
                           pending_answer=None)
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
@@ -1218,7 +1322,13 @@ class Backend:
             if status == "done":
                 # A chain cycle that hands on a checkpoint is not news; only the chain's end notifies the owner.
                 quiet = bool(checkpoint) and t["cycle"] < (t["max_cycles"] or 0)
-                t = self.set_state(t, "done", actor, notify=not quiet, outcome="done", error=None, **common)
+                unlanded = self.unlanded_detail(dict(t, **common), actor)
+                if unlanded and not quiet:
+                    # The agent's own "done" would read as success; lead with why it is not done.
+                    q = unlanded + (f"\nAgent's report: {common['summary'][:500]}" if common.get("summary") else "")
+                    t = self.set_state(t, "waiting", actor, outcome="blocked", question=q, waiting_on="owner", **common)
+                else:
+                    t = self.set_state(t, "done", actor, notify=not quiet, outcome="done", error=None, **common)
             elif status == "waiting":
                 q = clean_text(b.get("question"), 8000, "question") or "The worker needs an answer (no question text was given)."
                 on = "human" if t["ask_human"] or b.get("waiting_on") == "human" else "owner"
@@ -2378,6 +2488,7 @@ class Backend:
 
     def orch_message(self, who, name, b):
         text = clean_text(b.get("text"), ORCH_MESSAGE_MAX, "text")
+        text = swarm_bus.clean_body(text) if text else text   # no ESC or CR: it is typed into a terminal
         if not text:
             raise ApiError(400, "text is required")
         if self.secret_hit(text):
@@ -2387,11 +2498,16 @@ class Backend:
             r = self.get_orch(who, name)
             if r["desired"] != "running":
                 raise ApiError(409, f"orchestrator {name} is stopped")
-            if self.s.one("SELECT 1 FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL", name):
+            if self.s.one("SELECT 1 FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL AND bus_message_id IS NULL", name):
                 raise ApiError(409, "one message at a time: the last message has not been delivered yet")
             cur = self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text) VALUES(?,?,?,?)", name, now(), sender, text)
             self.orch_event(name, "message", sender, f"message queued ({len(text)} characters)")
-        return {"id": cur.lastrowid, "queued": True}
+            bus_id = None
+            try:
+                bus_id = self.bus.mirror_orchestrator_message(name, sender, text, cur.lastrowid)
+            except Exception as e:  # the bus must never break the old path
+                print("bus mirror failed:", repr(e), file=sys.stderr, flush=True)
+        return {"id": cur.lastrowid, "queued": True, **({"bus_id": bus_id} if bus_id else {})}
 
     def orch_heartbeat(self, who, name, b):
         """The supervisor on the pinned worker reports, and gets back what it should be doing."""
@@ -2451,6 +2567,10 @@ class Backend:
                                                       f"swarmctl orchestrator restart {name}")
             ack = b.get("delivered_message_id")
             if isinstance(ack, int) and not isinstance(ack, bool):
+                try:
+                    self.bus.on_orchestrator_delivered(ack)
+                except Exception as e:
+                    print("bus delivered mark failed:", repr(e), file=sys.stderr, flush=True)
                 if self.s.run("UPDATE orchestrator_messages SET delivered_at = ? WHERE id = ? AND name = ? AND delivered_at IS NULL",
                               now(), ack, name).rowcount:
                     self.orch_event(name, "message-delivered", worker, f"message {ack} typed into the session")
@@ -2680,8 +2800,13 @@ def deliver_once(backend, poster=None):
 
 
 def background(backend, stop):
-    while not stop.wait(5):
-        for job in (backend.reap, lambda: deliver_once(backend), backend.escalate, backend.watchdog, backend.retention,
+    # backend.bus.wake is set when a webhook message is written, so the first delivery try runs at once, not on the next tick.
+    while not stop.is_set():
+        backend.bus.wake.wait(5)
+        backend.bus.wake.clear()
+        if stop.is_set():
+            break
+        for job in (backend.reap, lambda: deliver_once(backend), backend.bus.flush, backend.escalate, backend.watchdog, backend.retention,
                     backend.weekly_export, backend.orchestrator_watch):
             try:
                 job()
@@ -2691,7 +2816,7 @@ def background(backend, stop):
 
 # ---------- HTTP ----------
 ROUTES = []
-EVERYONE = ("admin", "chief", "bot", "worker", "task")
+EVERYONE = ("admin", "chief", "bot", "worker", "task", "agent")
 
 
 def route(method, pattern, roles, doc, max_body=MAX_SMALL_BODY):
@@ -2723,7 +2848,7 @@ def r_list(api, who, m, qs, body, h):
     return api.list_tasks(who, qs)
 
 
-@route("GET", r"/tasks/([^/]+)", ("admin", "chief", "bot", "task"), "One task with its event thread. Bot: own only. Task token: own task only")
+@route("GET", r"/tasks/([^/]+)", ("admin", "chief", "bot", "task", "agent"), "One task with its event thread. Bot: own only. Task token: own task only. Bus agent: tasks its bot owns")
 def r_get(api, who, m, qs, body, h):
     return {"task": api.public_task(api.get_task(who, m[0]), events=True)}
 
@@ -2743,7 +2868,7 @@ def r_cancel(api, who, m, qs, body, h):
     return api.cancel(who, m[0])
 
 
-@route("GET", r"/tasks/([^/]+)/report", ("admin", "chief", "bot"), "REPORT.md as text. Bot: own only")
+@route("GET", r"/tasks/([^/]+)/report", ("admin", "chief", "bot", "agent"), "REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns")
 def r_report(api, who, m, qs, body, h):
     api.get_task(who, m[0])
     f = api.s.one("SELECT data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", m[0])
@@ -2990,6 +3115,122 @@ def r_notices(api, who, m, qs, body, h):
                                " FROM notices ORDER BY id DESC LIMIT 100")}
 
 
+# ---- Agent Bus (docs/agent-bus.md) ----
+def bus_who(who, raw=None, bus=None):
+    """The agent a request acts as: the token's agent, or (admin) the one named."""
+    if who["role"] == "agent":
+        return who["agent"]
+    return bus.resolve(raw) if raw else None
+
+
+@route("POST", r"/bus/send", ("admin", "agent"), "Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `noop`, "
+       "`reply_expected`, `meta`). Stored first, then woken. Admin sets `from`")
+def r_bus_send(api, who, m, qs, body, h):
+    if who["role"] == "agent":
+        frm = who["agent"]["name"]
+    else:
+        f = api.bus.resolve(body.get("from")) if body.get("from") else None
+        frm = f["name"] if f else swarm_bus.clean_from(body.get("from"))
+    status, data = api.bus.send({"from": frm, "to": body.get("to"), "body": body.get("body"), "thread": body.get("thread"),
+                                 "client_msg_id": body.get("client_msg_id"), "urgent": body.get("urgent") is True,
+                                 "noop": body.get("noop") is True,
+                                 "reply_expected": body["reply_expected"] if isinstance(body.get("reply_expected"), bool) else None,
+                                 "meta": body.get("meta")})
+    return Reply(status, data)
+
+
+@route("GET", r"/bus/inbox", ("admin", "agent"), "An agent's undelivered and unread messages (`all=1`, `after`, `limit`). Reading marks them delivered. Admin names `agent`")
+def r_bus_inbox(api, who, m, qs, body, h):
+    a = bus_who(who, qs.get("agent"), api.bus)
+    if not a:
+        return Reply(400, {"error": "agent= is required for the admin token"})
+    return api.bus.inbox(who, a, qs)
+
+
+def bus_message(api, who, raw_id, ack):
+    msg = api.s.one("SELECT * FROM bus_messages WHERE id = ?", int(raw_id)) if raw_id.isdigit() else None
+    party = msg and (who["role"] == "admin" or msg["recipient"] == who["agent"]["name"] or (not ack and msg["sender"] == who["agent"]["name"]))
+    if not party:
+        raise ApiError(404, "not found")
+    return msg
+
+
+@route("GET", r"/bus/messages/([^/]+)", ("admin", "agent"), "One message with its delivery attempts. Agent: sender or recipient")
+def r_bus_message(api, who, m, qs, body, h):
+    return api.bus.message_detail(bus_message(api, who, m[0], False))
+
+
+@route("POST", r"/bus/messages/([^/]+)/ack", ("admin", "agent"), "Mark a message read. `first` is true only once; also returns `newer_in_thread`. Agent: recipient only")
+def r_bus_ack(api, who, m, qs, body, h):
+    return api.bus.ack(bus_message(api, who, m[0], True))
+
+
+@route("GET", r"/bus/threads/([^/]+)", ("admin", "agent"), "The last messages of a thread (`limit`, up to 100). Agent: only ones it sent or received")
+def r_bus_thread(api, who, m, qs, body, h):
+    th = urllib.parse.unquote(m[0])
+    lim = api.bus._int(qs.get("limit"), 100, 100)
+    if who["role"] == "admin":
+        rows = api.s.q("SELECT * FROM (SELECT * FROM bus_messages WHERE thread = ? ORDER BY id DESC LIMIT ?) ORDER BY id", th, lim)
+    else:
+        me = who["agent"]["name"]
+        rows = api.s.q("SELECT * FROM (SELECT * FROM bus_messages WHERE thread = ? AND (sender = ? OR recipient = ?) ORDER BY id DESC LIMIT ?)"
+                       " ORDER BY id", th, me, me, lim)
+    return {"thread": th, "messages": [api.bus.shape_msg(r) for r in rows]}
+
+
+@route("GET", r"/bus/agents", ("admin", "agent"), "Agents with kind, wake, aliases and whether they are reachable")
+def r_bus_agents(api, who, m, qs, body, h):
+    return {"agents": [api.bus.shape_agent(a) for a in api.s.q("SELECT * FROM agents WHERE retired_at IS NULL ORDER BY name")]}
+
+
+@route("PUT", r"/bus/agents/([^/]+)", ("admin",), "Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`)")
+def r_bus_put_agent(api, who, m, qs, body, h):
+    return Reply(*api.bus.put_agent(swarm_bus.norm_name(urllib.parse.unquote(m[0])), body))
+
+
+@route("DELETE", r"/bus/agents/([^/]+)", ("admin",), "Retire an agent. Its history stays")
+def r_bus_retire(api, who, m, qs, body, h):
+    n = swarm_bus.norm_name(urllib.parse.unquote(m[0]))
+    t = now()
+    if not api.s.run("UPDATE agents SET retired_at = ?, updated_at = ? WHERE name = ? AND retired_at IS NULL", t, t, n).rowcount:
+        raise ApiError(404, "not found")
+    return {"ok": True, "name": n}
+
+
+@route("GET", r"/bus/agents/([^/]+)/token", ("admin", "worker"), "The agent's token. Admin: any. Worker token: the `worker` query is required and the agent's orchestrator must be pinned to that worker name (the name is self-declared: the kit has one shared worker token)")
+def r_bus_token(api, who, m, qs, body, h):
+    a = api.bus.resolve(swarm_bus.norm_name(urllib.parse.unquote(m[0])))
+    if not a:
+        raise ApiError(404, "not found")
+    if a["retired_at"]:
+        raise ApiError(410, f"agent {a['name']} is retired")
+    if who["role"] != "admin":
+        o = api.orch_row(a["orchestrator"]) if a["orchestrator"] else None
+        if not o:
+            raise ApiError(404, "not found")
+        if not qs.get("worker"):
+            raise ApiError(400, "the worker query (your worker name) is required")
+        if o["worker_id"] != qs["worker"]:
+            raise ApiError(404, "not found")
+    return {"name": a["name"], "token": api.bus.mint(a["name"], a["token_gen"])}
+
+
+@route("POST", r"/bus/agents/([^/]+)/token/rotate", ("admin",), "Revoke every token of the agent and return a new one")
+def r_bus_rotate(api, who, m, qs, body, h):
+    a = api.bus.resolve(swarm_bus.norm_name(urllib.parse.unquote(m[0])))
+    if not a:
+        raise ApiError(404, "not found")
+    if a["retired_at"]:
+        raise ApiError(410, f"agent {a['name']} is retired")
+    api.s.run("UPDATE agents SET token_gen = token_gen + 1, updated_at = ? WHERE name = ?", now(), a["name"])
+    return {"name": a["name"], "token": api.bus.token_for(a["name"])}
+
+
+@route("GET", r"/bus", ("admin",), "Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception)")
+def r_bus_page(api, who, m, qs, body, h):
+    return ("text/html; charset=utf-8", api.bus.page().encode())
+
+
 def permission_table():
     """The permission matrix, as published in docs/backend.md."""
     cols = list(EVERYONE)
@@ -3078,7 +3319,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "body must be JSON")
                 if not isinstance(body, dict):
                     raise ApiError(400, "body must be a JSON object")
+            self.headers.peer = self.client_address[0]
             res = r["fn"](self.api, who, match.groups(), qs, body, self.headers)
+            if isinstance(res, Reply):
+                return self._send(res.status, res.data)
             if isinstance(res, tuple):
                 return self._send(200, res[1], res[0])
             return self._send(200, res)
@@ -3104,6 +3348,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self._handle("PUT")
+
+    def do_DELETE(self):
+        self._handle("DELETE")
 
 
 class Server(ThreadingHTTPServer):

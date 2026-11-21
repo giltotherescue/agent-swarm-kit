@@ -168,11 +168,13 @@ class ClaudeInstallTest(unittest.TestCase):
 
     def run_install(self):
         # Our stand-in for sudo checks the exact form "-u USER -H bash -lc CODE" and runs CODE as this user.
+        # A login shell runs /etc/profile, which on some distributions resets PATH and would find a real curl or claude:
+        # the stand-in pins PATH again after the profiles ran, so only the stubs, the basic tools and ~/.local/bin are visible.
         # AGENT_USER is the user running the tests, so the installer's chown of the temp .profile works for any
         # user, not only for "agent" or root (install test 4, defect 5).
         script = (f'AGENT_HOME="{self.home}"\nAGENT_USER="$(id -un)"\nWITH_CODEX=0\n'
                   'sudo() { [[ "$1" == -u && "$3" == -H && "$4" == bash && "$5" == -lc ]] || { echo "bad sudo: $*"; return 99; }\n'
-                  f'  HOME="{self.home}" bash -lc "$6"; }}\n'
+                  f'  HOME="{self.home}" bash -lc "PATH=\\"\\$HOME/.local/bin:{self.tmp}/bin:{self.sys}\\"; $6"; }}\n'
                   'install_model_clis\nprintf "TODO:%s\\n" "${INCOMPLETE[@]}"\n')
         return bash(script, self.tmp, path=f"{self.tmp}/bin:{self.sys}")
 
@@ -361,10 +363,14 @@ class AptWaitTest(unittest.TestCase):
         self.assertIn("FREE", out)
 
     def test_proc_fallback_finds_the_holder(self):
-        lock = os.path.join(self.tmp, "lock")
-        holder = subprocess.Popen(["bash", "-c", f'exec 9>"{lock}"; sleep 5'])
+        lock = os.path.join(os.path.realpath(self.tmp), "lock")   # /proc shows the resolved path
+        # exec, so exactly one process (the pid we know) holds the lock, whether or not bash would fork for a last command
+        holder = subprocess.Popen(["bash", "-c", f'exec 9>"{lock}"; exec sleep 5'])
         self.addCleanup(lambda: (holder.kill(), holder.wait()))
-        time.sleep(0.3)
+        for _ in range(100):   # wait until the holder really has the lock open (a slow machine needs more than a fixed pause)
+            if any(os.path.realpath(f"/proc/{holder.pid}/fd/{fd}") == lock for fd in os.listdir(f"/proc/{holder.pid}/fd")):
+                break
+            time.sleep(0.1)
         # Hide fuser and lsof by giving a PATH without them.
         sysbin = os.path.join(self.tmp, "sys")
         os.makedirs(sysbin)
