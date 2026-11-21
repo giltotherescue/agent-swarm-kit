@@ -24,16 +24,22 @@ Queued messages now reach an orchestrator during a long busy turn (agent-control
   their fake Claude. With it, a readable screen with no box parts at all (no rule, no prompt line) and no menu takes an
   idle delivery or the wrap-up; never a busy paste, and never an empty or failed capture. Missing chrome alone is never
   taken as a stand-in.
-- **The box is read from the bottom.** The last rule is the box's bottom; the lines under it must be empty or start
-  with a line Claude Code draws there (mode line, `? for shortcuts`, `paste again to expand`, sign-in or update note)
-  and be at most 8. An empty box is exactly three rows: an unindented rule, the prompt line, the identical rule (or a
+- **The box is read from the bottom.** The last rule is the box's bottom; under it there must be 1 to 8 lines, every
+  one a status row Claude Code draws there (mode line, `? for shortcuts`, `paste again to expand`, sign-in, update,
+  tmux or effort note). No footer, or anything else after a genuine footer (a shell prompt, prose), is not a live box. An empty box is exactly three rows: an unindented rule, the prompt line, the identical rule (or a
   rounded box with both side bars). A prompt with a rule above it further up is a multiline draft; an indented or
   different rule, or a second prompt between the top and an earlier rule (two candidate boxes), is a draft. The
   only hint counted as empty is the verified literal `Press up to edit queued messages` on the prompt line; a quoted
   `Try "..."` cannot be told from typed text in a capture, so it is a draft.
 - **Captured again at the send boundary.** Right before each paste (after the message poll and any other network work)
   and before each Enter retry, the supervisor reads the pane again; the wrap-up started inside a heartbeat (an admin
-  restart) does the same. Menu words in the output above a readable empty box are history and do not block.
+  restart) does the same. With a readable box at the bottom only its footer can hold an active menu: words above it are
+  history and the box's contents are data, so a message quoting "Enter to confirm" is not a menu. If the fresh capture
+  shows the pane became busy during the message poll, the busy wait applies before anything is pasted.
+- **Enter submits only the pasted text.** Before every Enter (in `agent-exec orch-send` and in the supervisor's retry)
+  the box, from its first row, must hold exactly the pasted text (whitespace ignored, since wrapping changes it) or only
+  Claude Code's complete `[Pasted text #N +K lines]` marker. A prefix of the message followed by other text, someone
+  else's draft, or prose such as `my notes about [Pasted text` gets no Enter.
 - **No false receipts.** `agent-exec orch-send` exits 5 when nothing was pasted, 6 when the paste went in but Enter
   failed, and 7 when it pasted but withheld Enter because the pane turned into a menu or the pasted text left the
   box. The supervisor separates a definite failure before anything was typed (5, 2, 4, or agent-exec not starting:
@@ -44,10 +50,13 @@ Queued messages now reach an orchestrator during a long busy turn (agent-control
   failed, only the receipt is retried. A cached message is dropped as soon as a heartbeat says nothing is queued.
 - **Visible deferral.** A message the pane holds back for `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per
   message and reason as a `delivery-deferred` event, `reason=unknown_footer|draft|menu|unreadable` (the same reasons
-  as agent-control PR 67's fix round), with no pane contents. A deferral never times out into a paste.
+  as agent-control PR 67's fix round), plus `paste_failed` and `submit_failed` when tmux keeps refusing the paste or
+  Enter, with no pane contents. The timer runs from the first hold of that message and survives a failed heartbeat; it
+  is cleared only when a heartbeat confirms the queue head changed. A deferral never times out into a paste.
 - **Current folder trust screen.** Claude Code now asks "Quick safety check: Is this a project you created or one you
-  trust?" with `❯ No, exit` preselected. The supervisor presses Down, and Enter only once the `❯` is seen on
-  `Yes, I trust this folder` (each at most 3 times; a screen that does not move ends as `needs-login`). The older
+  trust?" with `❯ No, exit` preselected. The supervisor presses Down, and Enter only once the single `❯` of the active
+  dialog is seen on `Yes, I trust this folder`. Only the lowest first-run dialog on the screen counts (an earlier one
+  that scrolled up is ignored), and two selections send nothing (each at most 3 times; a screen that does not move ends as `needs-login`). The older
   "Do you trust the files in this folder" wording still gets Enter. A sign-in or API-key screen is never answered.
 - **Busy event recorded once.** The supervisor sends `delivered_busy_seconds` with the receipt and the backend records a
   `message-delivered-busy` event in the same first-delivery update as `message-delivered`, so a replayed receipt never

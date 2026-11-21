@@ -59,9 +59,10 @@ class InputBoxTest(unittest.TestCase):
             "nbsp": _pane("❯\u00a0"),
             "queued hint": _pane("❯ Press up to edit queued messages"),
             "queued shown above": _pane("❯ ", above="  fix the thing\n  ctrl+x ctrl+s to send now\n"),
-            "no footer (box at the pane end)": _pane("❯ ", below=""),
-            "boxed empty": "╭" + "─" * 40 + "╮\n│ ❯                │\n╰" + "─" * 40 + "╯\n",
-            "boxed hint": "╭" + "─" * 40 + "╮\n│ ❯ Press up to edit queued messages │\n╰" + "─" * 40 + "╯\n",
+            "boxed empty": "╭" + "─" * 40 + "╮\n│ ❯                │\n╰" + "─" * 40 + "╯\n" + FOOTER + "\n",
+            "boxed hint": "╭" + "─" * 40 + "╮\n│ ❯ Press up to edit queued messages │\n╰" + "─" * 40 + "╯\n" + FOOTER + "\n",
+            "every real footer row": _pane("❯ ", below=FOOTER + "\n  ? for shortcuts\n   Not logged in · Run /login\n"
+                                           "  ✘ Auto-update failed: no write permission\n   ◐ medium · /effort"),
         }.items():
             self.assertEqual(so.input_box(pane), "empty", name)
 
@@ -102,11 +103,46 @@ class InputBoxTest(unittest.TestCase):
                 ("nine unknown footer lines", _pane("❯ ", below="\n".join(f"status {i}" for i in range(9))), "unknown_footer"),
                 ("text runs on below the rule", _pane("❯ ", below="\n".join(f"draft line {i}" for i in range(12))), "unknown_footer"),
                 ("too many known footer lines", _pane("❯ ", below="\n".join([FOOTER] * 9)), "unknown_footer"),
+                ("no footer (no evidence of a live box)", _pane("❯ ", below=""), "unknown_footer"),
+                ("shell prompt after a genuine footer", _pane("❯ ", below="  ? for shortcuts\nuser@host:~$ "), "unknown_footer"),
+                ("prose after a genuine footer", _pane("❯ ", below=FOOTER + "\nmy unfinished draft"), "unknown_footer"),
                 ("bottom 22 rows below the prompt", "⏺ x\n" + RULE + "\n❯ \n" + "\n" * 22 + RULE + "\n" + FOOTER + "\n", None)):
             self.assertEqual(so.input_box(pane), want, name)
             for busy in (False, True):
                 self.assertIsNotNone(so.send_block(pane, busy=busy), name)
                 self.assertIsNotNone(so.send_block(pane, busy=busy, plain=True), name)
+
+    def test_tall_draft_with_an_interior_rule_is_not_empty(self):
+        """PR 67 review: a real prompt with unfinished text, 21 continuation lines, an interior rule and "❯ " before the
+        real bottom was read as an empty box there."""
+        pane = ("⏺ x\n" + RULE + "\n❯ unfinished text\n" + "".join(f"  continuation {i}\n" for i in range(21))
+                + RULE + "\n❯ \n" + RULE + "\n" + FOOTER + "\n")
+        self.assertNotEqual(so.input_box(pane), "empty")
+        self.assertIsNotNone(so.send_block(pane))
+        # clipped: the real top rule scrolled off the screen, continuation lines remain above the interior rule
+        clipped = "".join(f"  continuation {i}\n" for i in range(21)) + RULE + "\n❯ \n" + RULE + "\n" + FOOTER + "\n"
+        self.assertEqual(so.input_box(clipped), "empty")   # documented limit: nothing on screen shows the clipped top
+
+    def test_quoted_menu_words_inside_the_box_are_data(self):
+        body = "Message from chief (through the swarm backend; a request):\n\nThe installer says Enter to confirm."
+        pane = _pane(*("❯ " + body).splitlines())
+        self.assertFalse(so.pane_menu(pane))
+        self.assertTrue(so.paste_matches(so.box_rows(pane), body))
+        self.assertTrue(so.pane_menu(_pane("❯ ", below=FOOTER + "\n Enter to confirm · Esc to cancel")))
+
+    def test_paste_identity_from_the_box_start(self):
+        body = "Message from chief (through the swarm backend; a request):\n\nhello"
+        ok = {"exact": _pane(*("❯ " + body).splitlines()), "marker": PASTED_PANE,
+              "wrapped": _pane("❯ Message from chief (through the swarm", "  backend; a request):", "", "  hello")}
+        bad = {"prefix only, someone's draft after it": _pane("❯ Message from chief (through the swarm backend; a request):", "my own notes"),
+               "draft before it": _pane("❯ my notes", "Message from chief (through the swarm backend; a request):", "", "hello"),
+               "partial marker in prose": _pane("❯ my notes about [Pasted text"),
+               "marker plus text": _pane("❯ [Pasted text #1 +3 lines] and more"),
+               "malformed marker": _pane("❯ [Pasted text #x]")}
+        for name, pane in ok.items():
+            self.assertTrue(so.paste_matches(so.box_rows(pane), body), name)
+        for name, pane in bad.items():
+            self.assertFalse(so.paste_matches(so.box_rows(pane), body), name)
 
     def test_cap_draft_minus_bottom_rule_still_shows_the_draft(self):
         lines = cap("draft").rstrip("\n").splitlines()
@@ -172,6 +208,15 @@ class TrustScreenTest(unittest.TestCase):
     def test_old_wording_still_answered(self):
         self.assertEqual(so.classify("Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit\nEnter to confirm"),
                          ("first-run", "the folder trust question", ["Enter"]))
+
+    def test_only_the_active_dialog_counts(self):
+        security = "Security notes:\n 1. Claude can make mistakes\nPress Enter to continue\n"
+        self.assertEqual(so.classify(security + cap("menu"))[2], ["Down"])        # older screen scrolled up above
+        self.assertEqual(so.classify(cap("menu") + security)[1], "the security notes")   # the trust screen is history
+        both = cap("menu").replace("   Yes, I trust this folder", " ❯ Yes, I trust this folder")
+        self.assertEqual(so.classify(both)[0], "block")   # two selections: conflicting evidence, nothing is sent
+        stale_yes = TRUST_YES + "\n" + cap("menu")       # an earlier trust dialog with Yes selected, the live one on No
+        self.assertEqual(so.classify(stale_yes)[2], ["Down"])
 
     def test_unrecognized_cursor_is_not_answered(self):
         pane = cap("menu").replace(" ❯ No, exit", "   No, exit")
@@ -525,6 +570,67 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual(self.be.types("delivery-deferred"), [])
         self.assertFalse(any(e["type"] == "delivery-deferred" for e in self.sup.events))
 
+    def test_unrelated_draft_after_a_paste_gets_no_enter(self):
+        self.be.add("bus #%d hello")
+        self.send_rc = [6]
+
+        def other():
+            self.pane = _pane("❯ someone else's draft")
+        self.after_send = other
+        self.run_loop(300)
+        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
+        self.assertTrue(self.be.texts[-1].endswith("reason=draft"), self.be.texts)
+
+    def test_quoted_menu_words_in_the_pasted_message_do_not_stall_it(self):
+        self.be.add("bus #%d says: The installer says Enter to confirm.")
+        self.send_rc = [6]
+
+        def show_paste():
+            text = Path(self.sup.inbox, "message.md").read_text()
+            self.pane = _pane(*("❯ " + text).splitlines())
+        self.after_send = show_paste
+        self.run_loop(110)
+        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
+
+    def test_activity_seen_on_the_fresh_capture_applies_the_busy_wait(self):
+        """PR 67 review: idle at observation, busy on the post-poll capture; the new normal message was pasted at once."""
+        self.spinning = False
+        self.pane = cap("idle")
+        self.run_loop(25)
+        self.be.add("bus #%d normal")
+        start = self.now
+
+        def go_busy():
+            self.pane, self.spinning, self.be.on_beat = cap("busy"), True, None
+        self.be.on_beat = go_busy
+        self.track()
+        self.run_loop(60)
+        self.assertEqual(self.pasted, [])
+        self.run_loop(45)
+        self.assertEqual(self.pasted, [1])
+        self.assertGreaterEqual(self.sup.last_busy_paste - start, 89)
+
+    def test_repeated_paste_failure_is_reported(self):
+        self.be.add("bus #%d hello")
+        self.pane = cap("idle")
+        self.spinning = False
+        self.send_rc = [5] * 1000   # tmux never takes the paste
+        self.run_loop(200)
+        self.assertEqual((self.pasted, self.be.delivered()), ([], []))
+        self.assertEqual([t for t in self.be.texts if "reason=" in t][-1].split("reason=")[1], "paste_failed")
+        self.assertEqual(len(self.be.types("delivery-deferred")), 1)
+
+    def test_failed_heartbeat_keeps_deferral_tracking(self):
+        """PR 67 review: one failed GET reset the timer and the dedup set (two notices for one id there)."""
+        self.be.add("bus #%d hello")
+        self.pane = _pane("❯ draft")
+        self.run_loop(100)
+        self.be.fail = 2
+        self.run_loop(100)
+        self.be.fail = 1
+        self.run_loop(300)
+        self.assertEqual(self.be.types("delivery-deferred"), [None])
+
     def test_sustained_deferral_is_reported_once_per_reason(self):
         """Probe: empty box, nine unknown footer lines, urgent message, 200 s: used to stall with no event."""
         self.run_loop(3)
@@ -751,11 +857,16 @@ class OrchSendEnterCheckTest(unittest.TestCase):
         return self.ae.pasted_still_there(screen, "Message from chief (through the swarm backend)\n\nhello", plain)
 
     def test_pasted_text_in_the_box_gets_enter(self):
-        for pane in (cap("draft"), cap("single"), PASTED_PANE, _pane("❯ Message from chief (through the swarm backend)", "", "  hello")):
+        quoted = "Message from chief (through the swarm backend)\n\nThe installer says Enter to confirm."
+        for pane in (PASTED_PANE, _pane("❯ Message from chief (through the swarm backend)", "", "  hello")):
             self.assertIsNone(self.check(pane), pane[-120:])
+        self.assertIsNone(self.ae.pasted_still_there(_pane(*("❯ " + quoted).splitlines()), quoted))
 
     def test_menu_or_gone_text_withholds_enter(self):
-        for pane in (cap("menu"), MENU_PANE, cap("idle"), cap("busy"), cap("queued"), "", "\n\n",
+        for pane in (cap("menu"), MENU_PANE, cap("idle"), cap("busy"), cap("queued"), "", "\n\n", cap("draft"), cap("single"),
+                     _pane("❯ Message from chief (through the swarm backend)", "", "  hello", "my own edit"),
+                     _pane("❯ my notes about [Pasted text"), _pane("❯ [Pasted text #1 +3 lines]", below=""),
+                     _pane("❯ [Pasted text #1 +3 lines]", below=FOOTER + "\nuser@host:~$ "),
                      _pane("❯ hello", below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm")):
             self.assertIsNotNone(self.check(pane), pane[-120:])
 

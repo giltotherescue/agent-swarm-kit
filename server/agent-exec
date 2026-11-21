@@ -559,14 +559,21 @@ def cmd_orch_status(p, name, lines, sessions_dir):
 PANE_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")
 PANE_PROMPT = re.compile(r"^[\s│┃|]*[>❯](?:\s|$)")
 PANE_MENU = re.compile(r"^[\s│┃|]*❯\s*\d+[.)]\s|(?:Esc|Enter) to (?:cancel|select|confirm)", re.I)
+# Same lists as swarm_orchestrator.py (agent-exec is installed alone, so it cannot import them).
+PANE_FOOTER = re.compile(r"^\s*(?:⏵⏵ |⏸ |\? for shortcuts|paste again to expand|esc to interrupt|Press Ctrl-[CD] again to exit|"
+                         r"Not logged in · |✘ Auto-update failed|✓ Update installed|tmux focus-events off|"
+                         r"[◐◑◒◓○●] \w+ · /effort)")
+PANE_PASTED = re.compile(r"^\[Pasted text #\d+(?: \+\d+ lines?)?\]$")
 
 
 def pasted_still_there(screen, text, plain=False):
-    """Between the paste and Enter: None when Enter would submit the pasted text, else why not.
+    """Between the paste and Enter: None when Enter would submit exactly the pasted text, else why not.
 
-    Claude Code: its input box must still be at the bottom of the pane (a menu or dialog replaces it) and hold text, the
-    paste or its "[Pasted text]" placeholder; an empty box means the text is gone. plain (a box-less test stand-in): no
-    menu hints at the bottom and the start of the pasted text on screen."""
+    Claude Code: its input box must still be at the bottom of the pane (a menu or dialog replaces it), closed by 1 to 8
+    known status rows, with no active menu control in them; from the prompt line right under the box's top rule the box
+    must hold exactly the pasted text (whitespace ignored, since wrapping changes it) or only Claude Code's complete
+    "[Pasted text #N +K lines]" marker. The text is compared as data: a message that quotes "Enter to confirm" is fine.
+    plain (a box-less test stand-in): no menu hints at the bottom and the start of the pasted text on screen."""
     lines = [ln.rstrip() for ln in (screen or "").splitlines()]
     while lines and not lines[-1].strip():
         lines.pop()
@@ -577,17 +584,28 @@ def pasted_still_there(screen, text, plain=False):
             return "a menu is on screen"
         first = text.strip().splitlines()[0][:30] if text.strip() else ""
         return None if first and first in screen else "the pasted text is not on screen"
+    nobox = "no input box at the bottom of the pane (a menu or another screen)"
     bot = next((i for i in range(len(lines) - 1, -1, -1) if PANE_RULE.match(lines[i])), None)
-    footer = [ln for ln in lines[bot + 1:] if ln.strip()] if bot is not None else []
-    if bot is None or len(footer) > 8 or any(PANE_PROMPT.match(ln) or PANE_MENU.search(ln) for ln in footer):
-        return "no input box at the bottom of the pane (a menu or another screen)"
+    if bot is None:
+        return nobox
+    footer = [ln for ln in lines[bot + 1:] if ln.strip()]
+    if not footer or len(footer) > 8 or not all(PANE_FOOTER.match(ln) for ln in footer):
+        return nobox
+    if any(PANE_MENU.search(ln) for ln in footer):
+        return "a menu is on screen"
+    # The box's first row: the lowest prompt line with a rule right above it, at most 40 rows up (a taller box fails).
     p = next((i for i in range(bot - 1, max(0, bot - 41), -1) if PANE_PROMPT.match(lines[i]) and PANE_RULE.match(lines[i - 1])), None)
     if p is None:
-        return "no input box at the bottom of the pane (a menu or another screen)"
-    body = [re.sub(r"^[\s│┃|]*[>❯]", "", lines[p], count=1)] + lines[p + 1:bot]
-    body = [ln.strip().strip("│┃").strip() for ln in body]
-    if not any(body) or body == ["Press up to edit queued messages"]:
+        return nobox
+    rows = [re.sub(r"^[\s│┃|]*[>❯]", "", lines[p], count=1)] + lines[p + 1:bot]
+    rows = [r.strip().strip("│┃").strip() for r in rows]
+    shown = [r for r in rows if r]
+    if not shown or shown == ["Press up to edit queued messages"]:
         return "the pasted text is gone from the input box"
+    if len(shown) == 1 and PANE_PASTED.match(shown[0]):
+        return None
+    if re.sub(r"\s+", "", "".join(shown)) != re.sub(r"\s+", "", text):
+        return "the input box holds something other than the pasted text"
     return None
 
 

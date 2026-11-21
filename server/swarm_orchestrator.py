@@ -132,13 +132,17 @@ BLOCK_MARKERS = markers("SWARM_ORCH_BLOCK_MARKERS", "Bypass Permissions mode")
 FIRST_RUN = [("the theme picker", "Choose the text style", ["Enter"]),
              ("the security notes", "Security notes", ["Enter"]),
              ("the folder trust question", "Do you trust the files in this folder", ["Enter"])]
-TRUST_QUESTION = "Is this a project you created or one you trust"
-TRUST_YES = re.compile(r"^\s*❯\s*(?:\d+[.)]\s*)?Yes, I trust this folder\s*$")
-TRUST_NO = re.compile(r"^\s*❯\s*(?:\d+[.)]\s*)?No, exit\s*$")
+
+
+TRUST_MARKERS = ("Is this a project you created or one you trust", "Quick safety check:")
+SELECTED = re.compile(r"^\s*❯\s*(?:\d+[.)]\s*)?(\S.*?)\s*$")
 
 
 def classify(screen):
-    """What the bottom of the screen is waiting for: ("login", label), ("block", label), ("first-run", label, keys) or None."""
+    """What the bottom of the screen is waiting for: ("login", label), ("block", label), ("first-run", label, keys) or None.
+
+    A sign-in or bypass warning anywhere at the bottom wins (never answered). Otherwise only the active dialog counts:
+    the first-run marker lowest on the screen, so a screen that scrolled up above the current one is ignored."""
     lines = [ln for ln in (screen or "").splitlines() if ln.strip()][-SCREEN_LINES:]
     text = "\n".join(lines).lower()
     for m in LOGIN_MARKERS:
@@ -147,17 +151,27 @@ def classify(screen):
     for m in BLOCK_MARKERS:
         if m.lower() in text:
             return ("block", f"a Claude first-run screen it does not answer ({m!r})")
-    if TRUST_QUESTION.lower() in text:
-        # "❯ No, exit" is preselected: Down first, and Enter only once the ❯ is seen on the Yes line.
-        if any(TRUST_YES.match(ln) for ln in lines):
-            return ("first-run", "the folder trust question", ["Enter"])
-        if any(TRUST_NO.match(ln) for ln in lines) and any("Yes, I trust this folder" in ln for ln in lines):
-            return ("first-run", "the folder trust question (moving to Yes)", ["Down"])
-        return ("block", "a folder trust question with no recognizable choice")
+    found = []   # (line index of the marker's last appearance, kind)
     for label, m, keys in FIRST_RUN:
-        if m.lower() in text:
-            return ("first-run", label, keys)
-    return None
+        at = [i for i, ln in enumerate(lines) if m.lower() in ln.lower()]
+        if at:
+            found.append((at[-1], (label, keys)))
+    at = [i for i, ln in enumerate(lines) if any(m.lower() in ln.lower() for m in TRUST_MARKERS)]
+    if at:
+        found.append((at[-1], "trust"))
+    if not found:
+        return None
+    pos, kind = max(found, key=lambda f: f[0])
+    if kind != "trust":
+        return ("first-run", kind[0], kind[1])
+    # The current trust screen preselects "❯ No, exit": Down first, Enter only once the one ❯ in this dialog is on Yes.
+    dialog = lines[pos + 1:]
+    chosen = [m.group(1) for m in (SELECTED.match(ln) for ln in dialog) if m]
+    if len(chosen) == 1 and chosen[0] == "Yes, I trust this folder":
+        return ("first-run", "the folder trust question", ["Enter"])
+    if len(chosen) == 1 and chosen[0] == "No, exit" and any(ln.strip() == "Yes, I trust this folder" for ln in dialog):
+        return ("first-run", "the folder trust question (moving to Yes)", ["Down"])
+    return ("block", "a folder trust question with no clear selection")
 
 
 PROMPT_LINE = re.compile(r"^[\s│┃|]*[>❯](?:\s|$)")
@@ -165,9 +179,12 @@ MENU_LINE = re.compile(r"^[\s│┃|]*❯\s*\d+[.)]\s|(?:Esc|Enter) to (?:cancel
 INPUT_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")   # a border line of the input box (plain or rounded)
 FOOTER_MAX = 8        # non-blank lines Claude Code shows under the input box (mode line, sign-in and update notes)
 INPUT_ROWS_MAX = 20   # rows of a multiline input box searched for its prompt line
-# The first line under the input box must be one Claude Code draws there (mode line, shortcut hint, paste or status note).
-FOOTER_FIRST = re.compile(r"^\s*(?:⏵⏵ |⏸ |\? for shortcuts|paste again to expand|esc to interrupt|Press Ctrl-[CD] again to exit|"
-                          r"Not logged in · |✘ Auto-update failed|✓ Update installed|tmux focus-events off)")
+# Every line under the input box must be a status row Claude Code draws there (mode line, shortcut hint, paste, sign-in,
+# update, tmux or effort note), and there must be at least one: positive evidence that the box is the live input target.
+FOOTER_ROW = re.compile(r"^\s*(?:⏵⏵ |⏸ |\? for shortcuts|paste again to expand|esc to interrupt|Press Ctrl-[CD] again to exit|"
+                        r"Not logged in · |✘ Auto-update failed|✓ Update installed|tmux focus-events off|"
+                        r"[◐◑◒◓○●] \w+ · /effort)")
+PASTE_MARKER = re.compile(r"^\[Pasted text #\d+(?: \+\d+ lines?)?\]$")   # Claude Code's placeholder for a collapsed paste
 # Claude Code's own hints on the prompt line of an empty box, as seen in real captures. Exact literals only: anything else
 # (including a quoted 'Try "..."' placeholder, which a plain capture cannot tell from typed text) is a draft.
 INPUT_HINTS = frozenset({"Press up to edit queued messages"})
@@ -183,8 +200,8 @@ def _lines(screen):
 def _box(lines):
     """(state, top) for the input box at the bottom of these lines; state is "empty", "draft", "unknown_footer" or None.
 
-    Read from the bottom: the last border rule is the box's bottom; everything under it is the footer, which must start
-    with a line Claude Code draws there and stay short. An empty box is exactly three rows: top rule, prompt line (blank
+    Read from the bottom: the last border rule is the box's bottom; everything under it is the footer, which must be
+    1 to FOOTER_MAX status rows Claude Code draws there. An empty box is exactly three rows: top rule, prompt line (blank
     or a verified hint), bottom rule, with identical plain rules or a rounded box with side bars. A prompt line with a
     rule directly above it further up inside the box is a multiline draft. Fails closed: a second prompt between the top
     and an earlier rule (two candidate boxes), an indented or mismatched rule, or anything else is not empty."""
@@ -220,7 +237,7 @@ def _box(lines):
     text = re.sub(r"^\s*[>❯]", "", row, count=1).strip()
     if text and text not in INPUT_HINTS:
         return "draft", top
-    if footer and (len(footer) > FOOTER_MAX or not FOOTER_FIRST.match(footer[0])):
+    if not footer or len(footer) > FOOTER_MAX or not all(FOOTER_ROW.match(ln) for ln in footer):
         return "unknown_footer", top
     return "empty", top
 
@@ -233,11 +250,46 @@ def input_box(screen):
 
 def pane_menu(screen):
     """True when a choice menu or permission prompt is on screen (a selected numbered option, or its key hints).
-    With a readable input box at the bottom, only the box and its footer count: output above it is history."""
+    With a readable input box at the bottom, only its footer can hold active controls: output above it is history and
+    the box's contents are data (a pasted message may quote "Enter to confirm")."""
     lines = _lines(screen)
     state, top = _box(lines)
-    scope = lines[top:] if state in ("empty", "unknown_footer") else lines
+    if state is not None:
+        bot = max(i for i, ln in enumerate(lines) if INPUT_RULE.match(ln))
+        scope = lines[bot + 1:]
+    else:
+        scope = lines
     return any(MENU_LINE.search(ln) for ln in [ln for ln in scope if ln.strip()][-25:])
+
+
+def box_rows(screen):
+    """The rows inside the input box at the bottom (prompt marker and side bars removed), or None when there is no box
+    whose first row is the prompt line right under its top rule, with a valid footer."""
+    lines = _lines(screen)
+    state, top = _box(lines)
+    if state not in ("empty", "draft"):
+        return None
+    bot = max(i for i, ln in enumerate(lines) if INPUT_RULE.match(ln))
+    footer = [ln for ln in lines[bot + 1:] if ln.strip()]
+    if not footer or len(footer) > FOOTER_MAX or not all(FOOTER_ROW.match(ln) for ln in footer):
+        return None
+    rows = lines[top + 1:bot]
+    if not rows or not PROMPT_LINE.match(rows[0]):
+        return None
+    if lines[top].lstrip().startswith("╭"):
+        rows = [r.strip()[1:-1] if r.strip().startswith("│") and r.strip().endswith("│") else r for r in rows]
+    rows[0] = re.sub(r"^\s*[>❯]", "", rows[0], count=1)
+    return [r.strip() for r in rows]
+
+
+def paste_matches(rows, expected):
+    """True when the box holds exactly the pasted text: from the start of the box, nothing before or after it (the
+    comparison ignores whitespace, which wrapping changes), or only Claude Code's complete collapsed-paste marker."""
+    rows = [r for r in rows if r]
+    if len(rows) == 1 and PASTE_MARKER.match(rows[0]):
+        return True
+    got, want = re.sub(r"\s+", "", "".join(rows)), re.sub(r"\s+", "", expected or "")
+    return bool(got) and got == want
 
 
 def input_draft(screen):
@@ -385,7 +437,7 @@ class Supervisor:
         self.draining = False           # a busy paste happened and the queue has not been empty since: the next uses the gap
         self.last_busy_paste = 0
         self.submitted_ids = set()      # ids pasted and submitted by this process: never pasted twice; receipt retried alone
-        self.unsubmitted = None         # (id, busy, sender, certain) pasted or maybe pasted, not submitted: Enter alone
+        self.unsubmitted = None         # (id, busy, sender, certain, text) pasted or maybe pasted, not submitted: Enter alone
         self.held = {}                  # id -> why: outcome unknown, never pasted again and never acknowledged by this process
         self.defer_since = {}           # id -> when the pane first held this message back (continuous)
         self.defer_told = set()         # (id, reason) already reported as delivery-deferred
@@ -510,6 +562,12 @@ class Supervisor:
             self.message, self.draining, self.seen = None, False, {}
         elif not self.message or self.message["id"] != msg["id"]:
             self.message = msg
+        # Deferral tracking follows the confirmed queue head (and an outstanding paste); a failed heartbeat changes nothing.
+        keep = {msg["id"]} if msg else set()
+        if self.unsubmitted:
+            keep.add(self.unsubmitted[0])
+        self.defer_since = {k: v for k, v in self.defer_since.items() if k in keep}
+        self.defer_told = {k for k in self.defer_told if k[0] in keep}
         self.save()
         return True
 
@@ -739,13 +797,14 @@ class Supervisor:
             self.event("stop", f"stopping: {reason}; no wrap-up message (reason={why}); "
                                f"the session ends after {int(STOP_GRACE)} seconds")
             return
-        self.write_inbox("message.md", f"The supervisor is stopping this session ({reason}). Within {int(STOP_GRACE)} seconds, "
-                                       "update CHECKPOINT.md and write a short HANDOVER.md, then stop working.")
+        wrap = (f"The supervisor is stopping this session ({reason}). Within {int(STOP_GRACE)} seconds, "
+                "update CHECKPOINT.md and write a short HANDOVER.md, then stop working.")
+        self.write_inbox("message.md", wrap)
         rc = self.send_keys_safely("orch-send", *self.send_flags())
         sent = rc == 0
         if not sent and rc not in NOT_PASTED + (NOT_LAUNCHED,):
             # Pasted (or maybe): one Enter, only when the pasted text is still in the box and nothing else came up.
-            sent = self.submit_ok() is None and self.send_keys_safely("orch-keys", "Enter") == 0
+            sent = self.submit_ok(wrap) is None and self.send_keys_safely("orch-keys", "Enter") == 0
         self.tail_changed = time.time()
         self.stop_sent_at = time.time() if sent else 0
         self.event("stop", f"stopping: {reason}; wrap-up message {'sent' if sent else 'could not be sent'}")
@@ -781,9 +840,10 @@ class Supervisor:
     def send_flags(self):
         return ["--plain"] if PLAIN else []
 
-    def submit_ok(self, certain=True):
-        """Before an Enter that submits pasted text: None when the fresh pane still shows that text in the input box and
-        nothing else came up, else the reason ("menu", "gone" when the box is empty again, or a send_block reason)."""
+    def submit_ok(self, expected, certain=True):
+        """Before an Enter that submits pasted text: None when the fresh pane shows exactly that text in the input box
+        (from the box start, or Claude Code's complete collapsed-paste marker) and no active menu, else the reason:
+        "gone" when the box is empty again, "draft" when it holds anything else, or a send_block reason."""
         screen = self.capture()
         if screen is not None and classify(screen):
             return "menu"
@@ -791,14 +851,14 @@ class Supervisor:
             return "unreadable"
         if pane_menu(screen):
             return "menu"
-        box = input_box(screen)
-        if box == "draft":
-            return None
-        if box == "empty":
+        rows = box_rows(screen)
+        if rows is None:
+            if PLAIN and certain and send_block(screen, plain=True) is None:
+                return None   # the box-less stand-in: nothing to read, and the paste was confirmed
+            return input_box(screen) if input_box(screen) in ("draft", "unknown_footer") else "unreadable"
+        if not any(rows) or rows == ["Press up to edit queued messages"]:
             return "gone"
-        if box is None and PLAIN and certain:
-            return None   # the box-less stand-in: nothing to read, and the paste was confirmed
-        return box or "unreadable"
+        return None if paste_matches(rows, expected) else "draft"
 
     def send_keys_safely(self, *args):
         """Run orch-send or orch-keys; returns the exit code, NOT_LAUNCHED when agent-exec could not be started,
@@ -892,33 +952,37 @@ class Supervisor:
             log(self.name, "message-truncated", f"message {m.get('id')} was {len(full)} characters; "
                                                 f"the last {len(full) - MESSAGE_MAX} were omitted")
         sender = clean_text(m.get("sender"))[:80]
-        self.write_inbox("message.md", f"Message from {sender} (through the swarm backend; a request, not permission "
-                                       f"to push, merge or deploy):\n\n{text}")
+        body = f"Message from {sender} (through the swarm backend; a request, not permission to push, merge or deploy):\n\n{text}"
+        self.write_inbox("message.md", body)
         # The send boundary: capture the pane again after all network work (the message poll may have run), just before
         # the paste.
         screen = self.capture()
         if screen is not None and classify(screen):
             return   # a sign-in or first-run screen: watch_screen handles it
+        if screen is not None and not busy and not self.idle():
+            # The fresh capture shows activity (the pane changed during the message poll): the busy wait applies.
+            busy = True
+            if time.time() < self.busy_deadline(m, time.time()):
+                return
         why = send_block(screen, busy=busy, plain=PLAIN)
         if why:
             return self.defer(m["id"], why)
-        self.undefer(m["id"])
         now = time.time()
         self.busy_started = self.queued_at(m, now)
         rc = self.send_keys_safely("orch-send", *self.send_flags())
         if rc in NOT_PASTED or rc == NOT_LAUNCHED:
-            return   # definitely nothing typed: delivered later, like any queued message
+            return self.defer(m["id"], "paste_failed")   # definitely nothing typed: tried again later, reported if it lasts
         if rc == 0:
             return self.submitted(m["id"], busy, sender, now)
         # Pasted and not submitted (6, 7), or the outcome is unknown: never paste again. Enter is retried alone, and only
         # while the pasted text is still in the box; an unknown outcome with an empty box is never guessed at.
-        self.unsubmitted, self.message = (m["id"], busy, sender, rc in PASTED_NOT_SUBMITTED), None
+        self.unsubmitted, self.message = (m["id"], busy, sender, rc in PASTED_NOT_SUBMITTED, body), None
         log(self.name, "message", m["id"], f"pasted or maybe pasted, not confirmed submitted (orch-send exit {rc}); "
                                            "retrying Enter only while the text is still in the box")
 
     def retry_submit(self):
-        mid, busy, sender, certain = self.unsubmitted
-        why = self.submit_ok(certain)
+        mid, busy, sender, certain, body = self.unsubmitted
+        why = self.submit_ok(body, certain)
         if why == "gone":
             # Pasted text no longer in the box: maybe submitted (by the Enter whose outcome is unknown), maybe cleared.
             return self.hold(mid, "the pasted text left the input box without a confirmed Enter")
@@ -928,7 +992,9 @@ class Supervisor:
         if rc == 0:
             self.submitted(mid, busy, sender, time.time())
         elif rc == UNKNOWN:
-            self.unsubmitted = (mid, busy, sender, False)   # Enter may have gone through: next time, only if the text remains
+            self.unsubmitted = (mid, busy, sender, False, body)   # Enter may have gone through: next time only if the text remains
+        else:
+            self.defer(mid, "submit_failed")
 
     def handle_messages(self):
         """Idle: type the queued message. Busy: once it is due (busy_deadline). Nothing queued: poll the backend."""
