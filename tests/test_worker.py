@@ -264,9 +264,13 @@ class RepoWorkerTest(WorkerTest):
     def test_follow_up_restores_unpushed_parent_work(self):
         pid = self.admin("POST", "/tasks", {"prompt": "COMMIT local.txt", "repo": "acme/site"})["task"]["id"]
         p = self.run_one()
-        self.assertEqual((p["state"], p["unpushed"]), ("done", 1), p)
+        # 0.8.0 done means landed: commits that exist only on the worker are not "done".
+        self.assertEqual((p["state"], p["outcome"], p["unpushed"], p["unpushed_commits"]), ("waiting", "blocked", 1, 1), p)
+        self.assertIn("NOT on GitHub", p["question"])
         self.assertIsNone(self.files_on(f"agent/{pid}"), "nothing was pushed")
         shutil.rmtree(os.path.join(self.w.WORK, pid))  # the folder is gone (cleanup or another worker)
+        # The owner accepts the unlanded work as it is (marks it done); a follow-up must still restore it from the bundle.
+        self.api.s.run("UPDATE tasks SET state = 'done', outcome = 'done', finished_at = 1 WHERE id = ?", pid)
         fid = self.admin("POST", "/tasks", {"follow_up": pid, "prompt": "NEED_FILE local.txt COMMIT more.txt", "push": True})["task"]["id"]
         t = self.run_one()
         self.assertEqual((t["id"], t["state"]), (fid, "done"), t)

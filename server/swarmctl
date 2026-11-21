@@ -33,6 +33,7 @@ Examples:
   swarmctl orchestrator create app-steward --worker build-box -p app --owner app-bot --brief steward.md --start
   swarmctl orchestrator list | status NAME | logs NAME | start | stop | restart NAME   (see docs/orchestrators.md)
   swarmctl orchestrator message app-steward "Look at the signup page next"
+  swarmctl bus send chief "Deploy done" --no-reply ; swarmctl bus inbox ; swarmctl bus ack 7   (BUS_AGENT=NAME)
 """
 import argparse
 import base64
@@ -51,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DRAIN_FILE = os.environ.get("SWARM_DRAIN_FILE", "/var/lib/swarm-runner/drain")
 STATE_FILE = os.environ.get("SWARM_STATE_FILE", "/var/lib/swarm-runner/runner-state.json")
@@ -618,6 +619,356 @@ def cmd_drain(a):
     print("done: restarted while idle, and the worker takes new tasks again")
 
 
+# ---- swarmctl bus: Agent Bus client (send, inbox, ack, status, thread, agents, whoami; admin register, retire, token) ----
+BUS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+BUS_CT = ZoneInfo("America/Chicago")
+
+
+class BusCreds:
+    def __init__(self, kind, secret, source, agent=None):
+        self.kind, self.secret, self.source, self.agent = kind, secret, source, agent  # kind: agent | admin
+
+
+def bus_clean(text, n=300):
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text))[:n]
+
+
+def bus_read_secret(path, what):
+    try:
+        v = Path(path).read_text().strip()
+    except OSError:
+        sys.exit(f"swarmctl: cannot read the {what} file {path}")
+    if not v:
+        sys.exit(f"swarmctl: the {what} file {path} is empty")
+    return v
+
+
+def bus_admin_creds(agent=None):
+    path = os.path.expanduser(os.environ.get("SWARM_TOKEN_FILE", "~/.config/swarm/client.token"))
+    return BusCreds("admin", bus_read_secret(path, "admin token"), f"admin client token {path}", agent)
+
+
+def bus_credentials(as_name=None, need_admin=False):
+    """Agent token first (BUS_TOKEN_FILE, then ~/.config/swarm/agents/$BUS_AGENT.token), else the admin client token."""
+    agent = as_name or os.environ.get("BUS_AGENT") or None
+    if agent and not BUS_NAME_RE.match(agent):
+        sys.exit("swarmctl: the agent name is not valid")
+    if need_admin or as_name:
+        return bus_admin_creds(agent)
+    if os.environ.get("BUS_TOKEN_FILE"):
+        p = os.path.expanduser(os.environ["BUS_TOKEN_FILE"])
+        return BusCreds("agent", bus_read_secret(p, "token"), f"BUS_TOKEN_FILE={p}", agent)
+    if agent:
+        p = Path(os.path.expanduser("~/.config/swarm/agents")) / f"{agent}.token"
+        if p.exists():
+            return BusCreds("agent", bus_read_secret(p, "token"), str(p), agent)
+    if not agent:
+        sys.exit("swarmctl: no bus identity: set BUS_AGENT (or BUS_TOKEN_FILE), or use `swarmctl bus --as NAME ...` with the admin token")
+    return bus_admin_creds(agent)
+
+
+def bus_request(path, creds, method="GET", data=None, retries=0):
+    url = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/") + path
+    last = "request failed"
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(min(0.3 * 2 ** (attempt - 1), 2.0))
+        req = urllib.request.Request(url, method=method, data=None if data is None else json.dumps(data).encode(), headers={
+            "Authorization": "Bearer " + creds.secret, "Content-Type": "application/json", "User-Agent": "swarmctl-bus/" + VERSION})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read(20000).decode())
+            except Exception:
+                body = {}
+            if e.code >= 500 and attempt < retries:
+                last = f"HTTP {e.code}"
+                continue
+            return e.code, body if isinstance(body, dict) else {}
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            last = f"network error ({type(e).__name__})"
+    sys.exit(f"swarmctl: {last} after {retries + 1} attempt(s)")
+
+
+def bus_call(path, creds, method="GET", data=None, retries=0, ok=(200, 201)):
+    status, body = bus_request(path, creds, method, data, retries)
+    if status not in ok:
+        msg = bus_clean(body.get("error") or "")
+        hints = body.get("did_you_mean") or body.get("suggestions")
+        extra = " (did you mean: " + ", ".join(bus_clean(x, 80) for x in hints[:5]) + ")" if isinstance(hints, list) and hints else ""
+        sys.exit(f"swarmctl: HTTP {status}" + (": " + msg if msg else "") + extra)
+    return status, body
+
+
+def bus_ct(ms):
+    return datetime.fromtimestamp(ms / 1000, BUS_CT).strftime("%b %d %I:%M %p CT") if ms else "never"
+
+
+def bus_ago(ms):
+    if not ms:
+        return "never"
+    s = max(0, int(time.time() - ms / 1000))
+    return f"{s}s ago" if s < 120 else f"{s // 60}m ago" if s < 7200 else f"{s // 3600}h ago" if s < 172800 else f"{s // 86400}d ago"
+
+
+def bus_first_line(text, n=100):
+    line = next((l.strip() for l in str(text or "").splitlines() if l.strip()), "")
+    return line if len(line) <= n else line[:n - 1] + "..."
+
+
+def bus_sender(m):
+    return m.get("from") or m.get("sender") or "?"
+
+
+def bus_recipient(m):
+    return m.get("to") or m.get("recipient") or "?"
+
+
+def bus_admin_q(creds):
+    return "?" + urllib.parse.urlencode({"agent": creds.agent}) if creds.kind == "admin" else ""
+
+
+def bus_send(a, creds):
+    if a.text and a.file or not (a.text or a.file):
+        sys.exit("swarmctl: give exactly one of TEXT, -f FILE or -")
+    body = sys.stdin.read() if a.text == "-" else Path(a.file).read_text() if a.file else a.text
+    body = (body or "").strip()
+    if not body:
+        sys.exit("swarmctl: empty message")
+    if a.reply and a.no_reply:
+        sys.exit("swarmctl: use only one of --reply and --no-reply")
+    import uuid
+    payload = {"to": a.to, "body": body, "client_msg_id": a.id or str(uuid.uuid4())}  # one id for every retry
+    if a.thread:
+        payload["thread"] = a.thread
+    if a.urgent:
+        payload["urgent"] = True
+    if a.noop:
+        payload["noop"] = True
+    if a.blocker:
+        payload["meta"] = {"blocker": True}
+    if a.reply:
+        payload["reply_expected"] = True
+    if a.no_reply:
+        payload["reply_expected"] = False
+    if creds.kind == "admin":
+        payload["from"] = creds.agent
+    _, r = bus_call("/bus/send", creds, "POST", payload, retries=3)
+    if a.json:
+        print(json.dumps(r, indent=2))
+    else:
+        dup = " (duplicate, already stored)" if r.get("duplicate") else ""
+        wake = {"now": "wakes now", "digest": "held for the next digest", "never": "stored, never wakes",
+                "inbox": "waits in their inbox"}.get(r.get("wake"), "")
+        print(f"sent #{r.get('id')} to {r.get('to') or a.to} (thread {r.get('thread')}){dup}" + (f"; {wake}" if wake else ""))
+    if r.get("warning"):
+        print("warning: " + bus_clean(r["warning"]), file=sys.stderr)
+    return 0
+
+
+def bus_inbox(a, creds):
+    q = {}
+    if a.all:
+        q["all"] = "1"
+    if a.after:
+        q["after"] = str(a.after)
+    if creds.kind == "admin":
+        q["agent"] = creds.agent
+    _, r = bus_call("/bus/inbox" + ("?" + urllib.parse.urlencode(q) if q else ""), creds)
+    msgs = r.get("messages") or []
+    if a.json:
+        print(json.dumps(msgs, indent=2))
+        return 0
+    if not msgs:
+        print("no unread messages")
+    for m in msgs:
+        newer = int(m.get("newer_in_thread") or 0)
+        flag = f"  [{newer} newer in thread]" if newer > 0 else ""
+        print(f"#{m.get('id')}  from {bus_sender(m)}  {bus_ago(m.get('created_at'))}  thread {m.get('thread')}{flag}  {bus_first_line(m.get('body'))}")
+    return 0
+
+
+def bus_ack(a, creds):
+    path = f"/bus/messages/{int(a.id)}/ack" + bus_admin_q(creds)
+    _, r = bus_call(path, creds, "POST", {"agent": creds.agent} if creds.kind == "admin" else {})
+    first = r.get("first")
+    print(f"acked #{a.id} (first)" if first else f"#{a.id} was already acked by an earlier copy: check that its work happened before repeating it")
+    newer = int(r.get("newer_in_thread") or 0)
+    if newer > 0:
+        t = r.get("thread") or "THREAD"
+        print(f"{newer} newer message(s) in thread {t}: read it first (swarmctl bus thread {t})")
+    return 0 if first else 3
+
+
+def bus_status(a, creds):
+    _, m = bus_call(f"/bus/messages/{int(a.id)}" + bus_admin_q(creds), creds)
+    m = m.get("message", m)
+    print(f"#{m.get('id')}  {bus_sender(m)} -> {bus_recipient(m)}  thread {m.get('thread')}  state {m.get('state')}")
+    print(f"created {bus_ct(m.get('created_at'))}  delivered {bus_ct(m.get('delivered_at'))}  read {bus_ct(m.get('read_at'))}")
+    if m.get("last_error"):
+        print("last error: " + bus_first_line(m["last_error"], 200))
+    atts = m.get("attempts") or []
+    if isinstance(atts, int) or not atts:
+        print("no delivery attempts yet")
+        return 0
+    print(f"{'transport':<10} {'time':<20} {'ok':<4} {'http':<5} error")
+    for t in atts:
+        print(f"{str(t.get('transport')):<10} {bus_ct(t.get('started_at')):<20} {'yes' if t.get('ok') else 'no':<4} "
+              f"{str(t.get('http_status') or '-'):<5} {bus_first_line(t.get('error'), 80)}")
+    return 0
+
+
+def bus_thread(a, creds):
+    _, r = bus_call(f"/bus/threads/{urllib.parse.quote(a.thread, safe='')}" + bus_admin_q(creds), creds)
+    msgs = r.get("messages") or []
+    if a.json:
+        print(json.dumps(msgs, indent=2))
+        return 0
+    if not msgs:
+        print("no messages")
+    for m in msgs:
+        print(f"#{m.get('id')}  {bus_ct(m.get('created_at'))}  {bus_sender(m)} -> {bus_recipient(m)}  [{m.get('state')}]")
+        for l in str(m.get("body") or "").splitlines():
+            print("    " + l)
+    return 0
+
+
+def bus_agents(a, creds):
+    _, r = bus_call("/bus/agents", creds)
+    for g in r.get("agents") or []:
+        reach = "reachable" if g.get("reachable") else "UNREACHABLE" + (f" ({g['reason']})" if g.get("reason") else "")
+        al = ", ".join(g.get("aliases") or [])
+        print(f"{str(g.get('name')):<14} {str(g.get('kind')):<13} {str(g.get('wake')):<8} {reach}" + (f"  aliases: {al}" if al else ""))
+    return 0
+
+
+def bus_whoami(a, creds):
+    print(f"identity: {creds.agent or '(unknown: token identifies the agent)'}\ncredential: {creds.kind} ({creds.source})")
+    print("backend: " + os.environ.get("SWARM_URL", "http://127.0.0.1:8750"))
+    return 0
+
+
+def bus_register(a, creds):
+    body = {"kind": a.kind, "wake": a.wake, "digest_minutes": a.digest_minutes}
+    if a.bot:
+        body["bot_id"] = a.bot
+    if a.orchestrator:
+        body["orchestrator"] = a.orchestrator
+    if a.alias:
+        body["aliases"] = a.alias
+    if a.description is not None:
+        body["description"] = a.description
+    if a.notices:
+        body["notices"] = a.notices
+    bus_call(f"/bus/agents/{urllib.parse.quote(a.name, safe='')}", creds, "PUT", body)
+    print(f"registered {a.name} ({a.kind}, wake {a.wake}, digest {a.digest_minutes}m)")
+    return 0
+
+
+def bus_retire(a, creds):
+    bus_call(f"/bus/agents/{urllib.parse.quote(a.name, safe='')}", creds, "DELETE")
+    print(f"retired {a.name}")
+    return 0
+
+
+def bus_write_secret(out, secret):
+    """Atomic 0600 write (O_EXCL temp file, then rename) into a 0700 directory."""
+    out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(secret)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def bus_token(a, creds):
+    if not BUS_NAME_RE.match(a.name):
+        sys.exit("swarmctl: bad agent name")
+    if a.rotate:
+        _, r = bus_call(f"/bus/agents/{a.name}/token/rotate", creds, "POST", {})
+    else:
+        _, r = bus_call(f"/bus/agents/{a.name}/token", creds)
+    tok = r.get("token")
+    if not isinstance(tok, str) or not tok:
+        sys.exit("swarmctl: the server returned no token")
+    out = Path(os.path.expanduser(a.out)) if a.out else Path(os.path.expanduser("~/.config/swarm/agents")) / f"{a.name}.token"
+    bus_write_secret(out, tok)
+    print(str(out))
+    return 0
+
+
+BUS_ADMIN_CMDS = {"register", "retire", "token"}
+BUS_HANDLERS = {"send": bus_send, "inbox": bus_inbox, "ack": bus_ack, "status": bus_status, "thread": bus_thread,
+                "agents": bus_agents, "whoami": bus_whoami, "register": bus_register, "retire": bus_retire, "token": bus_token}
+
+
+def cmd_bus(a):
+    creds = bus_credentials(a.as_name, need_admin=a.bus_cmd in BUS_ADMIN_CMDS)
+    try:
+        rc = BUS_HANDLERS[a.bus_cmd](a, creds)
+    except BrokenPipeError:
+        rc = 0
+    sys.stdout.flush()
+    if rc:
+        sys.exit(rc)
+
+
+def digest_minutes(v):
+    n = int(v)
+    if n < 5:
+        raise argparse.ArgumentTypeError("must be at least 5")
+    return n
+
+
+def add_bus_parser(sub):
+    b = sub.add_parser("bus", help="Agent Bus: send and receive messages between agents (swarmctl bus --help)",
+                       description="Agent Bus client. Identity: BUS_AGENT names the agent; BUS_TOKEN_FILE or "
+                       "~/.config/swarm/agents/NAME.token holds its token. Without an agent token the admin client token is used "
+                       "(`swarmctl bus --as NAME ...`). Tokens are never printed. Times are Central.",
+                       epilog="""  swarmctl bus send TO (TEXT | -f FILE | -) [--thread T] [--urgent] [--blocker] [--noop] [--reply|--no-reply] [--id CLIENT_MSG_ID] [--json]
+  swarmctl bus inbox [--all] [--after ID] [--json]
+  swarmctl bus ack ID                  exit 3 when an earlier copy was already acked (check that the work happened)
+  swarmctl bus status ID | thread THREAD [--json] | agents | whoami
+  swarmctl bus register NAME --kind K --wake W [--bot ID] [--orchestrator NAME] [--alias A]... [--description D] [--notices legacy|bus] [--digest-minutes N]
+  swarmctl bus retire NAME
+  swarmctl bus token NAME [--rotate] [--out FILE]   writes the token to FILE (default ~/.config/swarm/agents/NAME.token, 0600)""",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    b.add_argument("--as", dest="as_name", metavar="NAME", help="act as NAME with the admin client token")
+    bs = b.add_subparsers(dest="bus_cmd", required=True)
+    s = bs.add_parser("send", help="send a message"); s.add_argument("to"); s.add_argument("text", nargs="?", help="text, or - for stdin")
+    s.add_argument("-f", "--file"); s.add_argument("--thread"); s.add_argument("--urgent", action="store_true")
+    s.add_argument("--noop", action="store_true", help="store only, never wake the recipient")
+    s.add_argument("--blocker", action="store_true")
+    s.add_argument("--reply", action="store_true", help="a reply is expected"); s.add_argument("--no-reply", dest="no_reply", action="store_true")
+    s.add_argument("--id", help="client message id (default: random, reused on retries)"); s.add_argument("--json", action="store_true")
+    s = bs.add_parser("inbox", help="unread messages to me"); s.add_argument("--all", action="store_true")
+    s.add_argument("--after", type=int); s.add_argument("--json", action="store_true")
+    s = bs.add_parser("ack", help="acknowledge a message once its action is recorded"); s.add_argument("id", type=int)
+    s = bs.add_parser("status", help="state and delivery attempts"); s.add_argument("id", type=int)
+    s = bs.add_parser("thread", help="show a thread"); s.add_argument("thread"); s.add_argument("--json", action="store_true")
+    bs.add_parser("agents", help="registered agents and reachability")
+    bs.add_parser("whoami", help="identity and credential source (never the token)")
+    s = bs.add_parser("register", help="admin: register or update an agent")
+    s.add_argument("name"); s.add_argument("--kind", required=True, choices=["bot", "orchestrator", "human", "service"])
+    s.add_argument("--wake", required=True, choices=["webhook", "tmux", "poll"]); s.add_argument("--bot"); s.add_argument("--orchestrator")
+    s.add_argument("--alias", action="append"); s.add_argument("--description"); s.add_argument("--notices", choices=["legacy", "bus"])
+    s.add_argument("--digest-minutes", dest="digest_minutes", type=digest_minutes, default=60, help="minutes between digest wakes (default 60, minimum 5)")
+    s = bs.add_parser("retire", help="admin: retire an agent"); s.add_argument("name")
+    s = bs.add_parser("token", help="admin: write an agent's token to a 0600 file (path printed, never the token)")
+    s.add_argument("name"); s.add_argument("--rotate", action="store_true"); s.add_argument("--out")
+    b.set_defaults(fn=cmd_bus)
+
+
 def main():
     load_env()
     argv = sys.argv[1:]
@@ -763,6 +1114,8 @@ def main():
     orc.add_argument("--start", action="store_true", help="create: set it to run right away")
     orc.add_argument("--lines", type=int, default=100, help="logs: how many lines (up to 500)")
     orc.add_argument("--json", action="store_true"); orc.set_defaults(fn=cmd_orchestrator)
+
+    add_bus_parser(sub)
 
     nt = sub.add_parser("notices", help="recent deliveries to bot inboxes (admin or chief)")
     nt.set_defaults(fn=lambda a: show(call("GET", "/notices")))

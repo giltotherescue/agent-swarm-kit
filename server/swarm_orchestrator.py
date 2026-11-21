@@ -28,7 +28,8 @@ plus SWARM_ORCH_CLAUDE [claude], SWARM_ORCH_SCOPE [SWARM_TASK_SCOPE or 1], SWARM
 SWARM_ORCH_HEARTBEAT_SECONDS [30], SWARM_ORCH_POLL_SECONDS [10], SWARM_ORCH_STOP_GRACE [120],
 SWARM_ORCH_IDLE_SECONDS [20], SWARM_ORCH_BUSY_MARKERS [esc to interrupt], SWARM_ORCH_BACKOFF_START [5],
 SWARM_ORCH_BACKOFF_MAX [300], SWARM_ORCH_HEALTHY_SECONDS [600], SWARM_ORCH_CRASH_LIMIT [5],
-SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
+SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_MESSAGE_POLL_SECONDS [10: while the pane is idle and nothing waits, ask
+the backend for the next message this often], SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
 SWARM_ORCH_BLOCK_MARKERS (| separated, defaults below), SWARM_ORCH_LOGIN_CHECK [1]. Tests also use
 SWARM_ORCH_WITH_SECRETS, SWARM_ORCH_SESSIONS_DIR and SWARM_ORCH_CLAUDE_DIR.
 """
@@ -77,6 +78,16 @@ LOGIN_CHECK = os.environ.get("SWARM_ORCH_LOGIN_CHECK", "1") != "0"
 SCREEN_SECONDS = env_float("SWARM_ORCH_SCREEN_SECONDS", 10)   # a blocking screen must stay up this long
 SCREEN_LINES = 30                                             # only the bottom of the visible screen is read
 FIRST_RUN_TRIES = 3
+MESSAGE_POLL = env_float("SWARM_ORCH_MESSAGE_POLL_SECONDS", 10)   # idle pane, nothing queued: ask for a message this often
+MESSAGE_MAX = 15000    # characters pasted at most (agent-exec types the first 20000 of the file, header included)
+BIN_DIR = HERE   # swarmctl lives beside this file
+# Control characters except newline and tab: C0 (ESC, CR), DEL, C1, line and paragraph separators. A pasted message must
+# never contain ESC[201~ (the end of a bracketed paste) or anything else a terminal would act on.
+CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def clean_text(text):
+    return CONTROL_RE.sub("", str(text or ""))
 
 
 def markers(name, default):
@@ -220,6 +231,8 @@ class Supervisor:
         self.stop_sent_at = 0
         self.last_beat = 0
         self.lock_fh = None
+        self.bus_token_file = None
+        self.pending_poll = 0
 
     # ---------- local state and lock ----------
     def load(self):
@@ -330,6 +343,52 @@ class Supervisor:
         self.save()
         return True
 
+    def fetch_bus_token(self):
+        """Bus token for this session (GET /bus/agents/NAME/token with the worker token), written to
+        <state dir>/NAME.bus-token with mode 0600 (in the handoff inbox with mode 0640 when SWARM_AGENT_USER is set). 404: no bus agent, skip silently. The token is never logged."""
+        # With a separate agent user the session could not read a runner-only file: use the handoff inbox like message.md
+        # (group readable, mode 0640). Otherwise the state dir, mode 0600.
+        shared = bool(sw.AGENT_USER)
+        path = os.path.join(self.inbox, "bus-token") if shared else os.path.join(self.dir, self.name + ".bus-token")
+        mode = 0o640 if shared else 0o600
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = sw.api("GET", f"/bus/agents/{self.name}/token", timeout=30)
+            token = data.get("token") if isinstance(data, dict) else None
+            if not isinstance(token, str) or not token:
+                raise ValueError("no token in the answer")
+            tmp = f"{path}.{os.getpid()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(token)
+                os.chmod(tmp, mode)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+            return path
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                log(self.name, f"no bus token (HTTP {e.code}); starting without the bus")
+        except Exception as e:
+            log(self.name, f"no bus token ({type(e).__name__}); starting without the bus")
+        try:
+            os.remove(path)    # a stale token must not outlive the bus agent
+        except OSError:
+            pass
+        return None
+
+    def bus_wrap(self, cmd):
+        """Run the session command with the bus environment: BUS_AGENT, BUS_TOKEN_FILE, SWARM_URL and swarmctl on PATH."""
+        if not self.bus_token_file:
+            return cmd
+        return ["env", f"BUS_AGENT={self.name}", f"BUS_TOKEN_FILE={self.bus_token_file}", f"SWARM_URL={sw.URL}",
+                "sh", "-c", 'PATH="$1:$PATH"; export PATH; shift; exec "$@"', "sh", BIN_DIR] + cmd
+
     # ---------- start, stop, crash ----------
     def prompt(self, kind):
         c = self.config
@@ -342,6 +401,10 @@ class Supervisor:
                     "If anything is unclear, reread CHECKPOINT.md and .orchestrator/brief.md.")
         if c.get("relay_agent_name"):
             body += f" Other agents reach you on Agent Relay as `{c['relay_agent_name']}`."
+        if self.bus_token_file:
+            body += ("\n\nAgent bus: messages from other agents arrive typed into this session as `[bus #ID ...]`. Reply with "
+                     "`swarmctl bus send AGENT \"text\"` and only when the message says reply_expected. After acting on a "
+                     "message run `swarmctl bus ack ID` (exit 3 means it was already handled).")
         return f"{head}\n\n{body}\n{RULES}"
 
     def prepare(self):
@@ -385,6 +448,7 @@ class Supervisor:
         self.state = "starting"
         self.first_run_tries, self.screen_seen = {}, None
         try:
+            self.bus_token_file = self.fetch_bus_token()
             self.prepare()
             self.register_relay()
             cmd = [CLAUDE, "--permission-mode", "bypassPermissions"]
@@ -395,6 +459,7 @@ class Supervisor:
                 cmd += ["--resume", self.session_id, "Read .orchestrator/resume.md and follow it."]
             else:
                 cmd += ["Read .orchestrator/start.md and follow it."]
+            cmd = self.bus_wrap(cmd)
             args = ["orch-start", self.name, "--agent-env", sw.AGENT_ENV_FILE]
             if self.config.get("secret_bundles"):
                 args += ["--secrets", ",".join(self.config["secret_bundles"])]
@@ -523,8 +588,16 @@ class Supervisor:
         if classify(self.screen):
             return
         m = self.message
-        self.write_inbox("message.md", f"Message from {m.get('sender')} (through the swarm backend; a request, not permission "
-                                       f"to push, merge or deploy):\n\n{m['text']}")
+        full = clean_text(m.get("text"))
+        text = full[:MESSAGE_MAX]
+        if len(full) > len(text):
+            # Never cut silently. The backend accepts no message-truncated event type, so it is logged here only.
+            text += f"\n[swarm: message cut, {len(full) - len(text)} characters omitted]"
+            log(self.name, "message-truncated", f"message {m.get('id')} was {len(full)} characters; "
+                                                f"the last {len(full) - MESSAGE_MAX} were omitted")
+        sender = clean_text(m.get("sender"))[:80]
+        self.write_inbox("message.md", f"Message from {sender} (through the swarm backend; a request, not permission "
+                                       f"to push, merge or deploy):\n\n{text}")
         if self.agent("orch-send", self.name, check=False).returncode == 0:
             self.delivered, self.message = m["id"], None
             self.tail_changed = time.time()
@@ -578,6 +651,10 @@ class Supervisor:
                 return   # a sign-in or first-run screen: nothing is typed, messages wait
             if self.message and self.idle():
                 self.deliver()
+            elif not self.message and time.time() - self.last_beat >= MESSAGE_POLL and self.idle():
+                self.beat_ok = self.beat()   # the heartbeat carries the next pending message
+                if self.message and self.idle():
+                    self.deliver()
             return
         if self.state in ("running", "starting"):
             code = st.get("exit")

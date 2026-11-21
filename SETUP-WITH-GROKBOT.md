@@ -286,6 +286,20 @@ sudo swarmctl project set marketing --bot marketing-bot
 
 That binding is what lets the bot write to and read its own project log.
 
+Right after each bot's inbox webhook is registered (`swarmctl bot set ... --notify-url ...`), give it a bus
+name and token. This is optional and changes nothing until other agents start messaging it
+(`docs/agent-bus.md`):
+
+```
+sudo swarmctl bus register marketing-bot --kind bot --wake webhook --bot marketing-bot
+sudo swarmctl bus token marketing-bot
+```
+
+`bus token` writes the token to a file with mode 600 and prints only the path. Move that file into the bot's
+secret storage through the secret request form, never chat. Register yourself (the Chief of Staff) the same
+way, plus `swarmctl bus register gil --kind human --wake poll` for the owner. Do not add `--notices bus`
+until the bot has been told how to read bus messages (`docs/agent-bus.md`, "Using the bus").
+
 If something here does not work for you (no cloud-init at the provider, or you would rather type it
 yourself), the manual path is `docs/worker-setup.md` and "Path B" in `README.md`.
 

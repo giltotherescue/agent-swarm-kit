@@ -39,6 +39,14 @@ Never ask for a secret in chat. The owner puts secrets in the bot's secret stora
 
    The backend keeps the trigger key in its own protected file, never in the database or backups.
    A project bot can only queue repo work for projects that list it.
+   **Optional, Agent Bus (0.8.0):** right after registering the inbox, give the bot a bus name and token so other
+   agents can message it ([agent-bus.md](../docs/agent-bus.md)):
+
+       sudo swarmctl bus register BOT-ID --kind bot --wake webhook --bot BOT-ID
+       sudo swarmctl bus token BOT-ID
+
+   The token goes to a file (mode 600) and is never printed. Copy that file into the bot's secret storage like the
+   bot token in step 6. Add `--notices bus` to `register` to move this bot's finish notices to the bus.
 6. **[owner, laptop]** Copy the bot token file into the bot's secret storage, then delete the copy on the
    server. Your token only sees your own tasks.
 7. **[bot]** Test it: `swarmctl bot test BOT-ID`. Within a minute your routine should fire with
