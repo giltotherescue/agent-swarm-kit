@@ -107,9 +107,12 @@ The database stays as the newer version left it. Newer versions only add tables 
 
 ## Upgrading to 0.8.1
 
-Run the setup script as usual and restart the supervisors (the upgrade does). No database change. Orchestrators now
-receive a queued message during a long busy turn (after 90 seconds, 15 if urgent) instead of waiting for an idle pane.
-`swarmctl`, `swarm_worker.py` and `agent-exec` are 0.8.1 together.
+Run the setup script as usual; it restarts the supervisors. No database change. Orchestrators now receive a queued
+message during a long busy turn, 90 seconds after it was queued (15 if urgent), instead of waiting for an idle pane.
+Nothing is typed onto a menu or a draft any more, idle or busy, including the stop wrap-up: a session showing one
+when it is stopped gets no wrap-up and ends after the stop grace time (`SWARM_ORCH_STOP_GRACE`, 120 s). `agent-exec`
+must be updated with the supervisor (new `orch-send` exit codes 5 and 6); `swarmctl`, `swarm_worker.py` and
+`agent-exec` are 0.8.1 together.
 
 ## Upgrading to 0.8.0
 

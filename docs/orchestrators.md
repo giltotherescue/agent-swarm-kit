@@ -63,14 +63,17 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
   queued messages and the stop wrap-up wait. The state becomes `needs-login`, `last_exit` says what to run, and
   the owner bot is told once. It does not restart, even after a supervisor restart, until you sign in
   (`sudo swarmctl login claude` on the worker) and run `swarmctl orchestrator start NAME`.
-- **Messages during a long busy turn (0.8.1).** Queued messages are typed in when the pane is idle. If the session
-  stays busy, the oldest message is pasted after 90 seconds (15 when the first line of the message says `URGENT`,
-  which the bus puts on urgent messages); Claude Code queues it for the agent's next step, and the next message
-  follows 5 seconds later. Nothing is pasted onto a choice menu or permission prompt, or while the input box holds
-  typed text (a draft, including a multiline one). Claude Code's own hints in an empty box (`Try "..."`,
-  `Press up to edit queued messages`, `Queued ...`) do not count as a draft, and a box the supervisor cannot read
-  with confidence blocks the paste. Each busy paste is a `message-delivered-busy` event. A message is never typed
-  twice by one supervisor process; if only the delivery receipt failed, only the receipt is retried.
+- **Messages during a long busy turn (0.8.1).** Queued messages are typed in at once when the pane is idle at an
+  empty prompt. If the session stays busy, the oldest message is pasted once it is 90 seconds old (15 when the first
+  line of the message says `URGENT`, which the bus puts on urgent messages), counted from when the backend queued it;
+  Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart. Before
+  every paste and every Enter, idle or busy, and before the stop wrap-up, the supervisor reads the screen: a choice
+  menu or permission prompt, or typed text in the input box (a draft, including a multiline one or one holding a
+  pasted rule), blocks it. Only Claude Code's exact hints in an empty box (`Try "..."`,
+  `Press up to edit queued messages`, `Queued · ctrl+x ctrl+s to send now`) count as empty. A busy paste also needs an
+  input box it can read; a wrap-up it cannot send safely is skipped, and the session ends at the stop deadline. Each
+  busy paste is recorded once as a `message-delivered-busy` event. A message is never pasted twice by one supervisor
+  process: if Enter failed only Enter is retried, and if only the delivery receipt failed only the receipt is retried.
 - **Checkpoint.** The first prompt and the standing rules tell the agent to keep `CHECKPOINT.md` in its folder
   current, so even a crash with no session to resume loses little.
 - **Events.** Every start, stop, crash, restart, crash loop, adoption, Relay registration, message delivery and
@@ -194,7 +197,7 @@ In `/etc/agent-swarm/swarm.env` (all optional):
 | `SWARM_ORCH_CRASH_LIMIT`, `SWARM_ORCH_CRASH_WINDOW` | 5, 1800 | Crashes within this many seconds that make a crash loop |
 | `SWARM_ORCH_SCOPE` | `SWARM_TASK_SCOPE` (1) | Run the session in its own systemd user scope |
 | `SWARM_ORCH_POLL_SECONDS` | 10 | How often the supervisor looks at the session (was 5 before 0.7.1) |
-| `SWARM_ORCH_MESSAGE_POLL_SECONDS` | 10 | While the pane is idle and nothing waits, how often the supervisor asks the backend for the next message (0.8.0; see [agent-bus.md](agent-bus.md)) |
+| `SWARM_ORCH_MESSAGE_POLL_SECONDS` | 10 | While no message is held, how often the supervisor asks the backend for the next one, idle or busy (0.8.0, busy too since 0.8.1; see [agent-bus.md](agent-bus.md)) |
 | `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS`, `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS`, `SWARM_ORCH_BUSY_GAP_SECONDS` | 90, 15, 5 | While the session is busy: how long a queued message waits before it is pasted (urgent: the shorter wait), and the pause between two busy pastes (0.8.1) |
 | `SWARM_ORCH_SCREEN_SECONDS` | 10 | How long a sign-in screen may stay up before the session is ended |
 | `SWARM_ORCH_LOGIN_MARKERS`, `SWARM_ORCH_BLOCK_MARKERS` | see `server/swarm_orchestrator.py` | Text (several separated by a vertical bar) that marks a sign-in screen or a screen it does not answer |

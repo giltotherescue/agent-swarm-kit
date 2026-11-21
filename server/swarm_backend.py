@@ -2574,6 +2574,11 @@ class Backend:
                 if self.s.run("UPDATE orchestrator_messages SET delivered_at = ? WHERE id = ? AND name = ? AND delivered_at IS NULL",
                               now(), ack, name).rowcount:
                     self.orch_event(name, "message-delivered", worker, f"message {ack} typed into the session")
+                    waited = b.get("delivered_busy_seconds")
+                    if isinstance(waited, int) and not isinstance(waited, bool) and waited >= 0:
+                        # In the same first-delivery branch, so a replayed receipt never records it twice.
+                        self.orch_event(name, "message-delivered-busy", worker,
+                                        f"message {ack} pasted while the session was busy, after {waited}s (queued by Claude Code)")
             msg = None
             if not r["deleted_at"] and r["desired"] == "running":
                 msg = self.s.one("SELECT id, at, sender, text FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL"

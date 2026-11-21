@@ -1,0 +1,40 @@
+ ▐▛███▛█   Claude Code v2.1.321
+▝▜██████▀  Sonnet 5.5 · API Usage Billing
+ ▝▝   ▝▝   /tmp/kittest
+
+  ⎿  SessionStart:startup says: This Claude Code session is not on Agent Relay. Claude will ask whether to put it on the
+     relay and under what name. Nothing is registered unless you say yes.
+
+! for i in $(seq 1 30); do echo t $i; sleep 5; done
+  ⎿  t 1
+     (5s)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+                                                                                            Not logged in · Run /login
+                                           ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

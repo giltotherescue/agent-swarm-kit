@@ -175,6 +175,21 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertIsNone(r["message"])
         self.b.req("POST", "/orchestrators/steward/messages", {"text": "next one"}, tok=self.chief)
 
+    def test_busy_delivery_event_is_recorded_once_on_a_replayed_receipt(self):
+        """0.8.1 review: the busy flag rides on the receipt and is recorded in the same first-delivery update."""
+        self.create(start=True)
+        mid = self.b.req("POST", "/orchestrators/steward/messages", {"text": "Check the signup page"}, tok=self.owner)["id"]
+        beat(self.b, "steward", state="running")
+        for _ in range(2):   # the first reply was lost: the supervisor sends the same receipt again
+            r = beat(self.b, "steward", state="running", delivered_message_id=mid, delivered_busy_seconds=91)
+            self.assertIsNone(r["message"])
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual((types.count("message-delivered"), types.count("message-delivered-busy")), (1, 1))
+        mid2 = self.b.req("POST", "/orchestrators/steward/messages", {"text": "idle one"}, tok=self.owner)["id"]
+        beat(self.b, "steward", state="running", delivered_message_id=mid2)
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual((types.count("message-delivered"), types.count("message-delivered-busy")), (2, 1))
+
     def test_delete_needs_stop_and_a_deleted_record_never_runs(self):
         self.create(start=True)
         beat(self.b, "steward", state="running")

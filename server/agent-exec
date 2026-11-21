@@ -23,7 +23,7 @@ Orchestrators (WORK/orchestrators/NAME, tmux socket and session orch-NAME; see d
   agent-exec --work DIR --handoff DIR orch-start NAME [--agent-env FILE] [--secrets A,B] [--with-secrets PATH]
              [--relay-name X] [--scope] -- COMMAND ARGS...
   agent-exec --work DIR --handoff DIR orch-status NAME [--lines N] [--sessions-dir DIR]
-  agent-exec --work DIR --handoff DIR orch-send NAME        (types inbox/orch-NAME/message.md, then Enter)
+  agent-exec --work DIR --handoff DIR orch-send NAME        (types inbox/orch-NAME/message.md, then Enter; exit 5 nothing pasted, 6 pasted but Enter failed)
   agent-exec --work DIR --handoff DIR orch-kill NAME
   agent-exec --work DIR --handoff DIR orch-keys NAME KEY...   (only Enter, Down, Up, Escape, 1-9: answers a first-run screen)
   agent-exec --work DIR --handoff DIR orch-check NAME [--agent-env FILE] [--claude-dir DIR]   (does Claude have a sign-in?)
@@ -566,10 +566,14 @@ def cmd_orch_send(p, name):
         die("no message.md in the inbox")
     with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
         text = fh.read(20000)
-    tmux(name, "load-buffer", "-b", "swarm-msg", "-", input=text, check=True)
-    tmux(name, "paste-buffer", "-d", "-p", "-b", "swarm-msg", "-t", f"orch-{name}", check=True)
+    # Exit 5: nothing was pasted (safe to try again). Exit 6: pasted, Enter failed (never paste again, only press Enter).
+    if tmux(name, "load-buffer", "-b", "swarm-msg", "-", input=text).returncode != 0:
+        die("tmux load-buffer failed, nothing pasted", 5)
+    if tmux(name, "paste-buffer", "-d", "-p", "-b", "swarm-msg", "-t", f"orch-{name}").returncode != 0:
+        die("tmux paste-buffer failed, nothing pasted", 5)
     time.sleep(0.5)
-    tmux(name, "send-keys", "-t", f"orch-{name}", "Enter", check=True)
+    if tmux(name, "send-keys", "-t", f"orch-{name}", "Enter").returncode != 0:
+        die("pasted, but tmux send-keys Enter failed", 6)
     print(json.dumps({"sent": len(text)}))
 
 

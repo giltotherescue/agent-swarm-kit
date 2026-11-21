@@ -23,11 +23,12 @@ for SWARM_ORCH_SCREEN_SECONDS ends the session and sets the state needs-login: t
 wait in the backend, and nothing restarts until an admin runs `swarmctl orchestrator start NAME`.
 
 Queued messages are typed one at a time when the pane is idle. During a long busy turn (the spinner keeps the pane
-changing) the oldest message that has waited SWARM_ORCH_BUSY_MAX_WAIT_SECONDS (urgent, "URGENT" in its first line:
-SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS) is pasted anyway and Claude Code queues it for the agent's next step; the next one
-follows after SWARM_ORCH_BUSY_GAP_SECONDS. Never onto a choice menu or an input box holding a draft (or one it cannot
-read with confidence), and never a message id this process already typed: if only the receipt failed, only the receipt
-is retried.
+changing) the oldest message is pasted anyway once it is SWARM_ORCH_BUSY_MAX_WAIT_SECONDS old, counted from the backend's
+enqueue time (urgent, "URGENT" in its first line: SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS), and Claude Code queues it for the
+agent's next step; the rest of a continuous backlog follows SWARM_ORCH_BUSY_GAP_SECONDS apart. The loop wakes for that
+moment rather than its normal poll. Nothing is ever pasted, and no Enter pressed, onto a choice menu or an input box
+holding a draft (idle, busy and the stop wrap-up; a busy paste also needs a box it can read). A message id this process
+pasted is never pasted again: a failed Enter is retried alone, a failed receipt is retried alone.
 
 Settings (environment, defaults in brackets): the runner's SWARM_URL, SWARM_WORKER_NAME, SWARM_WORKER_TOKEN_FILE,
 SWARM_WORKER_PROJECTS, SWARM_AGENT_USER, SWARM_WORK_DIR, SWARM_HANDOFF_DIR, SWARM_RUNNER_DIR, SWARM_AGENT_ENV_FILE,
@@ -35,7 +36,7 @@ plus SWARM_ORCH_CLAUDE [claude], SWARM_ORCH_SCOPE [SWARM_TASK_SCOPE or 1], SWARM
 SWARM_ORCH_HEARTBEAT_SECONDS [30], SWARM_ORCH_POLL_SECONDS [10], SWARM_ORCH_STOP_GRACE [120],
 SWARM_ORCH_IDLE_SECONDS [20], SWARM_ORCH_BUSY_MARKERS [esc to interrupt], SWARM_ORCH_BACKOFF_START [5],
 SWARM_ORCH_BACKOFF_MAX [300], SWARM_ORCH_HEALTHY_SECONDS [600], SWARM_ORCH_CRASH_LIMIT [5],
-SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_MESSAGE_POLL_SECONDS [10: while the pane is idle and nothing waits, ask
+SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_MESSAGE_POLL_SECONDS [10: while no message is held, idle or busy, ask
 the backend for the next message this often], SWARM_ORCH_BUSY_MAX_WAIT_SECONDS [90], SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS [15], SWARM_ORCH_BUSY_GAP_SECONDS [5]
 (a queued message is pasted into a busy pane after this wait, see below), SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
 SWARM_ORCH_BLOCK_MARKERS (| separated, defaults below), SWARM_ORCH_LOGIN_CHECK [1]. Tests also use
@@ -87,10 +88,11 @@ LOGIN_CHECK = os.environ.get("SWARM_ORCH_LOGIN_CHECK", "1") != "0"
 SCREEN_SECONDS = env_float("SWARM_ORCH_SCREEN_SECONDS", 10)   # a blocking screen must stay up this long
 SCREEN_LINES = 30                                             # only the bottom of the visible screen is read
 FIRST_RUN_TRIES = 3
-MESSAGE_POLL = env_float("SWARM_ORCH_MESSAGE_POLL_SECONDS", 10)   # idle pane, nothing queued: ask for a message this often
+MESSAGE_POLL = env_float("SWARM_ORCH_MESSAGE_POLL_SECONDS", 10)   # no message held: ask for one this often (idle or busy)
 BUSY_MAX_WAIT = env_float("SWARM_ORCH_BUSY_MAX_WAIT_SECONDS", 90)       # busy pane: paste the oldest message after this wait
 BUSY_URGENT_WAIT = env_float("SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS", 15)  # same, for a message whose first line says URGENT
 BUSY_GAP = env_float("SWARM_ORCH_BUSY_GAP_SECONDS", 5)                   # minimum time between two busy pastes
+NOT_PASTED = (2, 4, 5)   # orch-send exit codes that mean nothing was typed (no message file, no session, paste failed)
 MESSAGE_MAX = 15000    # characters pasted at most (agent-exec types the first 20000 of the file, header included)
 BIN_DIR = HERE   # swarmctl lives beside this file
 # Control characters except newline and tab: C0 (ESC, CR), DEL, C1, line and paragraph separators. A pasted message must
@@ -135,36 +137,59 @@ def classify(screen):
 
 PROMPT_LINE = re.compile(r"^[\s│┃|]*[>❯](?:\s|$)")
 MENU_LINE = re.compile(r"^[\s│┃|]*❯\s*\d+[.)]\s|(?:Esc|Enter) to (?:cancel|select|confirm)", re.I)
-INPUT_RULE = re.compile(r"^[\s╭╮╰╯│┃|]*[─━═]{8,}[\s╭╮╰╯│┃|─━═]*$")
-INPUT_REGION_MAX = 20   # a wider region between rules is not a normal input box
-# Claude Code display hints that sit in an empty input box (never a draft).
-INPUT_HINT = re.compile(r'^(?:Try ".*"|Press up to edit queued messages|Queued\b.*)$', re.I)
+INPUT_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")   # a border line of the input box (plain or rounded)
+FOOTER_MAX = 8   # non-blank lines Claude Code shows under the input box (mode line, sign-in and update notes)
+# Claude Code's own hints in an empty input box. Exact texts only: anything else typed there is a draft.
+INPUT_HINT = re.compile(r'^(?:Try "[^"]*"|Press up to edit queued messages|Queued · ctrl\+x ctrl\+s to send now)$')
 
 
 def pane_menu(screen):
     """True when a choice menu or permission prompt is on screen (a selected numbered option, or its key hints)."""
-    return any(MENU_LINE.search(ln) for ln in [ln for ln in (screen or "").splitlines() if ln.strip()][-25:])
+    lines = [ln for ln in (screen or "").splitlines() if ln.strip()]
+    return any(MENU_LINE.search(ln) for ln in lines[-25:])
+
+
+def input_box(screen):
+    """State of Claude Code's input box at the bottom of the screen: "empty", "draft", or None when no box is found.
+
+    The box is the last prompt line (❯ or >) with the nearest rule above it and exactly one rule below it, followed only
+    by the short footer (or nothing). Every line inside counts; Claude Code's empty-box hints and spaces do not.
+    Border bars are stripped only when the box is drawn with rounded corners. Fails closed: a second rule below the
+    prompt (a pasted rule inside a multiline draft), text above the prompt inside the box, or more than a footer below
+    the bottom rule is a draft."""
+    lines = [ln.rstrip() for ln in (screen or "").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    p = next((i for i in range(len(lines) - 1, max(-1, len(lines) - 1 - FOOTER_MAX - 40), -1) if PROMPT_LINE.match(lines[i])), None)
+    if p is None:
+        return None
+    top = next((i for i in range(p - 1, -1, -1) if INPUT_RULE.match(lines[i])), None)
+    below = [i for i in range(p + 1, len(lines)) if INPUT_RULE.match(lines[i])]
+    if top is None or not below:
+        return None
+    if len(below) > 1:
+        return "draft"   # more than one plausible bottom border: a rule inside the draft, or not a normal box
+    bot = below[0]
+    if sum(1 for ln in lines[bot + 1:] if ln.strip()) > FOOTER_MAX:
+        return "draft"   # the rule is not the box's bottom border, the box text runs on below it
+    boxed = lines[top].lstrip().startswith("╭") and lines[bot].lstrip().startswith("╰")
+    for i in range(top + 1, bot):
+        t = lines[i].strip()
+        if boxed:
+            if not (t.startswith("│") and t.endswith("│") and len(t) >= 2):
+                return "draft"
+            t = t[1:-1].strip()
+        if i == p:
+            t = re.sub(r"^\s*[>❯]", "", t, count=1)
+        t = t.strip()
+        if t and not INPUT_HINT.match(t):
+            return "draft"
+    return "empty"
 
 
 def input_draft(screen):
-    """True when typed input may be on screen, or the input box cannot be located confidently.
-    Looks at every line between the rules around the last prompt line; empty-input hints and spaces do not count."""
-    lines = (screen or "").rstrip("\n").splitlines()
-    p = next((i for i in range(len(lines) - 1, max(-1, len(lines) - 26), -1) if PROMPT_LINE.match(lines[i])), None)
-    if p is None:
-        return True
-    top = next((i for i in range(p - 1, max(-1, p - INPUT_REGION_MAX), -1) if INPUT_RULE.match(lines[i])), None)
-    bot = next((i for i in range(p + 1, min(len(lines), p + INPUT_REGION_MAX)) if INPUT_RULE.match(lines[i])), None)
-    if top is None or bot is None:
-        return True
-    for i in range(top + 1, bot):
-        t = lines[i]
-        if i == p:
-            t = re.sub(r"^[\s│┃|]*[>❯]", "", t)
-        t = t.strip().strip("│┃|").strip()
-        if t and not INPUT_HINT.match(t):
-            return True
-    return False
+    """True unless an empty input box is confirmed: typed text may be on screen, or the box cannot be read."""
+    return input_box(screen) != "empty"
 
 
 def is_urgent(m):
@@ -284,9 +309,13 @@ class Supervisor:
         self.lock_fh = None
         self.bus_token_file = None
         self.pending_poll = 0
-        self.pending_since = None       # when the oldest queued message was first seen; kept across busy pastes so a backlog drains
+        self.busy_started = None
+        self.seen = {}                  # message id -> when this process first saw it (only if the backend sent no `at`)
+        self.draining = False           # a busy paste happened and the queue has not been empty since: the next uses the gap
         self.last_busy_paste = 0
-        self.pasted_ids = set()         # ids typed by this process: never typed twice, a failed receipt is retried alone
+        self.pasted_ids = set()         # ids pasted by this process: never pasted twice, a failed receipt is retried alone
+        self.unsubmitted = None         # (id, busy, sender) pasted but Enter failed or is uncertain: only Enter is retried
+        self.delivered_busy = None      # seconds waited, sent with the receipt when the delivery was a busy paste
 
     # ---------- local state and lock ----------
     def load(self):
@@ -351,6 +380,8 @@ class Supervisor:
             body["session_id"] = self.session_id
         if self.delivered is not None:
             body["delivered_message_id"] = self.delivered
+            if self.delivered_busy is not None:
+                body["delivered_busy_seconds"] = self.delivered_busy
         sent = len(self.events)
         self.last_beat = time.time()
         try:
@@ -372,7 +403,7 @@ class Supervisor:
         self.blocked = self.blocked_code = None
         self.events = self.events[sent:]
         if self.delivered is not None:
-            self.delivered = None
+            self.delivered = self.delivered_busy = None
         self.desired, self.deleted = r.get("desired"), bool(r.get("deleted"))
         self.config = r.get("config") or {}
         if not self.session_id and self.config.get("session_id"):
@@ -392,7 +423,11 @@ class Supervisor:
             elif self.state in ("restarting", "crash-loop", "needs-login"):
                 self.state, self.next_start = "stopped", 0
         msg = r.get("message")
-        if msg and (not self.message or self.message["id"] != msg["id"]):
+        if not msg:
+            # Authoritative: nothing is queued (delivered, expired, or the record was recreated). Drop the cached head and
+            # the backlog state; an outstanding receipt or unsubmitted paste is kept apart and retried on its own.
+            self.message, self.draining, self.seen = None, False, {}
+        elif not self.message or self.message["id"] != msg["id"]:
             self.message = msg
         self.save()
         return True
@@ -613,9 +648,19 @@ class Supervisor:
             self.stop_deadline, self.stop_sent_at = time.time(), 0
             self.event("stop", f"stopping: {reason}; the session shows a sign-in or first-run screen, so no wrap-up message")
             return
+        unsafe = self.unsafe_to_type()
+        if unsafe:
+            # Enter would answer a menu or submit someone's draft: no wrap-up, the session ends at the stop deadline.
+            self.stop_sent_at = 0
+            self.event("stop", f"stopping: {reason}; {unsafe} on screen, so no wrap-up message; "
+                               f"the session ends after {int(STOP_GRACE)} seconds")
+            return
         self.write_inbox("message.md", f"The supervisor is stopping this session ({reason}). Within {int(STOP_GRACE)} seconds, "
                                        "update CHECKPOINT.md and write a short HANDOVER.md, then stop working.")
-        sent = self.agent("orch-send", self.name, check=False).returncode == 0
+        rc = self.send_keys_safely("orch-send")
+        sent = rc == 0
+        if rc not in (0,) + NOT_PASTED and self.send_keys_safely("orch-keys", "Enter") == 0:
+            sent = True   # pasted; the first Enter failed, a second one went through
         self.tail_changed = time.time()
         self.stop_sent_at = time.time() if sent else 0
         self.event("stop", f"stopping: {reason}; wrap-up message {'sent' if sent else 'could not be sent'}")
@@ -638,23 +683,76 @@ class Supervisor:
         last = "\n".join(self.tail.splitlines()[-15:]).lower()
         return time.time() - self.tail_changed >= IDLE and not any(m.lower() in last for m in BUSY)
 
-    def busy_ok(self, m):
-        """May this message be pasted into a pane that is working? Only after its wait, never onto a menu or a draft."""
+    def unsafe_to_type(self, busy=False):
+        """Why nothing may be typed now (a menu, a draft, or for a busy paste an input box it cannot read), else None.
+        Checked before every paste and every Enter: idle delivery, busy delivery and the stop wrap-up."""
+        if pane_menu(self.screen):
+            return "a choice menu"
+        box = input_box(self.screen)
+        if box == "draft":
+            return "typed text in the input box"
+        if busy and box != "empty":
+            return "an input box it cannot read"
+        return None
+
+    def send_keys_safely(self, *args):
+        """Run orch-send or orch-keys; returns the exit code, -1 when the outcome is unknown (timeout, crash)."""
+        try:
+            return self.agent(args[0], self.name, *args[1:], check=False, timeout=60).returncode
+        except (subprocess.SubprocessError, OSError) as e:
+            log(self.name, args[0], "outcome unknown:", e)
+            return -1
+
+    def queued_at(self, m, now):
+        """When the backend queued this message (its `at`, never later than now), else when this process first saw it."""
+        at = m.get("at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool) and at > 0:
+            return min(float(at), now)
+        return self.seen.setdefault(m["id"], now)
+
+    def busy_deadline(self, m, now):
+        """Earliest time this message may be pasted into a busy pane. The first of a backlog waits its own time from when
+        it was queued (urgent: the shorter wait); after a busy paste the rest of a continuous backlog follow the gap."""
+        gap_at = self.last_busy_paste + BUSY_GAP
+        if self.draining:
+            return gap_at
+        return max(gap_at, self.queued_at(m, now) + (BUSY_URGENT_WAIT if is_urgent(m) else BUSY_MAX_WAIT))
+
+    def next_wake(self):
+        """Seconds until the loop should look again: the normal poll, or sooner for a busy delivery or message poll due."""
         now = time.time()
-        if now - self.last_busy_paste < BUSY_GAP:
-            return False
-        if now - self.pending_since < (BUSY_URGENT_WAIT if is_urgent(m) else BUSY_MAX_WAIT):
-            return False
-        return not (pane_menu(self.screen) or input_draft(self.screen))
+        due = [now + POLL]
+        if self.state == "running":
+            if self.message and self.message["id"] not in self.pasted_ids:
+                at = self.busy_deadline(self.message, now)
+                if at > now:   # already due but blocked (a draft, a menu): look again at the normal poll
+                    due.append(at)
+            elif not self.message:
+                due.append(self.last_beat + MESSAGE_POLL)
+        return min(POLL, max(0.2, min(due) - now))
+
+    def submitted(self, mid, busy, sender, now):
+        """The message is in the session (pasted and Enter went through): send the receipt."""
+        self.unsubmitted = None
+        self.delivered, self.message = mid, None
+        if busy:
+            self.last_busy_paste, self.draining = now, True
+            self.delivered_busy = int(now - (self.busy_started or now))
+        else:
+            self.tail_changed = now
+        log(self.name, "message", mid, "typed into the session" + (" while busy (queued by Claude Code)" if busy else ""))
+        self.beat()   # carries the receipt (the backend records message-delivered, and -busy, once); may bring the next
 
     def deliver(self, busy=False):
         if classify(self.screen):
             return
         m = self.message
         if m["id"] in self.pasted_ids:
-            # Typed already, only the receipt failed (or the backend answered before it was stored): retry the receipt.
+            # Pasted and submitted already, only the receipt failed (or was not stored): retry the receipt, never paste.
             self.delivered, self.message = m["id"], None
             self.beat()
+            return
+        if self.unsafe_to_type(busy):
             return
         full = clean_text(m.get("text"))
         text = full[:MESSAGE_MAX]
@@ -666,38 +764,40 @@ class Supervisor:
         sender = clean_text(m.get("sender"))[:80]
         self.write_inbox("message.md", f"Message from {sender} (through the swarm backend; a request, not permission "
                                        f"to push, merge or deploy):\n\n{text}")
-        if self.agent("orch-send", self.name, check=False).returncode == 0:
-            self.delivered, self.message = m["id"], None
-            self.pasted_ids.add(m["id"])
-            now = time.time()
-            if busy:
-                self.last_busy_paste = now
-                self.event("message-delivered-busy", f"Message {m['id']} from {sender} pasted while busy after "
-                                                     f"{int(now - (self.pending_since or now))}s (queued by Claude Code)")
-            else:
-                self.tail_changed = now
-                self.pending_since = None
-            log(self.name, "message", m["id"], "typed into the session")
-            self.beat()   # carries the receipt; the reply may hold the next message (its wait keeps counting)
+        now = time.time()
+        self.busy_started = self.queued_at(m, now)
+        rc = self.send_keys_safely("orch-send")
+        if rc in NOT_PASTED:
+            return   # nothing was typed: delivered later, like any queued message
+        self.pasted_ids.add(m["id"])
+        if rc == 0:
+            self.submitted(m["id"], busy, sender, now)
+        else:
+            # Pasted (or maybe pasted), Enter failed or its outcome is unknown: never paste again, retry Enter alone.
+            self.unsubmitted, self.message = (m["id"], busy, sender), None
+            log(self.name, "message", m["id"], f"pasted but not confirmed submitted (orch-send exit {rc}); retrying Enter only")
+
+    def retry_submit(self):
+        mid, busy, sender = self.unsubmitted
+        if pane_menu(self.screen) or classify(self.screen):
+            return   # Enter would answer the menu
+        if self.send_keys_safely("orch-keys", "Enter") == 0:
+            self.submitted(mid, busy, sender, time.time())
 
     def handle_messages(self):
-        """Idle: type the queued message. Busy: only after its wait (see busy_ok). Nothing queued: poll the backend."""
-        if self.message and self.pending_since is None:
-            self.pending_since = time.time()
-        if self.message and self.idle():
-            self.deliver()
-        elif self.message:
-            if self.message["id"] in self.pasted_ids or self.busy_ok(self.message):
-                self.deliver(busy=True)
-        elif time.time() - self.last_beat >= MESSAGE_POLL:
-            # The heartbeat carries the next pending message. While busy this also times how long one has waited.
+        """Idle: type the queued message. Busy: once it is due (busy_deadline). Nothing queued: poll the backend."""
+        if self.unsubmitted:
+            return self.retry_submit()
+        if not self.message and time.time() - self.last_beat >= MESSAGE_POLL:
+            # The heartbeat carries the next pending message, busy or idle (busy: so its wait can be timed), and any
+            # receipt that has not got through yet.
             self.beat_ok = self.beat()
-            if self.message and self.pending_since is None:
-                self.pending_since = time.time()
-            if self.message and self.idle():
-                self.deliver()
-            if not self.message and self.delivered is None:
-                self.pending_since = None
+        if not self.message:
+            return
+        if self.idle():
+            self.deliver()
+        elif self.message["id"] in self.pasted_ids or time.time() >= self.busy_deadline(self.message, time.time()):
+            self.deliver(busy=True)
 
     def step(self):
         due = time.time() - self.last_beat >= (HEARTBEAT if not self.events or not self.beat_ok else POLL)
@@ -791,7 +891,7 @@ class Supervisor:
                 raise
             except Exception as e:  # keep supervising
                 log(self.name, "error:", repr(e)[:300])
-            time.sleep(POLL)
+            time.sleep(self.next_wake())
 
 
 def machine_stopping():

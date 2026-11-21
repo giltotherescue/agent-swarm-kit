@@ -9,21 +9,35 @@ See docs/updating-the-kit.md for how to update.
 Queued messages now reach an orchestrator during a long busy turn (agent-control PR 64).
 
 - **Busy delivery.** While the session is working (the spinner keeps the pane changing) the supervisor used to wait for
-  an idle pane, so a message could sit for the whole turn. Now the oldest queued message is typed in once it has waited
-  `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90), or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when the first line of the
-  message says `URGENT`; Claude Code queues it for the agent's next step. The next one follows after
-  `SWARM_ORCH_BUSY_GAP_SECONDS` (5). The wait keeps counting across a backlog. Idle delivery is unchanged. A new
-  `message-delivered-busy` event records each busy paste.
-- **Never over a draft or a menu.** The supervisor reads the whole input box between the rule lines around the `❯`
-  prompt. Claude Code's own hints (`Try "..."`, `Press up to edit queued messages`, `Queued ...`) count as empty; any
-  other text (including a multiline draft whose first line is empty) is a draft and nothing is pasted; a layout it
-  cannot read confidently also blocks. A choice menu or permission prompt blocks too.
-- **Never twice.** A message id this supervisor process already typed is never typed again; if only the receipt to the
-  backend failed, only the receipt is retried.
-- **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. The backend accepts the `message-delivered-busy`
-  event type. While busy the supervisor also asks for the next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS`.
-- Tests: `tests/test_orchestrator_busy.py` (input box fixtures, busy max wait, urgent, backlog, receipt retry) and an
-  urgent-head test in `tests/test_bus.py`.
+  an idle pane, so a message could sit for the whole turn. Now the oldest queued message is pasted once it is
+  `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90) old, or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when the first line of the
+  message says `URGENT`. The age counts from when the backend queued it, not from when the supervisor noticed it, and
+  the supervisor wakes for that moment instead of its normal 10 second poll, so an urgent message lands about 15 seconds
+  after it was sent. Claude Code queues it for the agent's next step. After a busy paste the rest of a continuous backlog
+  follows `SWARM_ORCH_BUSY_GAP_SECONDS` (5) apart, whatever its own priority; once the queue has been empty a new message
+  waits its full time again. Idle delivery on an empty prompt is unchanged (at once).
+- **Never onto a menu or a draft, idle or busy.** Before every paste and every Enter (idle delivery, busy delivery and
+  the stop/restart/delete wrap-up) the supervisor reads the screen. A choice menu or permission prompt, or typed text in
+  Claude Code's input box, blocks it. The box is the last `❯` prompt with the rule above it and exactly one rule below it
+  followed only by the footer; a second rule below the prompt (a pasted rule in a draft) counts as a draft. Only Claude
+  Code's exact hints count as empty: `Try "..."`, `Press up to edit queued messages` and
+  `Queued · ctrl+x ctrl+s to send now`; anything else (`Queued the release for Friday`, a lone `|`, a multiline draft
+  whose first line is empty) is a draft. Border bars are stripped only from a box with rounded corners. A busy paste
+  also needs a confirmed empty box; idle delivery onto a screen with no Claude Code box (not a draft, not a menu) still
+  happens. When the wrap-up cannot be sent safely it is skipped and the session ends at the stop deadline (120 s).
+- **Never twice.** `agent-exec orch-send` now exits 5 when nothing was pasted and 6 when the paste went in but Enter
+  failed. After a paste (or an unknown outcome) the supervisor never pastes that message again: it retries only Enter,
+  and only after Enter goes through does it send the receipt. If only the receipt failed, only the receipt is retried.
+  A cached message is dropped as soon as a heartbeat says nothing is queued.
+- **Busy event recorded once.** The supervisor sends `delivered_busy_seconds` with the receipt and the backend records a
+  `message-delivered-busy` event in the same first-delivery update as `message-delivered`, so a replayed receipt never
+  records it twice. The backend still accepts `message-delivered-busy` in heartbeat events.
+- **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. While busy the supervisor also asks for the
+  next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS` (so a message's wait can be timed).
+- Tests: `tests/test_orchestrator_busy.py` runs the real supervisor loop on a fake clock (max wait from enqueue time,
+  urgent at about 15 s, backlog at the gap, empty-reply reset, null reply, paste/Enter failures, receipt replay, idle
+  menu/draft, wrap-up) with real Claude Code captures in `tests/fixtures/panes/`; urgent-head test in `tests/test_bus.py`,
+  replayed busy receipt in `tests/test_orchestrator.py`.
 
 ## 0.8.0 (2026-11-21)
 
