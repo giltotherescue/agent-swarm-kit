@@ -102,6 +102,23 @@ The worker runs the command, saves the output as `artifacts/script.log`, and mar
 
 Messages never grant permission to push, merge, deploy or send anything outside.
 
+## Pull requests
+
+- **Only `--pr` opens a PR.** A task without it (`--push`, or `--pr-number N` alone) pushes its branch and never opens a PR,
+  whatever else happens. The backend also refuses to record a PR link from such a task unless it is the PR the task was
+  told to update.
+- **Which base a new PR gets.** `--base NAME` sets it. Without it, a follow-up uses its parent's base, and otherwise the
+  repo's real default branch as GitHub reports it. If that cannot be looked up, the worker leaves `--base` out and GitHub
+  chooses; it never assumes `main`. `--base` is saved on the task, inherited by follow-ups, and kept when a follow-up
+  answers a waiting task (only if the answer is accepted).
+- **Updating a PR.** `--pr-number N`, or a follow-up working on its parent's PR branch, updates that PR. The worker reads the
+  PR from GitHub after the push, never from an earlier read. If it is still open, the task reports it. If it was merged or
+  closed, the work is still pushed, and the task says so plainly (branch, commit and a note at the end of REPORT.md and in
+  the task events). It never reports that PR as its own or as merged by it, and it clears a PR link an earlier run of the
+  same task stored. A replacement PR is opened only when the task has `--pr` and new commits, and always against the
+  merged or closed PR's live base. If that base cannot be read, no PR is opened.
+- **The kit never merges or deploys.** A human merges. There is no merge, auto-merge or deploy step to configure.
+
 ## Trust model, short version
 
 One trusted owner (you) runs the swarm on a dedicated worker. One task cannot read or change another task. A project bot cannot see or act on another bot's tasks. Tasks never get the worker's long-lived token or your GitHub login. See [secrets](secrets.md).
