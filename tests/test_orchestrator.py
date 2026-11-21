@@ -58,6 +58,24 @@ class OrchestratorApiTest(unittest.TestCase):
         return [json.loads(r["payload"]) for r in self.b.api.s.q("SELECT payload FROM notices ORDER BY id")
                 if json.loads(r["payload"]).get("kind") == kind]
 
+    def test_release_a_delivery_unknown_message(self):
+        """0.8.1 round 3: an admin reconciles a held message: resend raises the release count the supervisor sees on the
+        pending message; the default marks it delivered. Admin only."""
+        self.create(start=True)
+        mid = self.b.req("POST", "/orchestrators/steward/messages", {"text": "hello"})["id"]
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 0)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": True}, tok=self.owner, expect=403)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": "yes"}, expect=400)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": True})
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 1)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {})
+        self.assertIsNone(beat(self.b, "steward")["message"])
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {}, expect=409)
+        self.b.req("POST", "/orchestrators/steward/messages/999/release", {}, expect=404)
+        self.b.req("POST", "/orchestrators/steward/messages/x/release", {}, expect=404)
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual(types.count("message-released"), 2)
+
     def test_create_validates_and_never_takes_secret_values(self):
         o = self.create()["orchestrator"]
         self.assertEqual((o["state"], o["desired"], o["tmux_session"], o["secret_bundles"]),
@@ -265,6 +283,10 @@ class OrchestratorCliTest(unittest.TestCase):
         self.assertIn("steward", self.ctl("list").stdout)
         self.ctl("message", "steward", "Look at signup next")
         beat(self.b, "steward", state="running", started_at=sb.now() - 90061, log_tail="line one\nline two")
+        mid = beat(self.b, "steward")["message"]["id"]
+        self.assertIn("pastes it again", self.ctl("release", "steward", str(mid), "--resend").stdout)
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 1)
+        self.assertNotEqual(self.ctl("release", "steward", "x", check=False).returncode, 0)
         status = self.ctl("status", "steward").stdout
         for text in ("running (wants running)", "app-runtime", "orch-steward", "1d 1h 1m", "message queued"):
             self.assertIn(text, status)
@@ -284,7 +306,9 @@ class ScreenTest(unittest.TestCase):
     def test_classify_reads_only_the_bottom_of_the_screen(self):
         self.assertEqual(so.classify("Welcome\n\n Select login method:\n 1. Claude account")[0], "login")
         self.assertEqual(so.classify("Paste code here if prompted >")[0], "login")
-        self.assertEqual(so.classify("Choose the text style that looks best\n 1. Dark mode")[:3:2], ("first-run", ["Enter"]))
+        self.assertEqual(so.classify("Choose the text style that looks best\n ❯ 1. Dark mode\nEnter to confirm")[:3:2], ("first-run", ["Enter"]))
+        # 0.8.1: only a whole dialog at the bottom is answered; a title without its key hint is not
+        self.assertIsNone(so.classify("Choose the text style that looks best\n 1. Dark mode"))
         self.assertEqual(so.classify("Security notes:\n Press Enter to continue")[1], "the security notes")
         self.assertEqual(so.classify("WARNING: Claude Code running in Bypass Permissions mode\n 1. No, exit")[0], "block")
         self.assertIsNone(so.classify("> working on it\n  esc to interrupt"))
@@ -337,7 +361,7 @@ if mode == "crash":
     sys.exit(3)
 if mode == "login":
     # Like Claude Code with no sign-in: two first-run screens that take Enter, then the sign-in menu.
-    print("Choose the text style that looks best with your terminal\n 1. Dark mode\n 2. Light mode", flush=True)
+    print("Choose the text style that looks best with your terminal\n ❯ 1. Dark mode\n   2. Light mode\n\nEnter to confirm", flush=True)
     note(event="input", text=sys.stdin.readline().rstrip("\n"))
     print("\n" * 60 + "Security notes:\n 1. Claude can make mistakes\nPress Enter to continue", flush=True)
     note(event="input", text=sys.stdin.readline().rstrip("\n"))

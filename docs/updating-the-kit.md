@@ -107,7 +107,8 @@ The database stays as the newer version left it. Newer versions only add tables 
 
 ## Upgrading to 0.8.1
 
-Run the setup script as usual; it restarts the supervisors. No database change. Orchestrators now receive a queued
+Run the setup script as usual; it restarts the supervisors. The backend adds one column by itself at start
+(`orchestrator_messages.release_count`, for `swarmctl orchestrator release`); nothing is changed or removed. Orchestrators now receive a queued
 message during a long busy turn, 90 seconds after it was queued (15 if urgent), instead of waiting for an idle pane.
 Nothing is typed onto a menu or a draft any more, idle or busy, including the stop wrap-up: a session showing one
 when it is stopped gets no wrap-up and ends after the stop grace time (`SWARM_ORCH_STOP_GRACE`, 120 s). The guard
@@ -115,7 +116,10 @@ fails closed: a pane without a readable, empty Claude Code input box gets nothin
 minutes shows up once as a `delivery-deferred` event. `agent-exec` must be updated with the supervisor (new
 `orch-send` exit codes 5, 6 and 7); `swarmctl`, `swarm_worker.py` and `agent-exec` are 0.8.1 together. Update the
 backend too: it accepts the new `delivery-deferred` and `delivery-unknown` event types. An older backend refuses
-them (HTTP 400); the supervisor then drops those two events, keeps them in its own log, and carries on.
+them (HTTP 400 `bad event type`); the supervisor then drops those two events, keeps them in its own log, and carries
+on. After a `delivery-unknown` event the message stays held, also across supervisor restarts, until you check the
+session and run `swarmctl orchestrator release NAME ID` (it arrived) or `... --resend` (paste it again); this needs
+the 0.8.1 backend and `swarmctl`.
 
 ## Upgrading to 0.8.0
 

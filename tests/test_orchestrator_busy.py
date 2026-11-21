@@ -36,7 +36,12 @@ def _pane(*input_lines, above="", below=FOOTER):
 
 BUSY_PANE = _pane("❯ ", above="✻ Thinking… (esc to interrupt)\n")
 MENU_PANE = "Which layout?\n ❯ 1. Grid\n   2. List\n"
-PASTED_PANE = _pane("❯ [Pasted text #1 +3 lines]")
+PASTED_PANE = _pane("❯ [Pasted text #1 +3 lines]")   # Claude Code's collapsed paste: opaque, never submitted
+
+
+def text_pane(text, **kw):
+    """The input box holding this text, expanded (the first line on the prompt row)."""
+    return _pane(*("❯ " + text).splitlines(), **kw)
 
 
 class RealCapturesTest(unittest.TestCase):
@@ -62,7 +67,8 @@ class InputBoxTest(unittest.TestCase):
             "boxed empty": "╭" + "─" * 40 + "╮\n│ ❯                │\n╰" + "─" * 40 + "╯\n" + FOOTER + "\n",
             "boxed hint": "╭" + "─" * 40 + "╮\n│ ❯ Press up to edit queued messages │\n╰" + "─" * 40 + "╯\n" + FOOTER + "\n",
             "every real footer row": _pane("❯ ", below=FOOTER + "\n  ? for shortcuts\n   Not logged in · Run /login\n"
-                                           "  ✘ Auto-update failed: no write permission\n   ◐ medium · /effort"),
+                                           "  ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\n"
+                                           "   ◐ medium · /effort\n  paste again to expand" + " " * 40 + "Not logged in · Run /login"),
         }.items():
             self.assertEqual(so.input_box(pane), "empty", name)
 
@@ -132,13 +138,14 @@ class InputBoxTest(unittest.TestCase):
 
     def test_paste_identity_from_the_box_start(self):
         body = "Message from chief (through the swarm backend; a request):\n\nhello"
-        ok = {"exact": _pane(*("❯ " + body).splitlines()), "marker": PASTED_PANE,
+        ok = {"exact": _pane(*("❯ " + body).splitlines()),
               "wrapped": _pane("❯ Message from chief (through the swarm", "  backend; a request):", "", "  hello")}
         bad = {"prefix only, someone's draft after it": _pane("❯ Message from chief (through the swarm backend; a request):", "my own notes"),
                "draft before it": _pane("❯ my notes", "Message from chief (through the swarm backend; a request):", "", "hello"),
                "partial marker in prose": _pane("❯ my notes about [Pasted text"),
                "marker plus text": _pane("❯ [Pasted text #1 +3 lines] and more"),
-               "malformed marker": _pane("❯ [Pasted text #x]")}
+               "malformed marker": _pane("❯ [Pasted text #x]"),
+               "collapsed marker (opaque)": PASTED_PANE}
         for name, pane in ok.items():
             self.assertTrue(so.paste_matches(so.box_rows(pane), body), name)
         for name, pane in bad.items():
@@ -242,6 +249,7 @@ class FakeBackend:
         self.fail = 0           # heartbeats that fail before the backend sees them
         self.lose_reply = 0     # heartbeats the backend processes but whose reply is lost
         self.restart_generation = 0
+        self.reject = None      # the next heartbeat carrying events is refused with HTTP 400 and this error
 
     def add(self, text, at=None):
         mid = len(self.msgs) + 1
@@ -264,6 +272,9 @@ class FakeBackend:
                 self.events.append(("message-delivered", ack))
                 if isinstance(body.get("delivered_busy_seconds"), int):
                     self.events.append(("message-delivered-busy", ack))
+        if self.reject and body.get("events"):
+            why, self.reject = self.reject, None
+            raise urllib.error.HTTPError(path, 400, why, {}, None)
         for e in body.get("events") or []:
             if e["type"] not in ORCH_EVENT_TYPES:
                 raise urllib.error.HTTPError(path, 400, f"bad event type {e['type']!r}", {}, None)
@@ -272,7 +283,8 @@ class FakeBackend:
         if self.lose_reply:
             self.lose_reply -= 1
             raise urllib.error.URLError("reply lost")
-        head = next(({k: m[k] for k in ("id", "at", "sender", "text")} for m in self.msgs if not m["delivered"]), None)
+        head = next(({k: m[k] for k in ("id", "at", "sender", "text", "release") if k in m} for m in self.msgs
+                     if not m["delivered"]), None)
         return {"desired": "running", "deleted": False, "generation": 1, "restart_generation": self.restart_generation, "message": head,
                 "config": {}}
 
@@ -307,6 +319,7 @@ class LoopCase(unittest.TestCase):
         self.keys, self.killed, self.on_keys, self.status_fail = [], 0, None, 0   # status_fail: next N orch-status fail
         self.send_raise_before = self.send_raise_after = None
         self.pane_before, self.after_send = None, None   # after_send(): the pane changes right after orch-send returns
+        self.paste_pane = None   # what a paste that was not submitted left in the box (the expanded text)
 
     def fake_agent(self, *args, **kw):
         """agent-exec as the supervisor sees it. A paste that is not submitted (exit 6 or 7) leaves the text in the box,
@@ -327,7 +340,8 @@ class LoopCase(unittest.TestCase):
                 mid = next((m["id"] for m in self.be.msgs if m["text"] in text), None)
                 self.pasted.append(mid)
                 if rc != 0:
-                    self.pane_before, self.pane = self.pane, PASTED_PANE
+                    self.pane_before, self.pane = self.pane, text_pane(text)
+                    self.paste_pane = self.pane
             if self.after_send:
                 self.after_send()
             if self.send_raise_after:
@@ -338,7 +352,7 @@ class LoopCase(unittest.TestCase):
             if rc == 0:
                 self.keys.append(list(args[2:]))
                 self.enters += "Enter" in args[2:]
-                if "Enter" in args[2:] and self.pane is PASTED_PANE:
+                if "Enter" in args[2:] and self.pane is not None and self.pane is self.paste_pane:
                     self.pane = self.pane_before
                 if self.on_keys:
                     self.on_keys(list(args[2:]))
@@ -531,7 +545,7 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual(self.pasted, [1])
         self.assertEqual((self.enters, self.be.delivered()), (0, []))
         self.assertEqual(self.be.types("delivery-deferred"), [None])
-        self.pane = PASTED_PANE
+        self.pane = self.paste_pane = text_pane(self.typed[0])
         self.run_loop(15)
         self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
 
@@ -858,14 +872,14 @@ class OrchSendEnterCheckTest(unittest.TestCase):
 
     def test_pasted_text_in_the_box_gets_enter(self):
         quoted = "Message from chief (through the swarm backend)\n\nThe installer says Enter to confirm."
-        for pane in (PASTED_PANE, _pane("❯ Message from chief (through the swarm backend)", "", "  hello")):
+        for pane in (_pane("❯ Message from chief (through the swarm backend)", "", "  hello"),):
             self.assertIsNone(self.check(pane), pane[-120:])
         self.assertIsNone(self.ae.pasted_still_there(_pane(*("❯ " + quoted).splitlines()), quoted))
 
     def test_menu_or_gone_text_withholds_enter(self):
         for pane in (cap("menu"), MENU_PANE, cap("idle"), cap("busy"), cap("queued"), "", "\n\n", cap("draft"), cap("single"),
                      _pane("❯ Message from chief (through the swarm backend)", "", "  hello", "my own edit"),
-                     _pane("❯ my notes about [Pasted text"), _pane("❯ [Pasted text #1 +3 lines]", below=""),
+                     _pane("❯ my notes about [Pasted text"), _pane("❯ [Pasted text #1 +3 lines]", below=""), PASTED_PANE,
                      _pane("❯ [Pasted text #1 +3 lines]", below=FOOTER + "\nuser@host:~$ "),
                      _pane("❯ hello", below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm")):
             self.assertIsNotNone(self.check(pane), pane[-120:])

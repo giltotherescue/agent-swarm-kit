@@ -24,7 +24,7 @@ Orchestrators (WORK/orchestrators/NAME, tmux socket and session orch-NAME; see d
              [--relay-name X] [--scope] -- COMMAND ARGS...
   agent-exec --work DIR --handoff DIR orch-status NAME [--lines N] [--sessions-dir DIR]
   agent-exec --work DIR --handoff DIR orch-send NAME [--plain] (types inbox/orch-NAME/message.md, then Enter; exit 5 nothing pasted, 6 pasted but
-                                                            Enter failed, 7 pasted but Enter withheld: menu or text gone)
+                                                            Enter failed, 7 pasted but Enter withheld: the box does not hold exactly that text)
   agent-exec --work DIR --handoff DIR orch-kill NAME
   agent-exec --work DIR --handoff DIR orch-keys NAME KEY...   (only Enter, Down, Up, Escape, 1-9: answers a first-run screen)
   agent-exec --work DIR --handoff DIR orch-check NAME [--agent-env FILE] [--claude-dir DIR]   (does Claude have a sign-in?)
@@ -556,57 +556,153 @@ def cmd_orch_status(p, name, lines, sessions_dir):
     print(json.dumps(out))
 
 
-PANE_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")
+# ---------- the pane parser (one copy: swarm_orchestrator.py loads these functions from this file) ----------
+# Claude Code's input box, read from the bottom of a plain `tmux capture-pane`. Simple rules that fail closed: anything
+# this does not positively recognize is a draft, an unknown footer or unreadable, and nothing is typed onto it.
+PANE_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")   # a border line of the input box (plain or rounded)
 PANE_PROMPT = re.compile(r"^[\s│┃|]*[>❯](?:\s|$)")
 PANE_MENU = re.compile(r"^[\s│┃|]*❯\s*\d+[.)]\s|(?:Esc|Enter) to (?:cancel|select|confirm)", re.I)
-# Same lists as swarm_orchestrator.py (agent-exec is installed alone, so it cannot import them).
-PANE_FOOTER = re.compile(r"^\s*(?:⏵⏵ |⏸ |\? for shortcuts|paste again to expand|esc to interrupt|Press Ctrl-[CD] again to exit|"
-                         r"Not logged in · |✘ Auto-update failed|✓ Update installed|tmux focus-events off|"
-                         r"[◐◑◒◓○●] \w+ · /effort)")
-PANE_PASTED = re.compile(r"^\[Pasted text #\d+(?: \+\d+ lines?)?\]$")
+PANE_PASTED = re.compile(r"^\[Pasted text #\d+(?: \+\d+ lines?)?\]$")   # Claude Code's placeholder for a collapsed paste
+PANE_FOOTER_MAX = 8      # non-blank rows Claude Code shows under the input box
+PANE_ROWS_MAX = 20       # rows of a multiline input box
+# Claude Code's own hint on the prompt row of an empty box, as seen in real captures. Exact literals only.
+PANE_HINTS = frozenset({"Press up to edit queued messages"})
+# Every row under the input box is one or more status items (separated by two or more spaces, as Claude Code lays out
+# its left and right columns), and each item must match one of these whole, as seen in real captures. The only variable
+# fields are explicit: the permission mode, the auto-update failure reason (lower-case words) and the effort level.
+PANE_FOOTER_ITEMS = [re.compile(p) for p in (
+    r"(?:⏵⏵ (?:bypass permissions|accept edits)|⏸ plan mode) on \(shift\+tab to cycle\)(?: · (?:esc to interrupt|← for agents))*",
+    r"\? for shortcuts",
+    r"paste again to expand",
+    r"esc to interrupt",
+    r"Press Ctrl-[CD] again to exit",
+    r"Not logged in · Run /login",
+    r"✘ Auto-update failed: [a-z][a-z ]{0,80} · Run claude doctor",
+    r"✓ Update installed(?: · Restart to apply)?",
+    r"tmux focus-events off · add 'set -g focus-events on' to ~/\.tmux\.conf and reattach for focus tracking",
+    r"[◐◑◒◓○●] (?:low|medium|high|xhigh|max) · /effort",
+)]
 
 
-def pasted_still_there(screen, text, plain=False):
-    """Between the paste and Enter: None when Enter would submit exactly the pasted text, else why not.
-
-    Claude Code: its input box must still be at the bottom of the pane (a menu or dialog replaces it), closed by 1 to 8
-    known status rows, with no active menu control in them; from the prompt line right under the box's top rule the box
-    must hold exactly the pasted text (whitespace ignored, since wrapping changes it) or only Claude Code's complete
-    "[Pasted text #N +K lines]" marker. The text is compared as data: a message that quotes "Enter to confirm" is fine.
-    plain (a box-less test stand-in): no menu hints at the bottom and the start of the pasted text on screen."""
+def pane_lines(screen):
     lines = [ln.rstrip() for ln in (screen or "").splitlines()]
     while lines and not lines[-1].strip():
         lines.pop()
-    if not lines:
-        return "the pane could not be read"
+    return lines
+
+
+def pane_footer_row(line):
+    """True when this row under the input box is made only of known Claude Code status items."""
+    items = re.split(r"\s{2,}", line.strip())
+    return bool(items) and all(any(p.fullmatch(it) for p in PANE_FOOTER_ITEMS) for it in items)
+
+
+def pane_box(screen):
+    """Claude Code's input box at the bottom of the pane: {"state", "rows", "footer_ok", "bottom"}.
+
+    state: "empty" (one prompt row, blank or a verified hint, and a valid footer), "draft" (anything typed, or a box that
+    cannot be told apart from text inside a bigger one), "unknown_footer" (an empty box over rows that are not all known
+    status items), or None (no box at the bottom). rows: the box's rows (prompt marker and side bars removed, nothing
+    else changed) only for one unambiguous box; footer_ok: 1 to PANE_FOOTER_MAX rows under it, every one known.
+
+    Read from the bottom: the last rule is the box's bottom, the nearest rule above it (at most PANE_ROWS_MAX rows up)
+    its top, and the first row under the top must be the prompt. The box is ambiguous, so a draft, when the rules differ
+    or anywhere higher on the screen another prompt line sits right under a rule (the top may be a rule pasted inside a
+    taller draft whose real top is higher up)."""
+    lines = pane_lines(screen)
+    out = {"state": None, "rows": None, "footer_ok": False, "bottom": None}
+    bot = next((i for i in range(len(lines) - 1, -1, -1) if PANE_RULE.match(lines[i])), None)
+    if not bot:
+        return out
+    footer = [ln for ln in lines[bot + 1:] if ln.strip()]
+    if any(PANE_PROMPT.match(ln) for ln in footer):
+        return out   # a prompt under the last rule: not a box at the bottom of the pane
+    out["bottom"] = bot
+    out["footer_ok"] = 1 <= len(footer) <= PANE_FOOTER_MAX and all(pane_footer_row(ln) for ln in footer)
+    top = next((i for i in range(bot - 1, max(-1, bot - 2 - PANE_ROWS_MAX), -1) if PANE_RULE.match(lines[i])), None)
+    if top is None:
+        return out
+    if any(PANE_RULE.match(lines[i]) and PANE_PROMPT.match(lines[i + 1]) for i in range(top)):
+        out["state"] = "draft"   # two candidate boxes
+        return out
+    rows = lines[top + 1:bot]
+    if not rows or not PANE_PROMPT.match(rows[0]):
+        return out
+    t, b = lines[top], lines[bot]
+    if t.lstrip().startswith("╭") and b.lstrip().startswith("╰"):
+        inner = [r.strip() for r in rows]
+        if len(t.strip()) != len(b.strip()) or not all(len(r) >= 2 and r[0] == "│" and r[-1] == "│" for r in inner):
+            out["state"] = "draft"
+            return out
+        rows = [r[1:-1] for r in inner]
+    elif t != b or t[:1] not in "─━═":
+        out["state"] = "draft"   # an indented or different rule: possibly one pasted inside a draft
+        return out
+    rows[0] = re.sub(r"^\s*[>❯]", "", rows[0], count=1)
+    out["rows"] = rows
+    empty = len(rows) == 1 and (not rows[0].strip() or rows[0].strip() in PANE_HINTS)
+    out["state"] = "draft" if not empty else "empty" if out["footer_ok"] else "unknown_footer"
+    return out
+
+
+def pane_menu(screen):
+    """True when a choice menu or permission prompt is on screen (a selected numbered option, or its key hints).
+    With a box at the bottom only its footer can hold active controls: output above it is history, the box is data."""
+    lines = pane_lines(screen)
+    box = pane_box(screen)
+    scope = lines[box["bottom"] + 1:] if box["state"] is not None else lines
+    return any(PANE_MENU.search(ln) for ln in [ln for ln in scope if ln.strip()][-25:])
+
+
+def pane_same_text(rows, text):
+    """The box rows hold exactly this text: compared with every run of whitespace (wrapping, indentation, line breaks)
+    collapsed to one space, never deleted, so an edit that adds or removes a space inside a line is a difference."""
+    got, want = " ".join(" ".join(rows).split()), " ".join((text or "").split())
+    return bool(got) and got == want
+
+
+def pane_paste_check(screen, text):
+    """Between a paste and its Enter: None when Enter would submit exactly this text, else why not: "unreadable",
+    "menu", "unknown_footer", "gone" (the box is empty again), "not_verifiable" (only Claude Code's collapsed
+    "[Pasted text #N +K lines]" marker: it cannot be tied to this message, so it never gets Enter) or "draft"."""
+    if not screen or not screen.strip():
+        return "unreadable"
+    if pane_menu(screen):
+        return "menu"
+    box = pane_box(screen)
+    if box["state"] is None:
+        return "unreadable"
+    if box["rows"] is None:
+        return "draft"
+    if not box["footer_ok"]:
+        return "unknown_footer"
+    shown = [r.strip() for r in box["rows"] if r.strip()]
+    if not shown or shown == ["Press up to edit queued messages"]:
+        return "gone"
+    if len(shown) == 1 and PANE_PASTED.match(shown[0]):
+        return "not_verifiable"
+    return None if pane_same_text(box["rows"], text) else "draft"
+
+
+PASTE_WHY = {"unreadable": "no input box at the bottom of the pane (a menu or another screen)", "menu": "a menu is on screen",
+             "unknown_footer": "unrecognized rows under the input box", "gone": "the pasted text is gone from the input box",
+             "not_verifiable": "the input box shows only a collapsed [Pasted text] marker, which cannot be verified",
+             "draft": "the input box holds something other than the pasted text"}
+
+
+def pasted_still_there(screen, text, plain=False):
+    """Between the paste and Enter: None when Enter would submit exactly the pasted text, else why not (pane_paste_check).
+    plain (a box-less test stand-in): no menu hints at the bottom and the start of the pasted text on screen."""
     if plain:
+        lines = pane_lines(screen)
+        if not lines:
+            return "the pane could not be read"
         if any(PANE_MENU.search(ln) for ln in [ln for ln in lines if ln.strip()][-25:]):
             return "a menu is on screen"
         first = text.strip().splitlines()[0][:30] if text.strip() else ""
         return None if first and first in screen else "the pasted text is not on screen"
-    nobox = "no input box at the bottom of the pane (a menu or another screen)"
-    bot = next((i for i in range(len(lines) - 1, -1, -1) if PANE_RULE.match(lines[i])), None)
-    if bot is None:
-        return nobox
-    footer = [ln for ln in lines[bot + 1:] if ln.strip()]
-    if not footer or len(footer) > 8 or not all(PANE_FOOTER.match(ln) for ln in footer):
-        return nobox
-    if any(PANE_MENU.search(ln) for ln in footer):
-        return "a menu is on screen"
-    # The box's first row: the lowest prompt line with a rule right above it, at most 40 rows up (a taller box fails).
-    p = next((i for i in range(bot - 1, max(0, bot - 41), -1) if PANE_PROMPT.match(lines[i]) and PANE_RULE.match(lines[i - 1])), None)
-    if p is None:
-        return nobox
-    rows = [re.sub(r"^[\s│┃|]*[>❯]", "", lines[p], count=1)] + lines[p + 1:bot]
-    rows = [r.strip().strip("│┃").strip() for r in rows]
-    shown = [r for r in rows if r]
-    if not shown or shown == ["Press up to edit queued messages"]:
-        return "the pasted text is gone from the input box"
-    if len(shown) == 1 and PANE_PASTED.match(shown[0]):
-        return None
-    if re.sub(r"\s+", "", "".join(shown)) != re.sub(r"\s+", "", text):
-        return "the input box holds something other than the pasted text"
-    return None
+    why = pane_paste_check(screen, text)
+    return PASTE_WHY[why] if why else None
 
 
 def cmd_orch_send(p, name, plain=False):
@@ -621,7 +717,8 @@ def cmd_orch_send(p, name, plain=False):
     with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
         text = fh.read(20000)
     # Exit 5: nothing was pasted (safe to try again). Exit 6: pasted, Enter failed. Exit 7: pasted, Enter withheld because
-    # the pane became a menu or the pasted text is gone. After 6 or 7 never paste again; Enter only while the text is there.
+    # the box does not hold exactly that text (a menu, the text gone, other text, or only a collapsed [Pasted text] marker,
+    # which cannot be verified). After 6 or 7 never paste again; Enter only while exactly that text is in the box.
     if tmux(name, "load-buffer", "-b", "swarm-msg", "-", input=text).returncode != 0:
         die("tmux load-buffer failed, nothing pasted", 5)
     if tmux(name, "paste-buffer", "-d", "-p", "-b", "swarm-msg", "-t", f"orch-{name}").returncode != 0:

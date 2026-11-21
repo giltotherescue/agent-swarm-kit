@@ -200,7 +200,9 @@ MIGRATE_COLUMNS = {
     "notices": [("event", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "workers": [("projects", "TEXT")],
     # 0.8.0 Agent Bus: links a message typed into an orchestrator pane to its bus row; then the wake policy (agent-control 0027).
-    "orchestrator_messages": [("bus_message_id", "INTEGER")],
+    "orchestrator_messages": [("bus_message_id", "INTEGER"),
+                              # 0.8.1: an admin released a delivery-unknown hold for one more paste (counter, see release)
+                              ("release_count", "INTEGER NOT NULL DEFAULT 0")],
     "agents": [("digest_minutes", "INTEGER NOT NULL DEFAULT 60"), ("last_digest_at", "INTEGER"), ("unreachable_since", "INTEGER"),
                ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER")],
     "bus_messages": [("wake", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0"), ("noop", "INTEGER NOT NULL DEFAULT 0"),
@@ -2509,6 +2511,33 @@ class Backend:
                 print("bus mirror failed:", repr(e), file=sys.stderr, flush=True)
         return {"id": cur.lastrowid, "queued": True, **({"bus_id": bus_id} if bus_id else {})}
 
+    def orch_release(self, who, name, mid, b):
+        """An admin checked the session after a delivery-unknown event. Default: the message arrived, mark it delivered (the
+        supervisor drops its hold, nothing is typed). resend: paste it once more (the supervisor sees the release count
+        go up on the pending message). Either way the supervisor never guesses on its own."""
+        self.need(who, "admin")
+        resend = b.get("resend", False)
+        if not isinstance(resend, bool):
+            raise ApiError(400, "resend must be true or false")
+        with self.s.tx():
+            self.get_orch(who, name)
+            m = self.s.one("SELECT id, delivered_at FROM orchestrator_messages WHERE id = ? AND name = ?", mid, name)
+            if not m:
+                raise ApiError(404, f"orchestrator {name} has no message {mid}")
+            if m["delivered_at"]:
+                raise ApiError(409, f"message {mid} is already delivered")
+            if resend:
+                self.s.run("UPDATE orchestrator_messages SET release_count = release_count + 1 WHERE id = ?", mid)
+                self.orch_event(name, "message-released", "admin", f"message {mid} released: it is pasted again")
+            else:
+                self.s.run("UPDATE orchestrator_messages SET delivered_at = ? WHERE id = ?", now(), mid)
+                try:
+                    self.bus.on_orchestrator_delivered(mid)
+                except Exception as e:
+                    print("bus delivered mark failed:", repr(e), file=sys.stderr, flush=True)
+                self.orch_event(name, "message-released", "admin", f"message {mid} marked delivered by an admin")
+        return {"id": mid, "released": True, "resend": resend}
+
     def orch_heartbeat(self, who, name, b):
         """The supervisor on the pinned worker reports, and gets back what it should be doing."""
         self.need(who, "worker")
@@ -2581,8 +2610,8 @@ class Backend:
                                         f"message {ack} pasted while the session was busy, after {waited}s (queued by Claude Code)")
             msg = None
             if not r["deleted_at"] and r["desired"] == "running":
-                msg = self.s.one("SELECT id, at, sender, text FROM orchestrator_messages WHERE name = ? AND delivered_at IS NULL"
-                                 " ORDER BY id LIMIT 1", name)
+                msg = self.s.one("SELECT id, at, sender, text, release_count AS release FROM orchestrator_messages"
+                                 " WHERE name = ? AND delivered_at IS NULL ORDER BY id LIMIT 1", name)
         return {"desired": "stopped" if r["deleted_at"] else r["desired"], "deleted": bool(r["deleted_at"]),
                 "generation": r["generation"], "restart_generation": r["restart_generation"], "message": msg,
                 "config": {k: r[k] for k in ("project", "repo", "provider", "model", "brief", "relay_agent_name", "session_id")}
@@ -3106,6 +3135,14 @@ def r_orch_logs(api, who, m, qs, body, h):
        "typed into the session when the agent is idle. One at a time. Bot: own only")
 def r_orch_message(api, who, m, qs, body, h):
     return api.orch_message(who, m[0], body)
+
+
+@route("POST", r"/orchestrators/([^/]+)/messages/([^/]+)/release", ("admin",), "After a delivery-unknown event: mark the message "
+       "delivered (default), or `resend: true` to have the supervisor paste it once more")
+def r_orch_release(api, who, m, qs, body, h):
+    if not m[1].isdigit():
+        raise ApiError(404, "no such message")
+    return api.orch_release(who, m[0], int(m[1]), body)
 
 
 @route("POST", r"/worker/orchestrators/([^/]+)/heartbeat", ("worker",), "Supervisor on the pinned worker only: report state and the "

@@ -24,45 +24,68 @@ Queued messages now reach an orchestrator during a long busy turn (agent-control
   their fake Claude. With it, a readable screen with no box parts at all (no rule, no prompt line) and no menu takes an
   idle delivery or the wrap-up; never a busy paste, and never an empty or failed capture. Missing chrome alone is never
   taken as a stand-in.
-- **The box is read from the bottom.** The last rule is the box's bottom; under it there must be 1 to 8 lines, every
-  one a status row Claude Code draws there (mode line, `? for shortcuts`, `paste again to expand`, sign-in, update,
-  tmux or effort note). No footer, or anything else after a genuine footer (a shell prompt, prose), is not a live box. An empty box is exactly three rows: an unindented rule, the prompt line, the identical rule (or a
-  rounded box with both side bars). A prompt with a rule above it further up is a multiline draft; an indented or
-  different rule, or a second prompt between the top and an earlier rule (two candidate boxes), is a draft. The
-  only hint counted as empty is the verified literal `Press up to edit queued messages` on the prompt line; a quoted
-  `Try "..."` cannot be told from typed text in a capture, so it is a draft.
+- **The box is read from the bottom, by one parser.** `agent-exec` defines the pane parser and the supervisor loads
+  that same file (agent-exec is installed alone and runs with `python3 -I`, so the parser lives there), so both read a
+  capture the same way; paired contract tests pass identical captures through both. The last rule is the box's bottom
+  and the nearest rule above it (at most 20 rows up) its top; the first row under the top must be the prompt. Under the
+  bottom there must be 1 to 8 rows, each made only of whole status items seen in real captures (split where Claude Code
+  leaves two or more spaces between its columns): the mode line (`⏵⏵ bypass permissions on (shift+tab to cycle)` and
+  its ` · esc to interrupt`, ` · ← for agents` suffixes; the mode is the variable field), `? for shortcuts`,
+  `paste again to expand`, `esc to interrupt`, `Press Ctrl-C again to exit`, `Not logged in · Run /login`,
+  `✘ Auto-update failed: <reason> · Run claude doctor`, `✓ Update installed`, the tmux focus-events note and
+  `◐ <level> · /effort`. Anything else, including a known item with more text after it (`? for shortcuts are documented
+  here`), is `unknown_footer`. An empty box is exactly one prompt row between an unindented rule and the identical rule
+  (or a rounded box with both side bars on every row). The box is a draft when the rules differ or when anywhere higher
+  on the screen another prompt line sits right under a rule (two candidate boxes: the top may be a rule pasted inside a
+  taller draft). The only hint counted as empty is the verified literal `Press up to edit queued messages`; a quoted
+  `Try "..."` cannot be told from typed text, so it is a draft.
 - **Captured again at the send boundary.** Right before each paste (after the message poll and any other network work)
   and before each Enter retry, the supervisor reads the pane again; the wrap-up started inside a heartbeat (an admin
   restart) does the same. With a readable box at the bottom only its footer can hold an active menu: words above it are
   history and the box's contents are data, so a message quoting "Enter to confirm" is not a menu. If the fresh capture
   shows the pane became busy during the message poll, the busy wait applies before anything is pasted.
 - **Enter submits only the pasted text.** Before every Enter (in `agent-exec orch-send` and in the supervisor's retry)
-  the box, from its first row, must hold exactly the pasted text (whitespace ignored, since wrapping changes it) or only
-  Claude Code's complete `[Pasted text #N +K lines]` marker. A prefix of the message followed by other text, someone
-  else's draft, or prose such as `my notes about [Pasted text` gets no Enter.
+  the whole unambiguous box must hold exactly the pasted text. Whitespace runs (wrapping, indentation, line breaks) are
+  collapsed to one space on both sides, not deleted, so an edit that adds or removes a space inside a line is a
+  difference; side bars are removed only in a rounded box. A prefix of the message followed by other text, someone
+  else's draft above it, or prose such as `my notes about [Pasted text` gets no Enter. Claude Code's collapsed
+  `[Pasted text #N +K lines]` marker is opaque (nothing ties it to this message, for example after a timed-out
+  `orch-send`): it never gets Enter and never a receipt; `orch-send` exits 7 and the supervisor defers the message with
+  `reason=not_verifiable`.
 - **No false receipts.** `agent-exec orch-send` exits 5 when nothing was pasted, 6 when the paste went in but Enter
   failed, and 7 when it pasted but withheld Enter because the pane turned into a menu or the pasted text left the
   box. The supervisor separates a definite failure before anything was typed (5, 2, 4, or agent-exec not starting:
   pasted again later), a confirmed paste that was not submitted (6, 7: only Enter is retried, and only while the pasted
-  text is still in the box), and an unknown outcome (a timeout, an unexpected exit): Enter only if the text is still in
-  the box; if the box is empty the message is left unacknowledged, never pasted again by this supervisor, and reported
-  once as a `delivery-unknown` event. The wrap-up's single Enter retry follows the same rule. If only the receipt
+  text is still in the box), and an unknown outcome (a timeout, an unexpected exit): Enter only if exactly the text
+  is still in the box; if the box is empty the message is left unacknowledged, never pasted again, and reported once as
+  a `delivery-unknown` event. The hold, an outstanding unsubmitted paste and a pending receipt are kept in the state file
+  (`<state dir>/orchestrators/NAME.json`), so a replacement supervisor does not paste the message again either. A hold
+  ends only when the backend no longer has the message pending or an admin runs `swarmctl orchestrator release NAME ID`
+  (it arrived: marked delivered, nothing typed) or `... --resend` (paste it once more), through the new admin route
+  `POST /orchestrators/NAME/messages/ID/release` (`orchestrator_messages.release_count`, added in place). The wrap-up's single Enter retry follows the same rule. If only the receipt
   failed, only the receipt is retried. A cached message is dropped as soon as a heartbeat says nothing is queued.
 - **Visible deferral.** A message the pane holds back for `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per
   message and reason as a `delivery-deferred` event, `reason=unknown_footer|draft|menu|unreadable` (the same reasons
-  as agent-control PR 67's fix round), plus `paste_failed` and `submit_failed` when tmux keeps refusing the paste or
-  Enter, with no pane contents. The timer runs from the first hold of that message and survives a failed heartbeat; it
+  as agent-control PR 67's fix round), plus `paste_failed`, `submit_failed` (Enter keeps failing) and `submit_unknown`
+  (Enter keeps timing out while the text stays in the box), and `not_verifiable` (a collapsed paste marker), with no
+  pane contents. The timer runs from the first hold of that message and survives a failed heartbeat; it
   is cleared only when a heartbeat confirms the queue head changed. A deferral never times out into a paste.
-- **Current folder trust screen.** Claude Code now asks "Quick safety check: Is this a project you created or one you
-  trust?" with `❯ No, exit` preselected. The supervisor presses Down, and Enter only once the single `❯` of the active
-  dialog is seen on `Yes, I trust this folder`. Only the lowest first-run dialog on the screen counts (an earlier one
-  that scrolled up is ignored), and two selections send nothing (each at most 3 times; a screen that does not move ends as `needs-login`). The older
-  "Do you trust the files in this folder" wording still gets Enter. A sign-in or API-key screen is never answered.
+- **First-run screens.** A first-run screen is answered only when its whole dialog is the bottom of the pane: no input
+  box anywhere on screen (box contents and history are data, so a draft mentioning "Security notes" gets nothing), the
+  last line is the dialog's key hint (`Enter to confirm`, `Press Enter to continue`, ...), and the dialog's title sits
+  at most 15 lines above it with no rule in between. The folder trust question is answered from its selection, in both
+  wordings: Claude Code's current "Quick safety check: Is this a project you created or one you trust?" (`❯ No, exit`
+  preselected, Yes below: Down) and the older "Do you trust the files in this folder?" (Yes above: Up). Enter only once
+  the one `❯` is on the Yes option; two selections, none, or a `❯` on anything else send nothing (a screen that does
+  not move ends as `needs-login`). A sign-in or API-key screen is never answered.
 - **Busy event recorded once.** The supervisor sends `delivered_busy_seconds` with the receipt and the backend records a
   `message-delivered-busy` event in the same first-delivery update as `message-delivered`, so a replayed receipt never
   records it twice. The backend still accepts `message-delivered-busy` in heartbeat events.
 - **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. While busy the supervisor also asks for the
   next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS` (so a message's wait can be timed).
+- **Older backend fallback, narrowly.** Only the backend's exact `bad event type 'delivery-deferred'` (or
+  `'delivery-unknown'`) 400 makes the supervisor drop those two events and carry on; any other 400 keeps every event
+  for the retry and sets the usual refusal state.
 - **Python 3.11.** `server/swarm_bus.py` no longer uses a backslash inside an f-string expression, so it imports on
   Python 3.11 again.
 - Tests: `tests/test_orchestrator_busy.py` runs the real supervisor loop on a fake clock (max wait from enqueue time,
@@ -70,7 +93,10 @@ Queued messages now reach an orchestrator during a long busy turn (agent-control
   unknown outcomes, receipt replay, idle menu/draft, deferral events, the trust screen, wrap-up from a restart
   heartbeat) with real Claude Code captures in `tests/fixtures/panes/`, plus `agent-exec`'s check between paste and
   Enter and every probe of the second review; urgent-head test in `tests/test_bus.py`, replayed busy receipt in
-  `tests/test_orchestrator.py`.
+  `tests/test_orchestrator.py`. `tests/test_orchestrator_round3.py` turns the third review's probes into tests: the
+  shared-parser contract, collapsed-marker identity, ambiguous boxes and footer prefixes, first-run drafts and both
+  trust wordings, a replacement supervisor with a held message (and its release), repeated Enter timeouts, and an
+  unrelated HTTP 400; the release route is in `tests/test_orchestrator.py`.
 
 ## 0.8.0 (2026-11-21)
 

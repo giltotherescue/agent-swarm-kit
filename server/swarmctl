@@ -33,6 +33,7 @@ Examples:
   swarmctl orchestrator create app-steward --worker build-box -p app --owner app-bot --brief steward.md --start
   swarmctl orchestrator list | status NAME | logs NAME | start | stop | restart NAME   (see docs/orchestrators.md)
   swarmctl orchestrator message app-steward "Look at the signup page next"
+  swarmctl orchestrator release app-steward 12 [--resend]   (after a delivery-unknown event: it arrived, or paste it again)
   swarmctl bus send chief "Deploy done" --no-reply ; swarmctl bus inbox ; swarmctl bus ack 7   (BUS_AGENT=NAME)
 """
 import argparse
@@ -243,6 +244,13 @@ def cmd_orchestrator(a):
         text = a.text if a.text != "-" else sys.stdin.read()
         r = call("POST", f"{path}/messages", {"text": text})
         print(f"message {r['id']} queued; it is typed into the session when the agent is idle")
+        return
+    if a.action == "release":
+        if not (a.text or "").isdigit():
+            sys.exit("swarmctl: orchestrator release needs NAME and the message ID from the delivery-unknown event")
+        call("POST", f"{path}/messages/{a.text}/release", {"resend": bool(a.resend)})
+        print(f"message {a.text}: " + ("released; the supervisor pastes it again" if a.resend else
+                                       "marked delivered; the supervisor drops its hold and types nothing"))
         return
     if a.action == "logs":
         r = call("GET", f"{path}/logs?lines={a.lines}")
@@ -1103,7 +1111,7 @@ def main():
     apply.set_defaults(fn=apply_activity)
 
     orc = sub.add_parser("orchestrator", help="long-running orchestrators: one agent session kept up for days on one worker")
-    orc.add_argument("action", choices=["list", "status", "create", "set", "start", "stop", "restart", "delete", "logs", "message"])
+    orc.add_argument("action", choices=["list", "status", "create", "set", "start", "stop", "restart", "delete", "logs", "message", "release"])
     orc.add_argument("name", nargs="?"); orc.add_argument("text", nargs="?", help="message: the text, or - for stdin")
     orc.add_argument("--worker", help="create: the one worker that runs it (its SWARM_WORKER_NAME)")
     orc.add_argument("-p", "--project"); orc.add_argument("-r", "--repo"); orc.add_argument("--owner", help="owner bot id (gets notices)")
@@ -1112,6 +1120,7 @@ def main():
     orc.add_argument("--no-secret-bundles", action="store_true", help="set: remove all secret bundles")
     orc.add_argument("--relay-name", help="fixed name on Agent Relay (optional)")
     orc.add_argument("--start", action="store_true", help="create: set it to run right away")
+    orc.add_argument("--resend", action="store_true", help="release: paste the held message again instead of marking it delivered")
     orc.add_argument("--lines", type=int, default=100, help="logs: how many lines (up to 500)")
     orc.add_argument("--json", action="store_true"); orc.set_defaults(fn=cmd_orchestrator)
 

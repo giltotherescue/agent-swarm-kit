@@ -57,9 +57,11 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
   for the agent user (`CLAUDE_CODE_OAUTH_TOKEN` or another key or proxy in `agent.env`, an `apiKeyHelper`, or a
   saved `/login`). Without one it does not start Claude. While the session runs it reads the bottom of the
   screen. Claude Code's first-run screens (the theme picker, the security notes, the folder trust question)
-  get Enter, which accepts the default, at most 3 times each ("first-run" event). The current folder trust screen
-  ("Quick safety check: Is this a project you created or one you trust?") preselects "No, exit": it gets Down, and
-  Enter only once the `❯` is on "Yes, I trust this folder" (0.8.1). A sign-in screen
+  get Enter, which accepts the default, at most 3 times each ("first-run" event), and only when the whole dialog is
+  the bottom of the pane (its key hint the last line, no input box on screen: text in a draft or in history is never
+  answered). The folder trust screen, in both wordings, is answered from its selection: with the `❯` on "No, exit" it
+  gets the arrow key towards Yes (Down for the current "Quick safety check", Up for the older "Do you trust the files
+  in this folder"), and Enter only once the one `❯` is on the Yes option (0.8.1). A sign-in screen
   ("Select login method", "Paste code here", "Please run /login", an expired token) or the bypass-permissions
   warning that stays up for 10 seconds ends the session at once. Nothing is ever typed into those screens:
   queued messages and the stop wrap-up wait. The state becomes `needs-login`, `last_exit` says what to run, and
@@ -71,18 +73,24 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
   Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart. The guard
   fails closed, like agent-control PR 67: right before every paste and every Enter, idle or busy, and before the stop
   wrap-up, the supervisor captures the screen again, and only a confirmed empty input box (read from the bottom: 1 to 8
-  known status rows, then rule, prompt line, identical rule) takes it. Enter after a paste needs exactly the pasted
-  text (or Claude Code's `[Pasted text #N +K lines]` marker) in the box from its first row. A choice menu or permission prompt, typed text (a
-  draft, including a multiline one or one holding a pasted rule), an unrecognized footer, or a screen it cannot read
+  rows made only of whole status items Claude Code draws there, then rule, prompt line, identical rule, with no other
+  prompt right under a rule higher up) takes it. `agent-exec` holds the one pane parser and the supervisor loads it, so
+  both read a capture the same way. Enter after a paste needs exactly the pasted text in the box (whitespace runs
+  compared as one space). Claude Code's collapsed `[Pasted text #N +K lines]` marker cannot be tied to the message, so
+  it never gets Enter: the message is reported as `reason=not_verifiable` and waits for you (look at the session; press
+  Enter yourself if the paste is the message, then release it as below). A choice menu or permission prompt, typed text
+  (a draft, including a multiline one or one holding a pasted rule), an unrecognized footer, or a screen it cannot read
   holds the message; a wrap-up it cannot send safely is skipped, and the session ends at the stop deadline. Only the
   verified hint `Press up to edit queued messages` counts as empty; `Try "..."` is treated as typed text. A message held
   for 2 minutes is reported once per reason as a `delivery-deferred` event (`reason=unknown_footer|draft|menu|unreadable`,
-  or `paste_failed`/`submit_failed`; never pane contents); it is never pasted because of a timeout. Each busy paste is recorded once as a
-  `message-delivered-busy` event. A message is never pasted twice by one supervisor process: if Enter failed only Enter
+  or `paste_failed`/`submit_failed`/`submit_unknown`/`not_verifiable`; never pane contents); it is never pasted because of a timeout. Each busy paste is recorded once as a
+  `message-delivered-busy` event. A message is never pasted twice: if Enter failed only Enter
   is retried, and only while the pasted text is still in the box; if only the receipt failed only the receipt is
   retried. When the outcome of a paste is unknown and the box is empty again, the message is left unacknowledged and
-  reported once as `delivery-unknown`: check the session, then delete the message or restart the supervisor (a new
-  supervisor process pastes it again). The only exception to the box rule is the kit's tests: with
+  reported once as `delivery-unknown`. These states are kept in the supervisor's state file, so a restarted supervisor
+  does not paste it again either. Check the session, then run `swarmctl orchestrator release NAME ID` if the message
+  arrived (marked delivered, nothing typed) or `swarmctl orchestrator release NAME ID --resend` to have it pasted once
+  more. The queue behind a held message waits until then. The only exception to the box rule is the kit's tests: with
   `SWARM_ORCH_PANE_ADAPTER=plain` a stand-in program with no box parts at all gets idle messages and the wrap-up.
 - **Checkpoint.** The first prompt and the standing rules tell the agent to keep `CHECKPOINT.md` in its folder
   current, so even a crash with no session to resume loses little.
@@ -131,6 +139,7 @@ could not get past; see above), and `unreachable` (set by the backend when the h
 | `swarmctl orchestrator status NAME` | Settings, pid, tmux session, session id, uptime, last exit and the last events |
 | `swarmctl orchestrator logs NAME --lines 200` | The last lines of its terminal (up to 500), uploaded with each heartbeat |
 | `swarmctl orchestrator message NAME "text"` | One message, typed into the session when the agent is idle |
+| `swarmctl orchestrator release NAME ID [--resend]` | After a `delivery-unknown` event: the message arrived (marked delivered), or `--resend` to paste it once more (0.8.1) |
 | `swarmctl orchestrator stop NAME` | Graceful stop: a wrap-up message, then the session ends when the agent goes quiet, or after 2 minutes |
 | `swarmctl orchestrator start NAME` | Set it to run. Also clears a crash loop and `needs-login` |
 | `swarmctl orchestrator restart NAME` | Graceful stop, then start. Also clears a crash loop and `needs-login` |
