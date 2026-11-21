@@ -1274,6 +1274,21 @@ class Backend:
             self.s.run("INSERT INTO workers(name, last_seen, draining) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET"
                        " last_seen = excluded.last_seen, draining = excluded.draining", worker, now(), 1 if draining else 0)
 
+    def primary_gate(self, claimer):
+        """None when the claimer may take any unpinned task: SWARM_PRIMARY_WORKER is unset or empty (first-come), the
+        claimer is the primary, or the primary is stale (never seen, draining, or quiet for SWARM_PRIMARY_STALE_SECONDS).
+        Otherwise the primary's allowlist and the queued-before cutoff for the claim query. Liveness is workers.last_seen,
+        written on every claim and task heartbeat. Call inside the claim transaction."""
+        primary = (os.environ.get("SWARM_PRIMARY_WORKER") or "").strip()
+        if not primary or primary == claimer:
+            return None
+        row = self.s.one("SELECT last_seen, draining, projects FROM workers WHERE name = ?", primary)
+        if not row or not row["last_seen"] or row["draining"] or now() - row["last_seen"] > env_int("SWARM_PRIMARY_STALE_SECONDS", 90):
+            return None
+        return {"queued_before": now() - env_int("SWARM_FALLBACK_AFTER_SECONDS", 120),
+                "primary_all": 1 if row["projects"] is None else 0,
+                "primary_list": row["projects"] if row["projects"] is not None else "[]"}
+
     def claim(self, who, b):
         self.need(who, "worker")
         worker = clean_text(b.get("worker"), 80, "worker") or "worker"
@@ -1296,6 +1311,16 @@ class Backend:
                    " AND (t.target_worker IS NOT NULL OR NOT EXISTS (SELECT 1 FROM workers w"
                    " WHERE w.name = t.workspace_host AND w.name != ? AND w.last_seen > ? AND w.draining = 0))")
             args = [now(), worker, worker, now() - 3600]
+            gate = self.primary_gate(worker)
+            if gate:
+                # Primary/fallback routing (agent-control PR 68, docs/multi-worker.md): while SWARM_PRIMARY_WORKER is live,
+                # another worker takes an unpinned task only if it has waited SWARM_FALLBACK_AFTER_SECONDS (counted from the
+                # later of creation or not_before, or from the requeue/answer time once it has run), the project is off the
+                # primary's allowlist, or the task's workspace is on this worker.
+                sql += (" AND (t.target_worker IS NOT NULL OR t.workspace_host IS ?"
+                        " OR max(CASE WHEN t.attempts = 0 THEN t.created_at ELSE t.updated_at END, t.not_before) <= ?"
+                        " OR (? = 0 AND t.project NOT IN (SELECT value FROM json_each(?))))")
+                args.extend([worker, gate["queued_before"], gate["primary_all"], gate["primary_list"]])
             if projects is not None:
                 sql += " AND t.project IN (" + ",".join("?" for project in projects) + ")"
                 args.extend(projects)
