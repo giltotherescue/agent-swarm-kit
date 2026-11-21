@@ -202,6 +202,34 @@ class IndexSafetyTests(Base):
         self.assertEqual(self.index_snapshot(), before, "the caller's index is unchanged: engine/new.txt still staged")
         self.assertIn("engine/new.txt", g(self.wd, "diff", "--cached", "--name-only").split())
 
+    def test_gitlink_replaced_by_ordinary_file_same_path_fails_closed(self):
+        # tracked pin "engine" replaced by a regular file at the same path, staged, plus an unrelated staged "keep"
+        g(self.wd, "submodule", "deinit", "-q", "-f", "engine")
+        g(self.wd, "rm", "-q", "--cached", "engine")
+        import shutil; shutil.rmtree(self.wd / "engine")
+        (self.wd / "engine").write_text("now a file\n")
+        (self.wd / "keep").write_text("k\n")
+        g(self.wd, "add", "engine", "keep")
+        self.assertIn("100644", g(self.wd, "ls-files", "-s", "engine"))
+        before, head = self.index_snapshot(), g(self.wd, "rev-parse", "HEAD")
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_commit(allow_gitlink=False)
+        self.assertIn("share the path engine", str(cm.exception))
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.index_snapshot(), before, "the staged 100644 engine and keep are untouched")
+        self.assertFalse([n for n in os.listdir(self.wd / ".git") if n.startswith("index.leftover.")], "temp index removed")
+
+    def test_gitlink_to_symlink_same_path_fails_closed(self):
+        g(self.wd, "submodule", "deinit", "-q", "-f", "engine")
+        g(self.wd, "rm", "-q", "--cached", "engine")
+        import shutil; shutil.rmtree(self.wd / "engine")
+        os.symlink("README.md", self.wd / "engine")
+        g(self.wd, "add", "engine")
+        before, head = self.index_snapshot(), g(self.wd, "rev-parse", "HEAD")
+        with self.assertRaises(RuntimeError):
+            self.run_commit(allow_gitlink=False)
+        self.assertEqual((g(self.wd, "rev-parse", "HEAD"), self.index_snapshot()), (head, before))
+
     def test_failure_leaves_caller_index_unchanged(self):
         (self.wd / "new.txt").write_text("n\n")
         before = self.index_snapshot()
@@ -269,6 +297,34 @@ class SourceRedactionTests(unittest.TestCase):
         self.assertIn("2 submodule pin change(s) left uncommitted", err.getvalue())
         self.assertNotIn("abcdefgh12345", err.getvalue())
         self.assertNotIn("A1b2C3d4", err.getvalue())
+
+    def test_failing_hook_stderr_is_redacted_before_it_is_cut(self):
+        # Round-2 recheck: TOKEN=abcdefgh12345, then padding sized so the last 300 characters start right after "TOKEN=".
+        hook = self.wd / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf 'TOKEN=abcdefgh12345\\n' >&2\nprintf '%0286d' 0 | tr 0 p >&2\nexit 1\n")
+        hook.chmod(0o755)
+        import contextlib, io
+        with self.assertRaises(RuntimeError) as cm:
+            gl.commit_leftover(self.wd, "m", allow_gitlink=False)
+        msg = str(cm.exception)
+        self.assertIn("git ", msg)
+        for frag in ("abcdefgh12345", "abcdefgh", "12345"):
+            self.assertNotIn(frag, msg)
+        self.assertLessEqual(len(msg), 400)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            sb.git_commit(str(self.wd), "Project log export")
+        self.assertIn("git commit failed", err.getvalue())
+        self.assertNotIn("abcdefgh", err.getvalue())
+        self.assertNotIn("12345", err.getvalue())
+
+    def test_bounded_diagnostic_redacts_full_text_first(self):
+        raw = ("TOKEN=abcdefgh12345\n" + "p" * 286).encode()
+        self.assertEqual(len(raw.decode()[-300:]), 300)
+        self.assertTrue(raw.decode()[-300:].startswith("abcdefgh12345"), "the old cut would have kept the bare value")
+        out = gl.bounded_diagnostic(raw)
+        self.assertNotIn("abcdefgh", out)
+        self.assertLessEqual(len(out), 303)
 
     def test_error_diagnostics_are_redacted(self):
         orig = gl.unstage_gitlinks

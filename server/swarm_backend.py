@@ -719,7 +719,7 @@ class Backend:
         """Add the (sanitized) gitlink skip note to the task's stored REPORT.md once; a task without a report gets one."""
         f = self.s.one("SELECT name, data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", task_id)
         text = bytes(f["data"]).decode(errors="replace") if f else ""
-        if swarm_gitlink.NOTE_MARK in text:
+        if swarm_gitlink.NOTE_TAG in text:
             return
         data = (text.rstrip() + note).lstrip("\n").encode()
         self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
@@ -1093,6 +1093,9 @@ class Backend:
             inherit["branch"] = parent.get("pushed_branch") or parent.get("branch") or f"agent/{parent['id']}"
         body = dict(inherit)
         body.update({k: v for k, v in b.items() if v is not None and v is not False and v != "" and k != "follow_up"})
+        if b.get("allow_gitlink") is not None:
+            # an explicit value, JSON false included, overrides the parent's opt-in; only an omitted field inherits it
+            body["allow_gitlink"] = parse_flag(b["allow_gitlink"], "allow_gitlink")
         body["parent_id"] = parent["id"]
         body["_workspace_host"] = parent.get("workspace_host")
         held = self.s.one("SELECT id FROM tasks WHERE parent_id = ? AND follow_up = 1 AND state NOT IN ('done','failed','cancelled')"

@@ -14,8 +14,11 @@ It fails closed (raises, commits nothing, leaves the index alone) when:
 
 - a pin was replaced by a directory of files (`engine` becomes `engine/new.txt`): unstaging the pin would unstage
   those files too, so commit that change explicitly;
+- a pin and an ordinary file or symlink share a path (the pin `engine` replaced by a staged file `engine`, or the
+  other way round): resetting it would silently unstage the file, so commit that change explicitly;
 - unstaging changed any other staged path, or a gitlink is still staged on the re-scan right before the commit;
-- any git command fails or runs longer than 60 seconds.
+- any git command fails or runs longer than 60 seconds. Its stderr is redacted in full first and only then cut to
+  the last 300 characters.
 
 The scan forces `--ignore-submodules=none` (a `diff.ignoreSubmodules=all` or `submodule.<name>.ignore=all` cannot
 hide a pin), reads raw filename bytes and uses literal pathspecs.
@@ -38,7 +41,8 @@ stock worker forwards these only if its collector supplies them, sanitized first
   latest finish replaces an earlier observation;
 - adds a `publish` event;
 - appends one note ("gitlink pin not committed") to the task's stored REPORT.md, creating it if the run left none,
-  on success and on publish failures alike;
+  on success and on publish failures alike. The note starts with the marker `<!-- swarm:gitlink-skip-note -->`;
+  only that marker (not the note's wording in a report) counts as "already noted";
 - adds `gitlink_skipped` (at most 10 entries) and `gitlink_skipped_count` (the true total) to finish notices, on the
   bus and on the legacy webhook. A bus notice also gets a `WARNING:` line ahead of the report excerpt.
 
@@ -47,8 +51,10 @@ stock worker forwards these only if its collector supplies them, sanitized first
 Commit an intentional submodule pin bump explicitly, in a commit the agent (or you) makes; published commits are
 never filtered.
 
-`swarmctl enqueue --allow-gitlink` stores `allow_gitlink: true` on the task (follow-ups inherit it). The API takes a
-JSON boolean, or the strings true/false/1/0/yes/no; anything else is refused, so `"false"` never opts in. It is
+`swarmctl enqueue --allow-gitlink` stores `allow_gitlink: true` on the task. The API takes a JSON boolean, 0/1, or
+the strings true/false/1/0/yes/no (any case): `true`, `1`, `"true"`, `"1"` and `"yes"` opt in, `false`, `0`,
+`"false"`, `"0"`, `"no"` and `""` do not, and anything else is refused with a 400. A follow-up inherits the parent's
+value only when it omits the field; an explicit value, JSON `false` included, overrides it. It is
 metadata for a worker that auto-commits on a task's behalf; the stock kit has no such worker, so the flag does not by
 itself commit anything. `AGENT_ALLOW_GITLINK=1` is read only by callers of `commit_leftover` that pass no explicit
 setting; the stock export passes `False`.

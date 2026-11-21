@@ -4,8 +4,8 @@ The stock kit worker never commits leftover work; it publishes only the agent's 
 commits for someone is the backend's project-log export folder, and it goes through commit_leftover(). That runs in a
 separate index (the caller's index is untouched unless the commit succeeds): `git add -A`, then every staged entry whose
 index mode is 160000 on either side (added, modified, deleted) is unstaged, found from `git diff --cached --raw -z`, so
-.gitmodules is not needed. A gitlink replaced by a directory of files, any git error, a timeout, or a gitlink still
-staged after unstaging aborts the commit (fails closed).
+.gitmodules is not needed. A gitlink replaced by a directory of files or by an ordinary file at the same path, any git
+error, a timeout, or a gitlink still staged after unstaging aborts the commit (fails closed).
 
 `allow_gitlink` (task field, `swarmctl enqueue --allow-gitlink`) and AGENT_ALLOW_GITLINK=1 are metadata for a caller
 that auto-commits on a task's behalf; the stock export always passes allow_gitlink=False.
@@ -25,6 +25,8 @@ MAX_STORED = 200         # entries kept on the task record; the count is stored 
 GIT_TIMEOUT = 60         # seconds per git command, like the export's old limits
 REDACTED = "[redacted]"
 NOTE_MARK = "gitlink pin not committed"
+# Hidden marker on the generated REPORT.md note; the backend detects the note by this, never by prose.
+NOTE_TAG = "<!-- swarm:gitlink-skip-note -->"
 
 # The same key=value rule as agent-control's redact() (src/orchestrators.js ASSIGNMENT_RE).
 ASSIGNMENT_RE = re.compile(r"\b([A-Za-z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*)\s*[=:]\s*(\"[^\"]*\"|'[^']*'|\S+)", re.I)
@@ -82,8 +84,17 @@ def _git_raw(wd, args, check=True, index=None):
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} timed out after {GIT_TIMEOUT} seconds")
     if check and r.returncode:
-        raise RuntimeError(name + " failed: " + redact(r.stderr.decode("utf-8", "replace").strip()[-300:]))
+        raise RuntimeError(name + " failed: " + bounded_diagnostic(r.stderr))
     return r
+
+
+def bounded_diagnostic(raw, n=300):
+    """Git stderr for an error message: control characters flattened, redacted on the FULL text, and only then cut to
+    the last n characters, so a cut can never leave the tail of a secret whose key was cut off."""
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+    text = "".join(" " if (ord(c) < 32 and c not in "\n\t") or ord(c) == 127 else c for c in text)
+    r = redact(text.strip())
+    return r if len(r) <= n else "..." + r[-n:]
 
 
 def _display_path(raw):
@@ -128,6 +139,12 @@ def unstage_gitlinks(wd, index=None):
     if not items:
         return []
     links = {g["raw"] for g in items}
+    for om, nm, _o, _n, p in entries:
+        if p in links and {om, nm} - {GITLINK_MODE, "000000"}:
+            # same path, gitlink on one side and an ordinary file/symlink on the other: resetting it would silently
+            # unstage (or resurrect) the ordinary entry, so stop before touching the index
+            raise RuntimeError("refusing to auto-commit: a submodule pin and an ordinary file share the path "
+                               + sanitize_field(_display_path(p), 200) + "; commit it explicitly")
     others = sorted(p for om, nm, _o, _n, p in entries if p not in links)
     for g in items:
         if any(p.startswith(g["raw"] + b"/") for p in others):
@@ -226,4 +243,4 @@ def warning_line(items, count):
 
 
 def report_note(items, count):
-    return f"\n\n> Note ({NOTE_MARK}): the auto-commit " + format_note(items, count) + ". Commit an intentional pin bump explicitly.\n"
+    return f"\n\n{NOTE_TAG}\n> Note ({NOTE_MARK}): the auto-commit " + format_note(items, count) + ". Commit an intentional pin bump explicitly.\n"

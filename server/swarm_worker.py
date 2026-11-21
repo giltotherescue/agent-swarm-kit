@@ -34,12 +34,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import swarm_gitlink  # noqa: E402
-
 VERSION = "0.8.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
+sys.path.insert(0, HERE)
+import swarm_gitlink  # noqa: E402
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
 PROJECTS = os.environ.get("SWARM_WORKER_PROJECTS")
 WORK = os.path.expanduser(os.environ.get("SWARM_WORK_DIR", "~/work"))

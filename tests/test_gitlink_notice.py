@@ -49,6 +49,14 @@ class BusGitlinkTest(NoticeBase):
         self.assertIn("TOKEN=[redacted]", rep)
         self.assertEqual(leaks(rep), [])
 
+    def test_note_phrase_in_report_prose_does_not_suppress_the_note(self):
+        prose = "## Summary\nThe phrase gitlink pin not committed appears here in ordinary prose.\n"
+        self.finished("clozy-bot", "tg8", report=prose, gitlink_skipped=[{"path": "engine", "old": "aaaaaaa", "new": "bbbbbbb"}])
+        rep = self.report("tg8")
+        self.assertIn("ordinary prose", rep)
+        self.assertIn("1 submodule pin change(s) left uncommitted: engine (aaaaaaa -> bbbbbbb)", rep)
+        self.assertEqual(rep.count("<!-- swarm:gitlink-skip-note -->"), 1)
+
     def test_report_note_on_publish_failure_without_a_report(self):
         self.finished("clozy-bot", "tg7", status="failed", outcome="publish_failed", error="git fetch failed",
                       gitlink_skipped=SKIPPED[1:])
@@ -119,6 +127,27 @@ class EnqueueOptInTest(NoticeBase):
         r2 = self.b.req("POST", "/tasks", {"id": "ta2", "prompt": "no bump", "repo": "acme/site", "push": True})
         self.assertEqual(r2["task"]["allow_gitlink"], 0)
         self.assertNotEqual(r2["task"]["id"], "ta1", "the opt-in is part of the duplicate check")
+
+    def test_follow_up_inherits_only_when_omitted_and_explicit_values_override(self):
+        self.finished("clozy-bot", "tp", create={"allow_gitlink": True})
+        self.assertEqual(self.row("tp")["allow_gitlink"], 1)
+        cases = [("omitted", None, 1), ("json-false", False, 0), ("string-false", "false", 0), ("zero", 0, 0),
+                 ("json-true", True, 1)]
+        for name, value, want in cases:
+            body = {"prompt": f"follow-up {name}", "follow_up": "tp", "allow_duplicate": True}
+            if value is not None:
+                body["allow_gitlink"] = value
+            t = self.b.req("POST", "/tasks", body)["task"]
+            self.assertEqual(t["parent_id"], "tp", name)
+            self.assertEqual(t["allow_gitlink"], want, name)
+        st, out = self.b.call("POST", "/tasks", {"prompt": "bad", "follow_up": "tp", "allow_gitlink": "maybe"})
+        self.assertEqual(st, 400, out)
+
+    def test_follow_up_of_unopted_parent_opts_in_only_explicitly(self):
+        self.finished("clozy-bot", "tq")
+        self.assertEqual(self.b.req("POST", "/tasks", {"prompt": "x", "follow_up": "tq"})["task"]["allow_gitlink"], 0)
+        self.assertEqual(self.b.req("POST", "/tasks", {"prompt": "y", "follow_up": "tq",
+                                                       "allow_gitlink": True, "allow_duplicate": True})["task"]["allow_gitlink"], 1)
 
     def test_allow_gitlink_must_be_a_real_boolean(self):
         base = {"repo": "acme/site", "push": True}
