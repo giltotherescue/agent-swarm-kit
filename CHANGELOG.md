@@ -4,12 +4,6 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
-## Unreleased
-
-- Docs: short pattern for efficient manager / Chief of Staff routines (cheap state checks first, no overlapping schedules, nudge
-  only idle bots, delete expired one-offs, filter notices server-side). See
-  [docs/routines.md](docs/routines.md#efficient-manager-routines).
-
 ## 0.8.1 (2026-11-21)
 
 Guideline for the periodic keep-moving check, from Gil (2026-11-21). Blanket timed wake-ups that message every project bot mostly
@@ -138,6 +132,10 @@ and 67. See [docs/orchestrators.md](docs/orchestrators.md) and [docs/agent-bus.m
   them; any other 400 keeps every event. `server/swarm_bus.py` imports on Python 3.11 again.
 - **Rollout.** The supervisor and `agent-exec` change together (`orch-send` is replaced by `orch-capture`, `orch-type` and
   `orch-enter`); update both, then restart the orchestrator supervisor. See docs/updating-the-kit.md.
+
+- Docs: short pattern for efficient manager / Chief of Staff routines (cheap state checks first, no overlapping schedules, nudge
+  only idle bots, delete expired one-offs, filter notices server-side). See
+  [docs/routines.md](docs/routines.md#efficient-manager-routines).
 
 ## 0.8.0 (2026-11-21)
 
