@@ -105,7 +105,8 @@ class ProjectLogTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["summary"], "Done: Spring ad headlines")
         self.assertIn("Three headlines", results[0]["detail"])
-        self.assertIn("https://example.com/pr/1", results[0]["links"])
+        # open_pr=0 is an absolute veto (agent-control PR 65): a PR link from a task that may not open PRs is not recorded.
+        self.assertNotIn("https://example.com/pr/1", results[0]["links"])
         self.assertIn(f"https://swarm.example/tasks/{c['id']}/report", results[0]["links"])
         # The task token dies with the claim.
         self.assertEqual(self.b.call("POST", "/log", {"kind": "activity", "summary": "late"}, tok=c["task_token"])[0], 409)
