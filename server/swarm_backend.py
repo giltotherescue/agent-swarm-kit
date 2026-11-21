@@ -191,7 +191,7 @@ MIGRATE_COLUMNS = {
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
               ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
-              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER")],
+              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"), ("base", "TEXT")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -884,6 +884,9 @@ class Backend:
         branch = clean_text(b.get("branch"), 200, "branch")
         if branch and not BRANCH_RE.match(branch):
             raise ApiError(400, "bad branch name")
+        base = self.clean_base(b.get("base"))
+        if base and not repo:
+            raise ApiError(400, "base needs a repo")
         kind = clean_text(b.get("kind"), 20, "kind") or ("script" if command else "code" if repo and not report_only else "research")
         timeout, chain, max_cycles = self.run_limits(b, kind, command)
         idem = clean_text(b.get("idempotency_key"), 200, "idempotency_key")
@@ -921,6 +924,8 @@ class Backend:
                  "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         if target_worker:
             canon["target_worker"] = target_worker
+        if base:
+            canon["base"] = base
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
         scope = (owner or "").lower()
         t = now()
@@ -948,15 +953,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles, target_worker)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, base)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
                     timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
-                    max_cycles, target_worker)
+                    max_cycles, target_worker, base)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -1039,11 +1044,12 @@ class Backend:
                 if b.get(flag) and not parent.get(flag):
                     raise ApiError(400, f"task {parent_id} is waiting for an answer. A follow-up answers it and cannot add "
                                         f"{flag} when the task did not have it")
-            r = self.answer(who, parent_id, {"answer": b.get("prompt")}, via="follow-up")
+            # --base is not a publish permission: it is kept on the resumed task, written with the answer itself.
+            r = self.answer(who, parent_id, {"answer": b.get("prompt"), "base": b.get("base")}, via="follow-up")
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner", "target_worker")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "base")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]
@@ -1094,6 +1100,7 @@ class Backend:
         text = clean_text(b.get("answer") or b.get("text"), 20000, "answer")
         if not text:
             raise ApiError(400, "answer is required")
+        base = self.clean_base(b.get("base"))
         actor = who["bot"] or who["role"]
         with self.s.tx():
             t = self.get_task(who, task_id)
@@ -1111,6 +1118,8 @@ class Backend:
             if t["outcome"] == "work_unavailable":
                 # The worker asked because unpushed work was lost. Any answer means: start again from what was pushed.
                 extra = {"unpushed": 0, "start_fresh": 1}
+            if base and base != t.get("base"):
+                extra["base"] = base  # only with an accepted answer: every refusal above raises before this
             t = self.set_state(t, "queued", actor, pending_answer=text, waiting_on=None, question=None, outcome=None, not_before=0,
                                human_snooze_until=None, **extra)
         return {"task": self.public_task(t), "resumed": True}
@@ -1239,7 +1248,7 @@ class Backend:
             p = self.s.one("SELECT * FROM tasks WHERE id = ?", t["parent_id"]) or {}
             rep = self.s.one("SELECT data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", t["parent_id"])
             out["parent"] = {k: p.get(k) for k in ("id", "state", "workdir", "workspace_host", "session_provider", "session_model",
-                                                   "session_id", "pushed_branch", "branch", "unpushed", "repo")}
+                                                   "session_id", "pushed_branch", "branch", "unpushed", "repo", "pr_url", "base")}
             out["parent"]["has_bundle"] = bool(self.s.one("SELECT 1 FROM files WHERE task_id = ? AND kind = 'bundle'", t["parent_id"]))
             out["parent"]["report"] = bytes(rep["data"]).decode(errors="replace")[:300_000] if rep else None
         return out
@@ -1284,6 +1293,36 @@ class Backend:
         return {"allowed": allowed, "reason": reason, "repo": t["repo"], "branch": t["branch"], "push": bool(t["push"]),
                 "open_pr": bool(t["open_pr"]), "push_main": bool(t["push_main"]), "pr_number": t["pr_number"]}
 
+    @staticmethod
+    def clean_base(value):
+        base = clean_text(value, 200, "base")
+        if base and not BRANCH_RE.match(base):
+            raise ApiError(400, "bad base branch name")
+        return base
+
+    def finish_pr_url(self, t, b, actor):
+        """The pr_url to store. An explicit null clears it (the worker withdrew an earlier claim's PR: the target was merged or
+        closed and no new PR was opened); an absent one keeps the stored value. open_pr=0 is an absolute veto on new PRs: a URL
+        is accepted from such a task only when it is the PR it was told to update (--pr-number, or the parent's PR it
+        inherited as a follow-up)."""
+        if "pr_url" in b and b["pr_url"] is None:
+            return None
+        url = clean_text(b.get("pr_url"), 500, "pr_url")
+        if not url:
+            return t["pr_url"]
+        if not t["open_pr"] and url != t["pr_url"]:
+            targets = []
+            if t["pr_number"] and t["repo"]:
+                targets.append(f"https://github.com/{t['repo']}/pull/{t['pr_number']}")
+            if t["parent_id"] and t["follow_up"]:
+                p = self.s.one("SELECT pr_url FROM tasks WHERE id = ?", t["parent_id"])
+                if p and p["pr_url"]:
+                    targets.append(p["pr_url"])
+            if url.rstrip("/").lower() not in [x.rstrip("/").lower() for x in targets]:
+                self.event(t["id"], "warning", actor, f"PR {url} was not recorded: this task did not allow opening a PR (open_pr not set)")
+                return t["pr_url"]
+        return url
+
     def finish(self, who, task_id, b):
         """status: done | waiting | next | failed | limit. Applies retry rules and fires notices.
         Idempotent per claim: a retry from the same claim gets the first answer back."""
@@ -1300,8 +1339,9 @@ class Backend:
             if c and c["finish_response"]:
                 return dict(json.loads(c["finish_response"]), replayed=True)
             t = self.own_task(who, task_id)
+            pr_url = self.finish_pr_url(t, b, actor)
             common = dict(summary=clean_text(b.get("summary"), 2000, "summary") or t["summary"],
-                          pr_url=clean_text(b.get("pr_url"), 500, "pr_url") or t["pr_url"],
+                          pr_url=pr_url,
                           session_provider=clean_text(b.get("session_provider"), 20, "session_provider") or t["session_provider"],
                           session_model=clean_text(b.get("session_model"), 80, "session_model") or t["session_model"],
                           session_id=clean_text(b.get("session_id"), 200, "session_id") or t["session_id"],
@@ -1318,6 +1358,11 @@ class Backend:
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
                 self.event(task_id, "warning", actor, clean_text(str(w), 2000, "warning"))
+            for key in ("pr_base_note", "publish_note"):
+                if b.get(key):
+                    tps = clean_text(b.get("target_pr_state"), 20, "target_pr_state")
+                    self.event(task_id, "publish", actor, clean_text(str(b[key]), 4000, key),
+                               {"target_pr_state": tps} if tps and key == "publish_note" else None)
             checkpoint = clean_text(b.get("checkpoint"), 200_000, "checkpoint") if t["chain"] and status == "done" else None
             if status == "done":
                 # A chain cycle that hands on a checkpoint is not news; only the chain's end notifies the owner.
