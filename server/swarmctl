@@ -810,6 +810,8 @@ def bus_send(a, creds):
         payload["urgent"] = True
     if a.noop:
         payload["noop"] = True
+    if a.fyi:
+        payload["actionable"] = False
     if a.blocker:
         payload["meta"] = {"blocker": True}
     if a.reply:
@@ -1000,7 +1002,7 @@ def add_bus_parser(sub):
                        description="Agent Bus client. Identity: BUS_AGENT names the agent; BUS_TOKEN_FILE or "
                        "~/.config/swarm/agents/NAME.token holds its token. Without an agent token the admin client token is used "
                        "(`swarmctl bus --as NAME ...`). Tokens are never printed. Times are Central.",
-                       epilog="""  swarmctl bus send TO (TEXT | -f FILE | -) [--thread T] [--urgent] [--blocker] [--noop] [--reply|--no-reply] [--id CLIENT_MSG_ID] [--json]
+                       epilog="""  swarmctl bus send TO (TEXT | -f FILE | -) [--thread T] [--urgent] [--blocker] [--noop] [--fyi] [--reply|--no-reply] [--id CLIENT_MSG_ID] [--json]
   swarmctl bus inbox [--all] [--after ID] [--json]
   swarmctl bus ack ID                  exit 3 when an earlier copy was already acked (check that the work happened)
   swarmctl bus status ID | thread THREAD [--json] | agents | whoami
@@ -1014,6 +1016,7 @@ def add_bus_parser(sub):
     s.add_argument("-f", "--file"); s.add_argument("--thread"); s.add_argument("--urgent", action="store_true")
     s.add_argument("--noop", action="store_true", help="store only, never wake the recipient")
     s.add_argument("--blocker", action="store_true")
+    s.add_argument("--fyi", action="store_true", help="informational: hold webhook messages for the next digest or wake")
     s.add_argument("--reply", action="store_true", help="a reply is expected"); s.add_argument("--no-reply", dest="no_reply", action="store_true")
     s.add_argument("--id", help="client message id (default: random, reused on retries)"); s.add_argument("--json", action="store_true")
     s = bs.add_parser("inbox", help="unread messages to me"); s.add_argument("--all", action="store_true")

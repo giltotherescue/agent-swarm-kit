@@ -117,6 +117,8 @@ class BusCliTest(unittest.TestCase):
         p = self.sends()[-1][3]
         self.assertEqual((p["urgent"], p["reply_expected"]), (True, True))
         self.assertNotIn("noop", p)
+        self.bus("send", "chief", "status update", "--fyi")
+        self.assertIs(self.sends()[-1][3]["actionable"], False)
         r = self.bus("send", "chief", "x", "--reply", "--no-reply")
         self.assertNotEqual(r.returncode, 0)
 

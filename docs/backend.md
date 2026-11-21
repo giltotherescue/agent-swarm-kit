@@ -110,7 +110,7 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/orchestrators/ID/messages/ID/release` | yes | no | no | no | no | no | After a delivery-unknown event: mark the message delivered (default), or `resend: true` to have the supervisor type it once more |
 | POST | `/worker/orchestrators/ID/heartbeat` | no | no | no | yes | no | no | Supervisor on the pinned worker only: report state and the terminal tail, get the desired state, settings and one pending message |
 | GET | `/notices` | yes | yes | no | no | no | no | The last 100 deliveries with state and last error |
-| POST | `/bus/send` | yes | no | no | no | no | yes | Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `noop`, `reply_expected`, `meta`). Stored first, then woken. Admin sets `from` |
+| POST | `/bus/send` | yes | no | no | no | no | yes | Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `actionable`, `noop`, `reply_expected`, `meta`). Stored first, then woken. Admin sets `from` |
 | GET | `/bus/inbox` | yes | no | no | no | no | yes | An agent's undelivered and unread messages (`all=1`, `after`, `limit`). Reading marks them delivered. Admin names `agent` |
 | GET | `/bus/messages/ID` | yes | no | no | no | no | yes | One message with its delivery attempts. Agent: sender or recipient |
 | POST | `/bus/messages/ID/ack` | yes | no | no | no | no | yes | Mark a message read. `first` is true only once; also returns `newer_in_thread`. Agent: recipient only |

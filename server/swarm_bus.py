@@ -250,7 +250,8 @@ class Bus:
     @staticmethod
     def shape_msg(r):
         return {"id": r["id"], "from": r["sender"], "to": r["recipient"], "thread": r["thread"], "body": r["body"],
-                "meta": parse_meta(r["meta"]), "urgent": bool(r["urgent"]), "reply_expected": bool(r["reply_expected"]),
+                "meta": parse_meta(r["meta"]), "urgent": bool(r["urgent"]), "actionable": bool(r["actionable"]),
+                "reply_expected": bool(r["reply_expected"]),
                 "noop": bool(r["noop"]), "held": bool(r["held"]), "state": r["state"], "created_at": r["created_at"],
                 "delivered_at": r["delivered_at"], "read_at": r["read_at"], "attempts": r["attempts"], "last_error": r["last_error"]}
 
@@ -276,7 +277,7 @@ class Bus:
 
     def item_of(self, m):
         return {"id": m["id"], "from": m["sender"], "thread": m["thread"], "body": m["body"], "urgent": bool(m["urgent"]),
-                "reply_expected": bool(m["reply_expected"]), "created_at": m["created_at"], "meta": parse_meta(m["meta"]), "ack": self.ack_of(m)}
+                "actionable": bool(m["actionable"]), "reply_expected": bool(m["reply_expected"]), "created_at": m["created_at"], "meta": parse_meta(m["meta"]), "ack": self.ack_of(m)}
 
     def webhook_payload(self, m, stats, pending=()):
         p = {"kind": "bus_message", "idempotency_key": f"bus:{m['id']}", "id": m["id"], "from": m["sender"], "to": m["recipient"],
@@ -506,7 +507,7 @@ class Bus:
 
     # ---------------- send ----------------
     def send(self, m, now=None):
-        """Validate, store and wake one message. m = {from, to, body, thread?, client_msg_id?, urgent?, noop?, reply_expected?, meta?};
+        """Validate, store and wake one message. m = {from, to, body, thread?, client_msg_id?, urgent?, actionable?, noop?, reply_expected?, meta?};
         `from` is already the trusted sender name. Returns (status, data). Sent means stored: 201 only after the row is committed."""
         def at():
             return now if now is not None else self.now()
@@ -552,20 +553,21 @@ class Bus:
         blocker = isinstance(mm, dict) and mm.get("blocker") is True
         from_orch = (not noop and m.get("reply_expected") is True and
                      bool(self.s.one("SELECT 1 AS x FROM agents WHERE name = ? AND kind = 'orchestrator' AND retired_at IS NULL", sender)))
-        urgent = m.get("urgent") is True or (not noop and (blocker or from_orch))
+        actionable = m.get("actionable") is not False  # False (bus send --fyi): informational, waits for a digest or the next wake
+        urgent = actionable and (m.get("urgent") is True or (not noop and (blocker or from_orch)))
         if noop and (m.get("urgent") is True or blocker):
             return 400, {"error": "a noop message never wakes anyone, so it cannot also be urgent or a blocker"}
         # An answer to a question the recipient is waiting on (they sent a reply_expected message on this thread, nothing has answered it) wakes now.
         answers = False
-        if not noop and not urgent and to["wake"] == "webhook":
+        if actionable and not noop and not urgent and to["wake"] == "webhook":
             q0 = self.s.one("SELECT id FROM bus_messages WHERE thread = ? AND sender = ? AND recipient = ? AND reply_expected = 1"
                             " ORDER BY id DESC LIMIT 1", thread, to["name"], sender)
             if q0:
                 answers = not self.s.one("SELECT 1 AS x FROM bus_messages WHERE thread = ? AND sender = ? AND recipient = ? AND id > ?"
-                                         " AND noop = 0 AND held = 0 LIMIT 1", thread, sender, to["name"], q0["id"])
+                                         " AND noop = 0 AND held = 0 AND actionable = 1 LIMIT 1", thread, sender, to["name"], q0["id"])
         wake = ("never" if noop else "digest" if to["wake"] == "webhook" and not urgent and not answers
                 else "inbox" if to["wake"] == "poll" else "now")
-        reply_expected = urgent if m.get("reply_expected") is None else m.get("reply_expected") is True
+        reply_expected = actionable and (urgent if m.get("reply_expected") is None else m.get("reply_expected") is True)
         n = self.s.one("SELECT COUNT(*) AS n FROM bus_messages WHERE recipient = ? AND state = 'queued'", to["name"])
         if int(n["n"] or 0) >= MAX_QUEUED:
             return 429, {"error": f"{MAX_QUEUED} messages are already queued for {to['name']}; try again after it catches up"}
@@ -574,9 +576,9 @@ class Bus:
             with self.s.tx():
                 mid = self.s.run(
                     "INSERT INTO bus_messages(sender, recipient, thread, client_msg_id, body, meta, urgent, wake, held, noop, reply_expected,"
-                    " state, delivered_at, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " state, delivered_at, created_at, actionable) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     sender, to["name"], thread, cmid, body, meta, 1 if urgent else 0, wake, 1 if wake == "digest" else 0, 1 if noop else 0,
-                    1 if reply_expected else 0, "delivered" if noop else "queued", at() if noop else None, at()).lastrowid
+                    1 if reply_expected else 0, "delivered" if noop else "queued", at() if noop else None, at(), 1 if actionable else 0).lastrowid
                 row = self.s.one("SELECT * FROM bus_messages WHERE id = ?", mid)
         except Exception as e:
             dup = self.s.one("SELECT * FROM bus_messages WHERE sender = ? AND client_msg_id = ?", sender, cmid) \
@@ -688,15 +690,21 @@ class Bus:
             print("bus notice fallback failed", repr(e), file=sys.stderr, flush=True)
 
     # ---------------- finish notices (agents.notices = 'bus') ----------------
+    @staticmethod
+    def notice_is_urgent(task):
+        """done, failed, waiting and blocked wake the owner now; cancellation is informational and rides the next wake or digest."""
+        return task.get("state") != "cancelled" and (task.get("state") in ("done", "failed", "waiting") or task.get("outcome") == "blocked")
+
     def send_notice(self, agent, task, payload):
-        """A finish notice over the bus, urgent so it wakes the owner now. True when stored."""
+        """A finish notice over the bus: urgent (wakes the owner now) except cancellation, which is informational. True when stored."""
         try:
             thread = re.sub(r"[^a-z0-9:._+-]", "-", ("task:" + str(task["id"])).lower())[:80]
             cmid = re.sub(r"[^A-Za-z0-9._:-]", "_", str(payload["idempotency_key"]))
             if len(cmid) > 100:
                 cmid = cmid[:35] + ":" + hashlib.sha256(cmid.encode()).hexdigest()[:48]
             st, data = self.send({"from": SYSTEM, "to": agent["name"], "thread": thread, "client_msg_id": cmid,
-                                  "body": self.notice_body(task, payload), "meta": payload, "urgent": True, "reply_expected": False})
+                                  "body": self.notice_body(task, payload), "meta": payload, "urgent": self.notice_is_urgent(task),
+                                  "actionable": task.get("state") != "cancelled", "reply_expected": False})
             if st in (200, 201):
                 return True
             print("bus notice rejected", task["id"], st, data.get("error"), file=sys.stderr, flush=True)
@@ -800,7 +808,7 @@ class Bus:
                     # A failed finish notice carries the task payload: send it again the normal way and tell the alert agent.
                     # Alerts themselves (no task payload) are never alerted about, so this cannot loop.
                     meta = parse_meta(m["meta"]) or {}
-                    if failed and meta.get("task_id"):
+                    if failed and m["actionable"] and meta.get("task_id"):
                         self.fallback_legacy_notice(meta)
                         to = self.s.one("SELECT * FROM agents WHERE name = ?", m["recipient"])
                         if to:
