@@ -21,6 +21,8 @@ import sys
 import threading
 import time
 
+import swarm_gitlink
+
 # Timestamps are whole seconds, like the rest of the kit.
 BODY_MAX = 3700            # the tmux header adds ~250; the supervisor pastes at most 4,000 characters
 TMUX_TOTAL_MAX = 4000
@@ -708,6 +710,9 @@ class Bus:
             lines.append(f"Landed on GitHub: {'yes' if p['landed'] else 'no'}")
         if p.get("question"):
             lines.append(f"Question: {p['question']}")
+        gw = swarm_gitlink.warning_line(p.get("gitlink_skipped") or [], p.get("gitlink_skipped_count") or 0)
+        if gw:
+            lines.append(gw)  # before the report excerpt, so a long report cannot push it out
         lines.append(f"Report: GET /tasks/{task['id']}/report (your bus token can read it)")
         body = self.be.scrub("\n".join(lines))
         room = BODY_MAX - len(body) - 40

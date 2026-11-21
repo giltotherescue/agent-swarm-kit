@@ -56,6 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 import swarm_bus
+import swarm_gitlink
 
 VERSION = "0.8.0"
 MAX_FILE = 25 * 1024 * 1024
@@ -191,7 +192,9 @@ MIGRATE_COLUMNS = {
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
               ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
-              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER")],
+              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"),
+              # 0.8.1 (agent-control PR 63): opt-in for pin bumps; submodule pins the auto-commit left uncommitted (JSON list)
+              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -690,9 +693,20 @@ class Backend:
         }
         if unread and task["state"] in TERMINAL:
             p["unread_messages"] = unread
+        gl = swarm_gitlink.sanitize_gitlinks(self.stored_gitlinks(task), self.secret_hit)
+        if gl["count"]:
+            p["gitlink_skipped"], p["gitlink_skipped_count"] = gl["items"], gl["count"]
         if task["state"] == "waiting":
             p["question"] = task.get("question")
         return p
+
+    @staticmethod
+    def stored_gitlinks(t):
+        try:
+            v = json.loads(t.get("gitlink_skipped") or "[]")
+        except (TypeError, ValueError):
+            return []
+        return v if isinstance(v, list) else []
 
     @staticmethod
     def cannot_push(task):
@@ -866,6 +880,7 @@ class Backend:
         report_only = 1 if b.get("report_only") or command else 0
         untrusted = 1 if (b.get("untrusted_input") or b.get("untrusted")) else 0
         push_main = 1 if b.get("push_main") else 0
+        allow_gitlink = 1 if b.get("allow_gitlink") else 0
         push = 1 if (b.get("push") or b.get("open_pr") or push_main) else 0
         if b.get("pr_number") is not None and not (report_only or untrusted):
             push = 1  # working on an existing PR means updating it
@@ -921,6 +936,8 @@ class Backend:
                  "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         if target_worker:
             canon["target_worker"] = target_worker
+        if allow_gitlink:
+            canon["allow_gitlink"] = 1
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
         scope = (owner or "").lower()
         t = now()
@@ -948,15 +965,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles, target_worker)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, allow_gitlink)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
                     timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
-                    max_cycles, target_worker)
+                    max_cycles, target_worker, allow_gitlink)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -1043,7 +1060,7 @@ class Backend:
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner", "target_worker")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "allow_gitlink")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]
@@ -1059,6 +1076,7 @@ class Backend:
 
     def public_task(self, t, events=False):
         out = {k: v for k, v in t.items() if k not in ("prompt_hash", "session_id")}
+        out["gitlink_skipped"] = self.stored_gitlinks(t)
         out["has_report"] = bool(self.s.one("SELECT 1 FROM files WHERE task_id = ? AND kind = 'report'", t["id"]))
         out["artifacts"] = [r["name"] for r in self.s.q("SELECT name FROM files WHERE task_id = ? AND kind = 'artifact' ORDER BY name", t["id"])]
         if events:
@@ -1314,6 +1332,15 @@ class Backend:
                           and not isinstance(b.get("unpushed_commits"), bool) and b["unpushed_commits"] >= 0 else t["unpushed_commits"],
                           workspace_host=c["worker"] if (b.get("workdir") or t["workdir"]) else t["workspace_host"],
                           pending_answer=None)
+            skipped = b.get("gitlink_skipped")
+            if isinstance(skipped, list) and skipped:
+                # Redact (then truncate) before anything is stored: the task record, the event and every notice see only this.
+                gl = swarm_gitlink.sanitize_gitlinks(skipped, self.secret_hit, limit=swarm_gitlink.MAX_STORED)
+                seen = {g["path"]: g for g in self.stored_gitlinks(t)}
+                seen.update({g["path"]: g for g in gl["items"]})   # by path, latest wins
+                common["gitlink_skipped"] = json.dumps(list(seen.values())[:swarm_gitlink.MAX_STORED])
+                self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(gl["items"][:swarm_gitlink.MAX_ITEMS])
+                           + (f" (+{gl['count'] - swarm_gitlink.MAX_ITEMS} more)" if gl["count"] > swarm_gitlink.MAX_ITEMS else ""))
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
@@ -2708,10 +2735,9 @@ def git_commit(folder, message):
     try:
         if not os.path.isdir(os.path.join(folder, ".git")):
             subprocess.run(["git", "init", "-q"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "-c", "user.name=swarm-backend", "-c", "user.email=swarm-backend@localhost", "commit", "-q",
-                        "-m", message], cwd=folder, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
+        swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
+                                      log=lambda m: print("log export:", m, file=sys.stderr, flush=True))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
         print("log export: git commit failed:", repr(e), file=sys.stderr, flush=True)
 
 

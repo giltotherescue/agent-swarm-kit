@@ -4,6 +4,16 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.8.1 (unreleased)
+
+Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).
+
+- **Submodule gitlinks are never auto-committed.** Wherever the kit commits leftover work (today the project-log export commit), added, modified and deleted gitlinks (index mode 160000) are unstaged and left in the worktree, found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A git error or a gitlink still staged aborts the commit.
+- **Skips are recorded.** A worker may report `gitlink_skipped` (path, old sha, new sha) on finish; it is stored on the task, posted as a `publish` event and added to bus notices (a WARNING line ahead of the report excerpt) and legacy webhook payloads (`gitlink_skipped`, at most 10 entries, and `gitlink_skipped_count` for all).
+- **Redacted before truncation.** Every gitlink field goes through the secret patterns before it is cut and before storage, bus or webhook; a secret-looking value becomes `[redacted]`. A token-shaped path no longer gets the bus notice rejected.
+- **Opt in for a deliberate pin bump:** `swarmctl enqueue --allow-gitlink` (task field `allow_gitlink`, inherited by follow-ups) or `AGENT_ALLOW_GITLINK=1`.
+- Not ported 1:1: the kit's worker never commits leftover work itself (it only warns about uncommitted files), so there is no worker-side commit to guard. See git-policy.md.
+
 ## 0.8.0 (2026-11-21)
 
 The Agent Bus: reliable messages between your agents, ported from agent-control. Nothing is on until you register agents.

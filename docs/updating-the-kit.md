@@ -105,6 +105,13 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.8.1 (unreleased)
+
+Auto-commits never stage submodule pins (agent-control PR 63). Nothing to do unless you bump a submodule on purpose; see [git-policy.md](git-policy.md).
+
+- Pull and restart the backend (the database gets two new task columns on start) and the workers. `server/swarm_gitlink.py` is a new file; the usual copy step picks it up.
+- If a task must commit a submodule pin bump, queue it with `swarmctl enqueue --allow-gitlink` (or set `AGENT_ALLOW_GITLINK=1` in `/etc/agent-swarm/swarm.env` for every task).
+
 ## Upgrading to 0.8.0
 
 Run the setup script as usual. The backend adds the Agent Bus tables (`agents`, `agent_aliases`, `bus_messages`,

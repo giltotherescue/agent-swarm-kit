@@ -686,6 +686,8 @@ class Runner(threading.Thread):
             extra["unpushed_commits"] = g["unpushed"]
         if g.get("head"):
             extra["head_sha"] = g["head"]
+        if g.get("gitlink_skipped"):
+            extra["gitlink_skipped"] = g["gitlink_skipped"]  # the backend redacts it before storing
         if code == 75:
             return "limit", extra
         status_raw = safe_read(self.outbox, "AGENT_STATUS", 20000) if fresh("AGENT_STATUS") else None

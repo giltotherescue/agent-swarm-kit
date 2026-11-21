@@ -123,7 +123,7 @@ def cmd_enqueue(a):
             "untrusted_input": a.untrusted_input, "command": a.command, "idempotency_key": a.key,
             "title": a.title, "allow_duplicate": a.allow_duplicate, "parent_id": a.parent, "follow_up": a.follow_up,
             "target_worker": a.worker,
-            "push_main": a.push_main, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
+            "push_main": a.push_main, "allow_gitlink": a.allow_gitlink, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
     if a.attach:
         body["attachments"] = [{"name": os.path.basename(p), "content_base64": base64.b64encode(open(p, "rb").read()).decode()}
                                for p in a.attach]
@@ -992,6 +992,7 @@ def main():
     e.add_argument("--command", help="script task: run this shell command with no model")
     e.add_argument("--attach", action="append"); e.add_argument("--key", help="idempotency key: same key returns the same task")
     e.add_argument("--allow-duplicate", action="store_true")
+    e.add_argument("--allow-gitlink", action="store_true", help="let the auto-commit keep submodule pin changes staged (default: left uncommitted)")
     e.add_argument("--follow-up", metavar="TASK_ID", help="continue earlier work: same repo, branch, flags and folder")
     e.add_argument("--parent", help="link to a related task (just a label; use --follow-up to continue work)")
     e.add_argument("--worker", help="pin this task to a named worker (optional)")
