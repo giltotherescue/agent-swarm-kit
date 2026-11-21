@@ -4,6 +4,25 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## Unreleased: review queue (agent-control PR 62)
+
+A simple port of agent-control's review queue. See [docs/review-queue.md](docs/review-queue.md).
+
+- **File, list, decide.** Bots file items (`decision`, `copy`, `creative`, `social_post`, `deliverable`, `pr`) with
+  `PUT /review/items`, upserted by project, bot and key (new revision on change, `unchanged` on an identical re-send,
+  reopened after changes requested, a new item after approve or reject). The admin token or Chief decides with
+  `POST /review/items/ID/decision`: approve, changes or reject, with an optional note, edited text and chosen option. New
+  `review_items` table, added in place; `swarmctl review-queue` (`swarmctl rq`) file|list|show|decide|ack|close.
+- **Stale-click guard.** Every read carries `content_hash` (SHA-256 of the ask, options and recommendation). A decision must
+  send it; a missing or changed hash gets 409 `stale` and nothing is recorded.
+- **Delivery.** The decision goes to the filing bot's bus agent as an urgent message on thread `review:ID` (pointer-only if
+  the text is too long or refused). A bot without a bus agent reads it from `GET /review/items?status=answered&acked=0`.
+  `POST /review/items/ID/ack` marks it consumed (and the bus message read).
+- **Poll window.** Poll agents may set `poll_window_minutes` (10 to 10080; `swarmctl bus register --poll-window`) so they are
+  not reported unreachable between check-ins. New `agents.poll_window_minutes` column, added in place.
+- **Not ported:** the dashboard UI, meeting flags, SLA alerts, batches and sync, media, fill-ins and variants, the legacy
+  item migration, and linked-task propagation with its retry ledger.
+
 ## Unreleased: publish policy (agent-control PR 65)
 
 Ported from agent-control PR 65 where the kit publishes. See docs/concepts.md, "Pull requests".

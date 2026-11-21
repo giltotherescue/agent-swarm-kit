@@ -307,6 +307,7 @@ Start with the concepts, then follow your path.
 - [Long-running jobs](docs/long-running-jobs.md): jobs that run for days, as a chain of short cycles.
 - [Orchestrators](docs/orchestrators.md): the rare agent that must keep one session up for days on one worker.
 - [Agent Bus](docs/agent-bus.md): reliable messages between your agents, with receipts, digests and per-agent tokens (optional).
+- [Review queue](docs/review-queue.md): bots file decisions, copy and creative for you; you approve, request changes or reject, and the bot gets the decision back.
 - [Grok Bot only setup](docs/grokbot-only.md): no server needed.
 - [Zero-touch server (cloud-init)](docs/cloud-init.md): the bot builds the worker; you only approve in a browser.
 - [Worker server setup](docs/worker-setup.md): the by-hand path: any provider, Tailscale, and the security baseline.
