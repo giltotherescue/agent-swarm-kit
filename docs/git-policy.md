@@ -72,3 +72,7 @@ is refused with a 400, on a new task and on a follow-up. It is
 metadata for a worker that auto-commits on a task's behalf; the stock kit has no such worker, so the flag does not by
 itself commit anything. `AGENT_ALLOW_GITLINK=1` is read only by callers of `commit_leftover` that pass no explicit
 setting; the stock export passes `False`.
+
+## Test base variable
+
+For a project listed in `SWARM_TASK_BASE_ENV` (default `clozy=CLOZY_TEST_BASE`; format `project=NAME,project2=NAME2`; set it empty to turn this off), the runner puts `NAME=origin/<PR base>` in the task's environment, so test scripts can narrow to changed files. The branch is the task's `--base`, else its parent's base, else `origin/main`. A name that is not a plain branch name falls back to `origin/main`. A variable already set in `agent.env` is not replaced. A target PR's live base is only known at publish time, so it is not used.

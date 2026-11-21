@@ -11,7 +11,7 @@ or reads files inside the agent's folders itself; it exchanges files through two
 Usage (all paths are passed by the runner; sudo removes the caller's environment):
   agent-exec --work DIR --handoff DIR prepare TASK WORKNAME [--branch B] [--origin URL] [--drop-checkpoint]
   agent-exec --work DIR --handoff DIR run TASK WORKNAME --timeout SECONDS [--scope] [--require-scope]
-             [--memory 75%] [--cpu 200%] [--agent-env FILE] -- COMMAND ARGS...
+             [--memory 75%] [--cpu 200%] [--agent-env FILE] [--task-env A=v,B=w] -- COMMAND ARGS...
   agent-exec --work DIR --handoff DIR stop TASK [--grace 20]
   agent-exec --work DIR --handoff DIR stop-all
   agent-exec --work DIR --handoff DIR collect TASK WORKNAME
@@ -80,7 +80,7 @@ def timeout_command(path, which=shutil.which):
     return "gtimeout"
 
 
-def clean_env(task=None, timeout=None, agent_env=None):
+def clean_env(task=None, timeout=None, agent_env=None, task_env=None):
     pw = pwd.getpwuid(os.getuid())
     home = pw.pw_dir
     env = {"HOME": home, "USER": pw.pw_name, "LOGNAME": pw.pw_name, "SHELL": pw.pw_shell or "/bin/bash",
@@ -93,6 +93,11 @@ def clean_env(task=None, timeout=None, agent_env=None):
         env["SWARM_TASK_ID"] = task
     if timeout:
         env["SWARM_TASK_TIMEOUT"] = str(timeout)
+    for pair in (task_env or "").split(","):
+        # Per-task values from the runner (for example CLOZY_TEST_BASE=origin/main); agent.env below wins.
+        k, _, v = pair.partition("=")
+        if re.match(r"^[A-Z][A-Z0-9_]*$", k) and not k.startswith("SWARM_") and re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$", v):
+            env[k] = v
     if agent_env and os.path.isfile(agent_env):
         # Root-owned extras for agents, for example a proxy base URL. KEY=VALUE lines.
         for line in open(agent_env):
@@ -226,11 +231,11 @@ def cmd_prepare(p, task, name, branch, origin, drop_checkpoint=False):
     print(json.dumps({"state": state, "restored": restored, "head": head or None, "git": head is not None}))
 
 
-def cmd_run(p, task, name, timeout, scope, require_scope, memory, cpu, agent_env, command):
+def cmd_run(p, task, name, timeout, scope, require_scope, memory, cpu, agent_env, command, task_env=None):
     wd = p.wd(name)
     if not os.path.isdir(wd):
         die("work folder is missing")
-    env = clean_env(task, timeout, agent_env)
+    env = clean_env(task, timeout, agent_env, task_env)
     for relative in ("AGENT_STATUS", ".task-context/activity-log.json"):
         path = os.path.join(wd, relative)
         if os.path.lexists(path):
@@ -673,7 +678,7 @@ def main(argv):
     elif cmd == "run" and len(positional) == 2 and command:
         return cmd_run(p, positional[0], positional[1], int(opts.get("--timeout") or 14400), opts.get("--scope", False),
                        opts.get("--require-scope", False), opts.get("--memory") or "75%", opts.get("--cpu") or "200%",
-                       opts.get("--agent-env"), command)
+                       opts.get("--agent-env"), command, opts.get("--task-env"))
     elif cmd == "stop" and len(positional) == 1:
         cmd_stop(p, positional[0], float(opts.get("--grace") or 20))
     elif cmd == "stop-all":

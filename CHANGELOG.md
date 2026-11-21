@@ -6,6 +6,13 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+Per-project test-base env var, ported from agent-control PR 69. See [docs/git-policy.md](docs/git-policy.md).
+
+- **`CLOZY_TEST_BASE=origin/<PR base>`** is exported for the whole task of a `clozy` task (so `test:changed` can narrow); the
+  branch is the task's `--base`, else its parent's, else `origin/main`. Unsafe names fall back to `origin/main`; a variable
+  already set (for example in `agent.env`) is left alone. Map is `SWARM_TASK_BASE_ENV` (`project=NAME,...`; default
+  `clozy=CLOZY_TEST_BASE`, empty turns it off). Update `swarm_worker.py` and `agent-exec` together.
+
 Primary/fallback worker routing, ported from agent-control PR 68. See [docs/multi-worker.md](docs/multi-worker.md).
 
 - **Optional primary worker.** New backend setting `SWARM_PRIMARY_WORKER`, empty by default (first-come, as before). When
