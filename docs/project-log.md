@@ -102,7 +102,9 @@ swarmctl log brief marketing
 
 **Export on demand.** `swarmctl log export PROJECT --days 7 --out file.md` writes a readable Markdown
 file: current items, a rules summary, the Waiting on you summary for the project, then the log grouped
-by day. `swarmctl log export --dir DIR` writes one log file and one rules file per project you can read.
+by day. `swarmctl log export --dir DIR` writes one log file and one rules file per project you can read;
+add `--git` to commit the folder to a local git repo. That commit never stages submodule pins
+([git-policy.md](git-policy.md)).
 
 **Weekly export.** If `SWARM_LOG_EXPORT_DIR` is set in `/etc/agent-swarm/swarm.env` (the example config
 sets `/var/lib/agent-swarm/log-exports`), the backend writes, once per week, a folder per project with

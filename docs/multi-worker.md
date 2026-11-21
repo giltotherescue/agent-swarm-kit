@@ -51,6 +51,17 @@ and can read your GitHub login, do not use a Mac that holds your personal files 
 - To limit a worker to certain projects, set `SWARM_WORKER_PROJECTS=website,docs` and restart it.
   Names must match exactly. With a list, tasks without a project are not eligible. Omit the setting
   to allow all projects; an explicitly empty list allows none. A pin never overrides an allowlist.
+- Optional: prefer one worker. Off by default: unpinned tasks are first-come. To make one worker the
+  primary (say a fast home box, with a cloud box as fallback), set on the **backend's** `swarm.env`
+  `SWARM_PRIMARY_WORKER=build-box` (that worker's `SWARM_WORKER_NAME`) and restart `swarm-backend`. The
+  primary takes unpinned work at once. Any other worker takes an unpinned task only when (1) the primary
+  is stale: it has not claimed or heartbeated for `SWARM_PRIMARY_STALE_SECONDS` (default 90; an idle
+  worker checks in every `SWARM_POLL_SECONDS`, 20), was never seen, or is draining; (2) the task has
+  waited `SWARM_FALLBACK_AFTER_SECONDS` (default 120), which covers a primary that is full and not
+  claiming; (3) the project is not on the primary's `SWARM_WORKER_PROJECTS` list; or (4) the task's
+  workspace is on that worker. The wait counts from when the task was queued (or its `not_before`), or
+  from its last requeue or answer once it has run. Pins (`--worker`) always win, both ways. Liveness is
+  the `last_seen` column shown by `swarmctl status`. Empty or unset `SWARM_PRIMARY_WORKER` turns it off.
 - Unpinned follow-ups may wait for the worker that holds the earlier workspace while it is still
   checking in. Drain that worker before moving work. A different worker can use saved reports and
   bundles, but it does not have the previous model session.

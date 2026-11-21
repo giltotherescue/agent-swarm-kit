@@ -56,6 +56,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 import swarm_bus
+import swarm_gitlink
+import swarm_review
 
 VERSION = "0.8.0"
 MAX_FILE = 25 * 1024 * 1024
@@ -179,6 +181,15 @@ CREATE TABLE IF NOT EXISTS bus_attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL,
   transport TEXT NOT NULL CHECK (transport IN ('webhook','tmux','poll')),
   started_at INTEGER NOT NULL, finished_at INTEGER, ok INTEGER NOT NULL DEFAULT 0, http_status INTEGER, error TEXT);
+-- Review queue (docs/review-queue.md, a simple port of agent-control PR 62). One row per filed item; the latest decision is
+-- on the row (decision JSON), delivered over the bus or left answered and unacked for the bot to read.
+CREATE TABLE IF NOT EXISTS review_items(
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, bot TEXT NOT NULL, key TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'decision',
+  title TEXT, ask TEXT, body TEXT, recommendation TEXT, options TEXT, links TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','changes_requested','approved','rejected','closed')),
+  revision INTEGER NOT NULL DEFAULT 1, previous_item_id TEXT, close_reason TEXT,
+  decision TEXT, decided_at INTEGER, delivery TEXT, bus_message_id INTEGER, delivery_error TEXT, acked_at INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 """
 
 # Columns added after 0.1.0. Added in place on an existing database.
@@ -191,7 +202,9 @@ MIGRATE_COLUMNS = {
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
               ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
-              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER")],
+              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"), ("base", "TEXT"),
+              # 0.8.1 (agent-control PR 63): opt-in for pin bumps; submodule pins the auto-commit left uncommitted (JSON list)
+              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT"), ("gitlink_skipped_count", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -201,10 +214,12 @@ MIGRATE_COLUMNS = {
     "workers": [("projects", "TEXT")],
     # 0.8.0 Agent Bus: links a message typed into an orchestrator pane to its bus row; then the wake policy (agent-control 0027).
     "orchestrator_messages": [("bus_message_id", "INTEGER"),
-                              # 0.8.1: an admin released a delivery-unknown hold for one more paste (counter, see release)
+                              # 0.8.1: an admin released a delivery-unknown hold for one more typing (counter, see release)
                               ("release_count", "INTEGER NOT NULL DEFAULT 0")],
     "agents": [("digest_minutes", "INTEGER NOT NULL DEFAULT 60"), ("last_digest_at", "INTEGER"), ("unreachable_since", "INTEGER"),
-               ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER")],
+               ("alerted_at", "INTEGER"), ("escalated_at", "INTEGER"),
+               # Review queue port: a poll agent's declared check-in window (minutes); reachability allows that long.
+               ("poll_window_minutes", "INTEGER")],
     "bus_messages": [("wake", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0"), ("noop", "INTEGER NOT NULL DEFAULT 0"),
                      ("reply_expected", "INTEGER NOT NULL DEFAULT 0")],
 }
@@ -237,6 +252,8 @@ CREATE INDEX IF NOT EXISTS idx_bus_attempts_message ON bus_attempts(message_id, 
 CREATE INDEX IF NOT EXISTS bus_messages_created ON bus_messages(created_at);
 CREATE INDEX IF NOT EXISTS bus_attempts_started ON bus_attempts(started_at);
 CREATE INDEX IF NOT EXISTS bus_messages_held ON bus_messages(recipient, held, state);
+CREATE UNIQUE INDEX IF NOT EXISTS review_items_live ON review_items(project, lower(bot), key) WHERE status IN ('open','changes_requested');
+CREATE INDEX IF NOT EXISTS review_items_bot ON review_items(lower(bot), updated_at);
 """
 
 # Bumped when the schema changes. 3 = project log (0.3.0). 4 = typed log records, rules, chains (0.3.0).
@@ -420,6 +437,20 @@ def new_id(prefix="t"):
     return prefix + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + secrets.token_hex(3)
 
 
+def parse_flag(value, field):
+    """A yes/no API field: a JSON boolean, 0/1, or the strings true/false/1/0/yes/no. Anything else is a 400, so "false"
+    can never switch something on."""
+    if value is None or value is False:
+        return 0
+    if value is True:
+        return 1
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "false", "0", "no", ""):
+        return 1 if value.strip().lower() in ("true", "1", "yes") else 0
+    raise ApiError(400, f"{field} must be true or false")
+
+
 def clean_text(value, limit, field):
     if value is None:
         return None
@@ -598,6 +629,7 @@ class Backend:
         self.secret_patterns = load_secret_patterns()
         self.bus = swarm_bus.Bus(self, {"valid_notify_url": valid_notify_url, "post_json": post_json, "fingerprint": fingerprint,
                                         "VERSION": VERSION})
+        self.review = swarm_review.Review(self)
 
     # ---------- auth ----------
     def who(self, header):
@@ -692,9 +724,40 @@ class Backend:
         }
         if unread and task["state"] in TERMINAL:
             p["unread_messages"] = unread
+        gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(task), patterns=self.secret_patterns,
+                                           count=task.get("gitlink_skipped_count"))
+        if gl["count"]:
+            p["gitlink_skipped"], p["gitlink_skipped_count"] = gl["items"], gl["count"]
         if task["state"] == "waiting":
             p["question"] = task.get("question")
         return p
+
+    def set_report_note(self, task_id, note):
+        """Make the task's stored REPORT.md carry exactly this (sanitized) gitlink skip note, replacing any generated note
+        from an earlier finish; note "" removes it. A task without a report gets one; a report that held only the note
+        is removed with it. Detection is by the note's markers, never by its wording."""
+        f = self.s.one("SELECT name, data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", task_id)
+        text = bytes(f["data"]).decode(errors="replace") if f else ""
+        base = swarm_gitlink.strip_report_note(text)
+        if base == text and not note:
+            return
+        name = f["name"] if f else "REPORT.md"
+        data = (base.rstrip() + note).lstrip("\n").encode() if note else (base.rstrip() + "\n").lstrip("\n").encode()
+        if f and data == bytes(f["data"]):
+            return
+        if not data.strip():
+            self.s.run("DELETE FROM files WHERE task_id = ? AND kind = 'report' AND name = ?", task_id, name)
+            return
+        self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
+                   task_id, "report", name, data, len(data), now())
+
+    @staticmethod
+    def stored_gitlinks(t):
+        try:
+            v = json.loads(t.get("gitlink_skipped") or "[]")
+        except (TypeError, ValueError):
+            return []
+        return v if isinstance(v, list) else []
 
     @staticmethod
     def cannot_push(task):
@@ -826,6 +889,8 @@ class Backend:
     def create_task(self, who, b):
         self.need(who, "admin", "chief", "bot")
         b = {k: v for k, v in b.items() if not str(k).startswith("_")}  # internal fields are never taken from a request
+        if "allow_gitlink" in b and b["allow_gitlink"] is None:
+            raise ApiError(400, "allow_gitlink must be true or false; omit it to inherit a follow-up's parent value")
         follow = clean_text(b.get("follow_up"), 80, "follow_up")
         if follow:
             return self.follow_up(who, follow, b)
@@ -868,6 +933,7 @@ class Backend:
         report_only = 1 if b.get("report_only") or command else 0
         untrusted = 1 if (b.get("untrusted_input") or b.get("untrusted")) else 0
         push_main = 1 if b.get("push_main") else 0
+        allow_gitlink = parse_flag(b.get("allow_gitlink"), "allow_gitlink")
         push = 1 if (b.get("push") or b.get("open_pr") or push_main) else 0
         if b.get("pr_number") is not None and not (report_only or untrusted):
             push = 1  # working on an existing PR means updating it
@@ -886,6 +952,9 @@ class Backend:
         branch = clean_text(b.get("branch"), 200, "branch")
         if branch and not BRANCH_RE.match(branch):
             raise ApiError(400, "bad branch name")
+        base = self.clean_base(b.get("base"))
+        if base and not repo:
+            raise ApiError(400, "base needs a repo")
         kind = clean_text(b.get("kind"), 20, "kind") or ("script" if command else "code" if repo and not report_only else "research")
         timeout, chain, max_cycles = self.run_limits(b, kind, command)
         idem = clean_text(b.get("idempotency_key"), 200, "idempotency_key")
@@ -923,6 +992,10 @@ class Backend:
                  "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         if target_worker:
             canon["target_worker"] = target_worker
+        if allow_gitlink:
+            canon["allow_gitlink"] = 1
+        if base:
+            canon["base"] = base
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
         scope = (owner or "").lower()
         t = now()
@@ -950,15 +1023,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles, target_worker)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, allow_gitlink, base)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
                     timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
-                    max_cycles, target_worker)
+                    max_cycles, target_worker, allow_gitlink, base)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -1041,11 +1114,12 @@ class Backend:
                 if b.get(flag) and not parent.get(flag):
                     raise ApiError(400, f"task {parent_id} is waiting for an answer. A follow-up answers it and cannot add "
                                         f"{flag} when the task did not have it")
-            r = self.answer(who, parent_id, {"answer": b.get("prompt")}, via="follow-up")
+            # --base is not a publish permission: it is kept on the resumed task, written with the answer itself.
+            r = self.answer(who, parent_id, {"answer": b.get("prompt"), "base": b.get("base")}, via="follow-up")
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner", "target_worker")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "allow_gitlink", "base")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]
@@ -1053,6 +1127,10 @@ class Backend:
             inherit["branch"] = parent.get("pushed_branch") or parent.get("branch") or f"agent/{parent['id']}"
         body = dict(inherit)
         body.update({k: v for k, v in b.items() if v is not None and v is not False and v != "" and k != "follow_up"})
+        if "allow_gitlink" in b:
+            # an explicit value, JSON false included, overrides the parent's opt-in; only an omitted field inherits it
+            # (an explicit null was refused in create_task)
+            body["allow_gitlink"] = parse_flag(b["allow_gitlink"], "allow_gitlink")
         body["parent_id"] = parent["id"]
         body["_workspace_host"] = parent.get("workspace_host")
         held = self.s.one("SELECT id FROM tasks WHERE parent_id = ? AND follow_up = 1 AND state NOT IN ('done','failed','cancelled')"
@@ -1061,6 +1139,7 @@ class Backend:
 
     def public_task(self, t, events=False):
         out = {k: v for k, v in t.items() if k not in ("prompt_hash", "session_id")}
+        out["gitlink_skipped"] = self.stored_gitlinks(t)
         out["has_report"] = bool(self.s.one("SELECT 1 FROM files WHERE task_id = ? AND kind = 'report'", t["id"]))
         out["artifacts"] = [r["name"] for r in self.s.q("SELECT name FROM files WHERE task_id = ? AND kind = 'artifact' ORDER BY name", t["id"])]
         if events:
@@ -1096,6 +1175,7 @@ class Backend:
         text = clean_text(b.get("answer") or b.get("text"), 20000, "answer")
         if not text:
             raise ApiError(400, "answer is required")
+        base = self.clean_base(b.get("base"))
         actor = who["bot"] or who["role"]
         with self.s.tx():
             t = self.get_task(who, task_id)
@@ -1113,6 +1193,8 @@ class Backend:
             if t["outcome"] == "work_unavailable":
                 # The worker asked because unpushed work was lost. Any answer means: start again from what was pushed.
                 extra = {"unpushed": 0, "start_fresh": 1}
+            if base and base != t.get("base"):
+                extra["base"] = base  # only with an accepted answer: every refusal above raises before this
             t = self.set_state(t, "queued", actor, pending_answer=text, waiting_on=None, question=None, outcome=None, not_before=0,
                                human_snooze_until=None, **extra)
         return {"task": self.public_task(t), "resumed": True}
@@ -1194,6 +1276,21 @@ class Backend:
             self.s.run("INSERT INTO workers(name, last_seen, draining) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET"
                        " last_seen = excluded.last_seen, draining = excluded.draining", worker, now(), 1 if draining else 0)
 
+    def primary_gate(self, claimer):
+        """None when the claimer may take any unpinned task: SWARM_PRIMARY_WORKER is unset or empty (first-come), the
+        claimer is the primary, or the primary is stale (never seen, draining, or quiet for SWARM_PRIMARY_STALE_SECONDS).
+        Otherwise the primary's allowlist and the queued-before cutoff for the claim query. Liveness is workers.last_seen,
+        written on every claim and task heartbeat. Call inside the claim transaction."""
+        primary = (os.environ.get("SWARM_PRIMARY_WORKER") or "").strip()
+        if not primary or primary == claimer:
+            return None
+        row = self.s.one("SELECT last_seen, draining, projects FROM workers WHERE name = ?", primary)
+        if not row or not row["last_seen"] or row["draining"] or now() - row["last_seen"] > env_int("SWARM_PRIMARY_STALE_SECONDS", 90):
+            return None
+        return {"queued_before": now() - env_int("SWARM_FALLBACK_AFTER_SECONDS", 120),
+                "primary_all": 1 if row["projects"] is None else 0,
+                "primary_list": row["projects"] if row["projects"] is not None else "[]"}
+
     def claim(self, who, b):
         self.need(who, "worker")
         worker = clean_text(b.get("worker"), 80, "worker") or "worker"
@@ -1216,6 +1313,16 @@ class Backend:
                    " AND (t.target_worker IS NOT NULL OR NOT EXISTS (SELECT 1 FROM workers w"
                    " WHERE w.name = t.workspace_host AND w.name != ? AND w.last_seen > ? AND w.draining = 0))")
             args = [now(), worker, worker, now() - 3600]
+            gate = self.primary_gate(worker)
+            if gate:
+                # Primary/fallback routing (agent-control PR 68, docs/multi-worker.md): while SWARM_PRIMARY_WORKER is live,
+                # another worker takes an unpinned task only if it has waited SWARM_FALLBACK_AFTER_SECONDS (counted from the
+                # later of creation or not_before, or from the requeue/answer time once it has run), the project is off the
+                # primary's allowlist, or the task's workspace is on this worker.
+                sql += (" AND (t.target_worker IS NOT NULL OR t.workspace_host IS ?"
+                        " OR max(CASE WHEN t.attempts = 0 THEN t.created_at ELSE t.updated_at END, t.not_before) <= ?"
+                        " OR (? = 0 AND t.project NOT IN (SELECT value FROM json_each(?))))")
+                args.extend([worker, gate["queued_before"], gate["primary_all"], gate["primary_list"]])
             if projects is not None:
                 sql += " AND t.project IN (" + ",".join("?" for project in projects) + ")"
                 args.extend(projects)
@@ -1241,7 +1348,7 @@ class Backend:
             p = self.s.one("SELECT * FROM tasks WHERE id = ?", t["parent_id"]) or {}
             rep = self.s.one("SELECT data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", t["parent_id"])
             out["parent"] = {k: p.get(k) for k in ("id", "state", "workdir", "workspace_host", "session_provider", "session_model",
-                                                   "session_id", "pushed_branch", "branch", "unpushed", "repo")}
+                                                   "session_id", "pushed_branch", "branch", "unpushed", "repo", "pr_url", "base")}
             out["parent"]["has_bundle"] = bool(self.s.one("SELECT 1 FROM files WHERE task_id = ? AND kind = 'bundle'", t["parent_id"]))
             out["parent"]["report"] = bytes(rep["data"]).decode(errors="replace")[:300_000] if rep else None
         return out
@@ -1286,6 +1393,36 @@ class Backend:
         return {"allowed": allowed, "reason": reason, "repo": t["repo"], "branch": t["branch"], "push": bool(t["push"]),
                 "open_pr": bool(t["open_pr"]), "push_main": bool(t["push_main"]), "pr_number": t["pr_number"]}
 
+    @staticmethod
+    def clean_base(value):
+        base = clean_text(value, 200, "base")
+        if base and not BRANCH_RE.match(base):
+            raise ApiError(400, "bad base branch name")
+        return base
+
+    def finish_pr_url(self, t, b, actor):
+        """The pr_url to store. An explicit null clears it (the worker withdrew an earlier claim's PR: the target was merged or
+        closed and no new PR was opened); an absent one keeps the stored value. open_pr=0 is an absolute veto on new PRs: a URL
+        is accepted from such a task only when it is the PR it was told to update (--pr-number, or the parent's PR it
+        inherited as a follow-up)."""
+        if "pr_url" in b and b["pr_url"] is None:
+            return None
+        url = clean_text(b.get("pr_url"), 500, "pr_url")
+        if not url:
+            return t["pr_url"]
+        if not t["open_pr"] and url != t["pr_url"]:
+            targets = []
+            if t["pr_number"] and t["repo"]:
+                targets.append(f"https://github.com/{t['repo']}/pull/{t['pr_number']}")
+            if t["parent_id"] and t["follow_up"]:
+                p = self.s.one("SELECT pr_url FROM tasks WHERE id = ?", t["parent_id"])
+                if p and p["pr_url"]:
+                    targets.append(p["pr_url"])
+            if url.rstrip("/").lower() not in [x.rstrip("/").lower() for x in targets]:
+                self.event(t["id"], "warning", actor, f"PR {url} was not recorded: this task did not allow opening a PR (open_pr not set)")
+                return t["pr_url"]
+        return url
+
     def finish(self, who, task_id, b):
         """status: done | waiting | next | failed | limit. Applies retry rules and fires notices.
         Idempotent per claim: a retry from the same claim gets the first answer back."""
@@ -1302,8 +1439,9 @@ class Backend:
             if c and c["finish_response"]:
                 return dict(json.loads(c["finish_response"]), replayed=True)
             t = self.own_task(who, task_id)
+            pr_url = self.finish_pr_url(t, b, actor)
             common = dict(summary=clean_text(b.get("summary"), 2000, "summary") or t["summary"],
-                          pr_url=clean_text(b.get("pr_url"), 500, "pr_url") or t["pr_url"],
+                          pr_url=pr_url,
                           session_provider=clean_text(b.get("session_provider"), 20, "session_provider") or t["session_provider"],
                           session_model=clean_text(b.get("session_model"), 80, "session_model") or t["session_model"],
                           session_id=clean_text(b.get("session_id"), 200, "session_id") or t["session_id"],
@@ -1316,10 +1454,42 @@ class Backend:
                           and not isinstance(b.get("unpushed_commits"), bool) and b["unpushed_commits"] >= 0 else t["unpushed_commits"],
                           workspace_host=c["worker"] if (b.get("workdir") or t["workdir"]) else t["workspace_host"],
                           pending_answer=None)
+            skipped = b.get("gitlink_skipped")
+            if isinstance(skipped, list):
+                # An explicit observation ([] included) replaces the earlier one: it describes the worktree now. Omitting
+                # the field keeps what was stored. Redact on the full value (then cut) before anything is stored: the task
+                # record, the event, the report note and every notice see only this. The true count is kept apart from the
+                # bounded list, never re-derived from display strings. A replayed finish returns above, so this runs once.
+                gl = swarm_gitlink.public_gitlinks(skipped, limit=swarm_gitlink.MAX_STORED, patterns=self.secret_patterns,
+                                                   count=b.get("gitlink_skipped_count"))
+                if gl["count"]:
+                    common["gitlink_skipped"] = json.dumps(gl["items"])
+                    common["gitlink_skipped_count"] = gl["count"]
+                    shown = gl["items"][:swarm_gitlink.MAX_ITEMS]
+                    self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(shown, gl["count"]))
+                    self.set_report_note(task_id, swarm_gitlink.report_note(shown, gl["count"]))
+                else:
+                    if t.get("gitlink_skipped_count"):
+                        self.event(task_id, "publish", actor, "Auto-commit: no submodule pin changes left uncommitted now")
+                    common["gitlink_skipped"], common["gitlink_skipped_count"] = None, None
+                    self.set_report_note(task_id, "")
+            elif t.get("gitlink_skipped_count"):
+                # Field omitted: the stored observation still stands, and the current report must say so. A resumed claim
+                # may have uploaded a fresh REPORT.md (without the note) just before this finish; render the stored note
+                # into it. set_report_note replaces any earlier generated note, so this never duplicates it.
+                gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(t), limit=swarm_gitlink.MAX_STORED,
+                                                   patterns=self.secret_patterns, count=t["gitlink_skipped_count"])
+                if gl["count"]:
+                    self.set_report_note(task_id, swarm_gitlink.report_note(gl["items"][:swarm_gitlink.MAX_ITEMS], gl["count"]))
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
                 self.event(task_id, "warning", actor, clean_text(str(w), 2000, "warning"))
+            for key in ("pr_base_note", "publish_note"):
+                if b.get(key):
+                    tps = clean_text(b.get("target_pr_state"), 20, "target_pr_state")
+                    self.event(task_id, "publish", actor, clean_text(str(b[key]), 4000, key),
+                               {"target_pr_state": tps} if tps and key == "publish_note" else None)
             checkpoint = clean_text(b.get("checkpoint"), 200_000, "checkpoint") if t["chain"] and status == "done" else None
             if status == "done":
                 # A chain cycle that hands on a checkpoint is not news; only the chain's end notifies the owner.
@@ -2513,7 +2683,7 @@ class Backend:
 
     def orch_release(self, who, name, mid, b):
         """An admin checked the session after a delivery-unknown event. Default: the message arrived, mark it delivered (the
-        supervisor drops its hold, nothing is typed). resend: paste it once more (the supervisor sees the release count
+        supervisor drops its hold, nothing is typed). resend: type it once more (the supervisor sees the release count
         go up on the pending message). Either way the supervisor never guesses on its own."""
         self.need(who, "admin")
         resend = b.get("resend", False)
@@ -2528,7 +2698,7 @@ class Backend:
                 raise ApiError(409, f"message {mid} is already delivered")
             if resend:
                 self.s.run("UPDATE orchestrator_messages SET release_count = release_count + 1 WHERE id = ?", mid)
-                self.orch_event(name, "message-released", "admin", f"message {mid} released: it is pasted again")
+                self.orch_event(name, "message-released", "admin", f"message {mid} released: it is typed once more")
             else:
                 self.s.run("UPDATE orchestrator_messages SET delivered_at = ? WHERE id = ?", now(), mid)
                 try:
@@ -2607,7 +2777,7 @@ class Backend:
                     if isinstance(waited, int) and not isinstance(waited, bool) and waited >= 0:
                         # In the same first-delivery branch, so a replayed receipt never records it twice.
                         self.orch_event(name, "message-delivered-busy", worker,
-                                        f"message {ack} pasted while the session was busy, after {waited}s (queued by Claude Code)")
+                                        f"message {ack} typed while the session was busy, after {waited}s (queued by Claude Code)")
             msg = None
             if not r["deleted_at"] and r["desired"] == "running":
                 msg = self.s.one("SELECT id, at, sender, text, release_count AS release FROM orchestrator_messages"
@@ -2742,11 +2912,11 @@ def git_commit(folder, message):
     try:
         if not os.path.isdir(os.path.join(folder, ".git")):
             subprocess.run(["git", "init", "-q"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "-c", "user.name=swarm-backend", "-c", "user.email=swarm-backend@localhost", "commit", "-q",
-                        "-m", message], cwd=folder, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        print("log export: git commit failed:", repr(e), file=sys.stderr, flush=True)
+        swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
+                                      log=lambda m: print("log export:", m, file=sys.stderr, flush=True))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        # commit_leftover already redacts its own messages; redact again so an OSError's path text is covered too.
+        print("log export: git commit failed:", type(e).__name__, swarm_gitlink.redact(str(e)), file=sys.stderr, flush=True)
 
 
 class FailLimiter:
@@ -3138,7 +3308,7 @@ def r_orch_message(api, who, m, qs, body, h):
 
 
 @route("POST", r"/orchestrators/([^/]+)/messages/([^/]+)/release", ("admin",), "After a delivery-unknown event: mark the message "
-       "delivered (default), or `resend: true` to have the supervisor paste it once more")
+       "delivered (default), or `resend: true` to have the supervisor type it once more")
 def r_orch_release(api, who, m, qs, body, h):
     if not m[1].isdigit():
         raise ApiError(404, "no such message")
@@ -3225,7 +3395,7 @@ def r_bus_agents(api, who, m, qs, body, h):
     return {"agents": [api.bus.shape_agent(a) for a in api.s.q("SELECT * FROM agents WHERE retired_at IS NULL ORDER BY name")]}
 
 
-@route("PUT", r"/bus/agents/([^/]+)", ("admin",), "Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`)")
+@route("PUT", r"/bus/agents/([^/]+)", ("admin",), "Register or change an agent (`kind`, `wake`, `bot_id`, `orchestrator`, `description`, `aliases`, `notices`, `digest_minutes`, `poll_window_minutes`)")
 def r_bus_put_agent(api, who, m, qs, body, h):
     return Reply(*api.bus.put_agent(swarm_bus.norm_name(urllib.parse.unquote(m[0])), body))
 
@@ -3271,6 +3441,55 @@ def r_bus_rotate(api, who, m, qs, body, h):
 @route("GET", r"/bus", ("admin",), "Plain HTML view of agents and the last 100 messages. Read only; admin token only (a reverse proxy makes every request look like loopback, so there is no loopback exception)")
 def r_bus_page(api, who, m, qs, body, h):
     return ("text/html; charset=utf-8", api.bus.page().encode())
+
+
+# ---- Review queue (docs/review-queue.md) ----
+REVIEW_FILERS = ("admin", "chief", "bot", "agent")
+
+
+def review_call(fn, *args):
+    try:
+        return fn(*args)
+    except swarm_review.ReviewError as e:
+        raise ApiError(e.status, e.message, e.extra)
+
+
+@route("PUT", r"/review/items", REVIEW_FILERS, "File or update a review item, upsert by (`project`, `bot`, `key`). Bot and bus agent: as itself. "
+       "Admin and chief name `bot`")
+def r_review_put(api, who, m, qs, body, h):
+    return Reply(*review_call(api.review.upsert, who, body))
+
+
+@route("POST", r"/review/items", REVIEW_FILERS, "Same as PUT /review/items")
+def r_review_post(api, who, m, qs, body, h):
+    return Reply(*review_call(api.review.upsert, who, body))
+
+
+@route("GET", r"/review/items", REVIEW_FILERS, "List review items (`status`, `acked=0`, `project`, `key`, `type`, `limit`; admin and chief: `bot`). "
+       "Bot and bus agent: own only")
+def r_review_list(api, who, m, qs, body, h):
+    return review_call(api.review.list, who, qs)
+
+
+@route("GET", r"/review/items/([^/]+)", REVIEW_FILERS, "One review item with its `content_hash` and decision. Bot and bus agent: own only")
+def r_review_get(api, who, m, qs, body, h):
+    return review_call(api.review.detail, who, m[0])
+
+
+@route("POST", r"/review/items/([^/]+)/decision", ("admin", "chief"), "Decide: `action` approve, changes or reject, with the `content_hash` "
+       "read from the item (409 stale and nothing recorded on a mismatch), `note`, `edited_text`, `option`, `revision`")
+def r_review_decide(api, who, m, qs, body, h):
+    return review_call(api.review.decide, who, m[0], body)
+
+
+@route("POST", r"/review/items/([^/]+)/ack", REVIEW_FILERS, "Acknowledge a decision once consumed (`revision`). Bot and bus agent: own only")
+def r_review_ack(api, who, m, qs, body, h):
+    return review_call(api.review.ack, who, m[0], body)
+
+
+@route("POST", r"/review/items/([^/]+)/close", REVIEW_FILERS, "Withdraw an open item (`reason`). Bot and bus agent: own only")
+def r_review_close(api, who, m, qs, body, h):
+    return review_call(api.review.close, who, m[0], body)
 
 
 def permission_table():

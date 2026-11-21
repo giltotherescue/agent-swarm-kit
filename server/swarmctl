@@ -33,7 +33,7 @@ Examples:
   swarmctl orchestrator create app-steward --worker build-box -p app --owner app-bot --brief steward.md --start
   swarmctl orchestrator list | status NAME | logs NAME | start | stop | restart NAME   (see docs/orchestrators.md)
   swarmctl orchestrator message app-steward "Look at the signup page next"
-  swarmctl orchestrator release app-steward 12 [--resend]   (after a delivery-unknown event: it arrived, or paste it again)
+  swarmctl orchestrator release app-steward 12 [--resend]   (after a delivery-unknown event: it arrived, or type it once more)
   swarmctl bus send chief "Deploy done" --no-reply ; swarmctl bus inbox ; swarmctl bus ack 7   (BUS_AGENT=NAME)
 """
 import argparse
@@ -53,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = "0.8.1"
+VERSION = "0.8.0"
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DRAIN_FILE = os.environ.get("SWARM_DRAIN_FILE", "/var/lib/swarm-runner/drain")
 STATE_FILE = os.environ.get("SWARM_STATE_FILE", "/var/lib/swarm-runner/runner-state.json")
@@ -123,8 +123,8 @@ def cmd_enqueue(a):
             "open_pr": a.pr, "pr_number": a.pr_number, "branch": a.branch, "ask_human": a.ask_human,
             "untrusted_input": a.untrusted_input, "command": a.command, "idempotency_key": a.key,
             "title": a.title, "allow_duplicate": a.allow_duplicate, "parent_id": a.parent, "follow_up": a.follow_up,
-            "target_worker": a.worker,
-            "push_main": a.push_main, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
+            "target_worker": a.worker, "base": a.base,
+            "push_main": a.push_main, "allow_gitlink": a.allow_gitlink, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
     if a.attach:
         body["attachments"] = [{"name": os.path.basename(p), "content_base64": base64.b64encode(open(p, "rb").read()).decode()}
                                for p in a.attach]
@@ -249,7 +249,7 @@ def cmd_orchestrator(a):
         if not (a.text or "").isdigit():
             sys.exit("swarmctl: orchestrator release needs NAME and the message ID from the delivery-unknown event")
         call("POST", f"{path}/messages/{a.text}/release", {"resend": bool(a.resend)})
-        print(f"message {a.text}: " + ("released; the supervisor pastes it again" if a.resend else
+        print(f"message {a.text}: " + ("released; the supervisor types it once more" if a.resend else
                                        "marked delivered; the supervisor drops its hold and types nothing"))
         return
     if a.action == "logs":
@@ -301,6 +301,46 @@ def cmd_waiting(a):
     if a.action == "snooze":
         body["until"] = int(time.time() + 86400 * (a.days or 1))
     show(call("POST", f"/waiting/{a.id}", body))
+
+
+def cmd_review_queue(a):
+    """The review queue (docs/review-queue.md)."""
+    if a.action == "file":
+        body = {"project": a.project, "key": a.key, "type": a.type, "title": a.title, "ask": a.ask, "recommendation": a.rec,
+                "options": a.option or [], "links": a.link or []}
+        if a.bot:
+            body["bot"] = a.bot
+        if a.body_file:
+            body["body"] = open(a.body_file).read() if a.body_file != "-" else sys.stdin.read()
+        return show(call("PUT", "/review/items", {k: v for k, v in body.items() if v is not None}))
+    if a.action == "list":
+        q = {k: v for k, v in (("status", a.status), ("project", a.project), ("bot", a.bot), ("key", a.key)) if v}
+        if a.unacked:
+            q["acked"] = "0"
+        r = call("GET", "/review/items?" + urllib.parse.urlencode(q))
+        if a.json:
+            return show(r)
+        for i in r["items"]:
+            d = i.get("decision") or {}
+            print(f"{i['id']:18} {i['status']:17} {i['project'][:14]:14} {i['bot'][:16]:16} r{i['revision']:<3} {(i['title'] or '')[:60]}"
+                  + (f"  [{d.get('action')}{', acked' if (i.get('delivery') or {}).get('acked_at') else ''}]" if d else ""))
+        print(f"{len(r['items'])} of {r['total']}")
+        return
+    if not a.id:
+        sys.exit("swarmctl: this action needs an item id")
+    path = "/review/items/" + urllib.parse.quote(a.id, safe="")
+    if a.action == "show":
+        return show(call("GET", path))
+    if a.action == "decide":
+        if not a.decision or not a.hash:
+            sys.exit("swarmctl: decide needs --action approve|changes|reject and --hash (the content_hash `show` printed)")
+        body = {"action": a.decision, "content_hash": a.hash, "note": a.note, "option": a.choose}
+        if a.edited_file:
+            body["edited_text"] = open(a.edited_file).read()
+        return show(call("POST", path + "/decision", {k: v for k, v in body.items() if v is not None}))
+    if a.action == "ack":
+        return show(call("POST", path + "/ack", {"revision": a.revision} if a.revision else {}))
+    show(call("POST", path + "/close", {"reason": a.note} if a.note else {}))
 
 
 def log_query(a):
@@ -475,13 +515,19 @@ def cmd_log(a):
 
 
 def git_commit(folder, message):
-    """Commit the export folder to a local git repo so every export shows as a diff (git log -p)."""
-    if not os.path.isdir(os.path.join(folder, ".git")):
-        subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=folder, check=True)
-    r = subprocess.run(["git", "-c", "user.name=swarmctl", "-c", "user.email=swarmctl@localhost", "commit", "-q", "-m", message],
-                       cwd=folder, capture_output=True, text=True)
-    print("committed" if r.returncode == 0 else "nothing new to commit", "in", folder)
+    """Commit the export folder to a local git repo so every export shows as a diff (git log -p).
+
+    Uses the backend export's guarded commit (server/swarm_gitlink.py): a copy of the index, submodule pins never
+    staged (opt-in disabled), git output captured, every diagnostic redacted before it is printed. Exits 1 on failure."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import swarm_gitlink
+    try:
+        made = swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
+                                             identity=("swarmctl", "swarmctl@localhost"),
+                                             log=lambda m: print("swarmctl: log export:", m, file=sys.stderr, flush=True))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        sys.exit("swarmctl: log export: git commit failed: " + swarm_gitlink.bounded_diagnostic(str(e), 1000))
+    print("committed" if made else "nothing new to commit", "in", folder)
 
 
 def write_secret_file(out, value):
@@ -870,6 +916,8 @@ def bus_register(a, creds):
         body["description"] = a.description
     if a.notices:
         body["notices"] = a.notices
+    if a.poll_window is not None:
+        body["poll_window_minutes"] = a.poll_window or None
     bus_call(f"/bus/agents/{urllib.parse.quote(a.name, safe='')}", creds, "PUT", body)
     print(f"registered {a.name} ({a.kind}, wake {a.wake}, digest {a.digest_minutes}m)")
     return 0
@@ -947,7 +995,7 @@ def add_bus_parser(sub):
   swarmctl bus inbox [--all] [--after ID] [--json]
   swarmctl bus ack ID                  exit 3 when an earlier copy was already acked (check that the work happened)
   swarmctl bus status ID | thread THREAD [--json] | agents | whoami
-  swarmctl bus register NAME --kind K --wake W [--bot ID] [--orchestrator NAME] [--alias A]... [--description D] [--notices legacy|bus] [--digest-minutes N]
+  swarmctl bus register NAME --kind K --wake W [--bot ID] [--orchestrator NAME] [--alias A]... [--description D] [--notices legacy|bus] [--digest-minutes N] [--poll-window MINUTES]
   swarmctl bus retire NAME
   swarmctl bus token NAME [--rotate] [--out FILE]   writes the token to FILE (default ~/.config/swarm/agents/NAME.token, 0600)""",
                        formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -971,6 +1019,8 @@ def add_bus_parser(sub):
     s.add_argument("--wake", required=True, choices=["webhook", "tmux", "poll"]); s.add_argument("--bot"); s.add_argument("--orchestrator")
     s.add_argument("--alias", action="append"); s.add_argument("--description"); s.add_argument("--notices", choices=["legacy", "bus"])
     s.add_argument("--digest-minutes", dest="digest_minutes", type=digest_minutes, default=60, help="minutes between digest wakes (default 60, minimum 5)")
+    s.add_argument("--poll-window", dest="poll_window", type=int, metavar="MINUTES",
+                   help="wake poll only: how often the agent checks in (10-10080); not unreachable in between. 0 clears it")
     s = bs.add_parser("retire", help="admin: retire an agent"); s.add_argument("name")
     s = bs.add_parser("token", help="admin: write an agent's token to a 0600 file (path printed, never the token)")
     s.add_argument("name"); s.add_argument("--rotate", action="store_true"); s.add_argument("--out")
@@ -995,11 +1045,14 @@ def main():
     e.add_argument("--pr", action="store_true", help="push agent/<id> and open a draft PR")
     e.add_argument("--push-main", action="store_true", help="push the default branch (only if the project allows it)")
     e.add_argument("--pr-number", type=int, help="work on top of this existing PR"); e.add_argument("--branch")
+    e.add_argument("--base", help="base branch for a fresh PR (follow-ups inherit the parent's; a replacement for a target PR "
+                                  "always uses that PR's live base)")
     e.add_argument("--ask-human", action="store_true", help="a question from this task goes to the human, not the bot")
     e.add_argument("--untrusted-input", action="store_true", help="brief came from email, tickets or scraped pages")
     e.add_argument("--command", help="script task: run this shell command with no model")
     e.add_argument("--attach", action="append"); e.add_argument("--key", help="idempotency key: same key returns the same task")
     e.add_argument("--allow-duplicate", action="store_true")
+    e.add_argument("--allow-gitlink", action="store_true", help="mark that submodule pin bumps are intended (metadata for a worker that auto-commits; the stock worker never auto-commits, so commit a pin bump yourself)")
     e.add_argument("--follow-up", metavar="TASK_ID", help="continue earlier work: same repo, branch, flags and folder")
     e.add_argument("--parent", help="link to a related task (just a label; use --follow-up to continue work)")
     e.add_argument("--worker", help="pin this task to a named worker (optional)")
@@ -1043,6 +1096,23 @@ def main():
     w.add_argument("--ask"); w.add_argument("--rec"); w.add_argument("--link", action="append"); w.add_argument("--option", action="append")
     w.add_argument("--key"); w.add_argument("--task-id"); w.add_argument("--days", type=int); w.add_argument("--json", action="store_true")
     w.set_defaults(fn=cmd_waiting)
+
+    rq = sub.add_parser("review-queue", aliases=["rq"], help="the review queue: bots file items, you decide them",
+                        epilog="""  swarmctl rq file --project P --key K [--type T] --title T [--ask A] [--rec R] [--option O]... [--link URL]... [--body-file F] [--bot B]
+  swarmctl rq list [--status open|changes_requested|pending|decided|answered|closed|all] [--unacked] [--project P] [--bot B] [--json]
+  swarmctl rq show ID                         prints the item with its content_hash
+  swarmctl rq decide ID --action approve|changes|reject --hash HASH [--note N] [--choose OPTION] [--edited-file F]
+  swarmctl rq ack ID [--revision N]  |  swarmctl rq close ID [--note REASON]""", formatter_class=argparse.RawDescriptionHelpFormatter)
+    rq.add_argument("action", choices=["file", "list", "show", "decide", "ack", "close"]); rq.add_argument("id", nargs="?")
+    rq.add_argument("--project"); rq.add_argument("--key"); rq.add_argument("--bot"); rq.add_argument("--status")
+    rq.add_argument("--type", choices=["decision", "copy", "creative", "social_post", "deliverable", "pr"])
+    rq.add_argument("--title"); rq.add_argument("--ask"); rq.add_argument("--rec"); rq.add_argument("--option", action="append")
+    rq.add_argument("--link", action="append"); rq.add_argument("--body-file", dest="body_file")
+    rq.add_argument("--unacked", action="store_true"); rq.add_argument("--json", action="store_true")
+    rq.add_argument("--action", dest="decision", choices=["approve", "changes", "reject"]); rq.add_argument("--hash")
+    rq.add_argument("--note"); rq.add_argument("--choose", help="the option label you pick"); rq.add_argument("--edited-file", dest="edited_file")
+    rq.add_argument("--revision", type=int)
+    rq.set_defaults(fn=cmd_review_queue)
 
     b = sub.add_parser("bot", help="bot settings")
     b.add_argument("action", choices=["list", "show", "set", "token", "test"]); b.add_argument("id", nargs="?")
@@ -1120,7 +1190,7 @@ def main():
     orc.add_argument("--no-secret-bundles", action="store_true", help="set: remove all secret bundles")
     orc.add_argument("--relay-name", help="fixed name on Agent Relay (optional)")
     orc.add_argument("--start", action="store_true", help="create: set it to run right away")
-    orc.add_argument("--resend", action="store_true", help="release: paste the held message again instead of marking it delivered")
+    orc.add_argument("--resend", action="store_true", help="release: type the held message once more instead of marking it delivered")
     orc.add_argument("--lines", type=int, default=100, help="logs: how many lines (up to 500)")
     orc.add_argument("--json", action="store_true"); orc.set_defaults(fn=cmd_orchestrator)
 

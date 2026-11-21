@@ -12,6 +12,7 @@ For each task it:
   4. runs run-agent (or the script command) as the agent user with a hard time limit
   5. collects REPORT.md, artifacts and a bundle of new commits, uploads them with the task token
   6. checks the claim and the project's push rules again, scans new lines for secrets, pushes and opens a draft PR
+     (only when the task set open_pr; the base comes from the target PR's live base, --base, the parent, or the repo default)
   7. tells the backend done, waiting (with the question), next (with the step), limit or failed
 
 Env (see config/swarm.env.example): SWARM_URL, SWARM_WORKER_TOKEN_FILE, SWARM_WORKER_NAME, SWARM_MAX_PARALLEL,
@@ -34,9 +35,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.8.1"
+VERSION = "0.8.0"
 HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
+sys.path.insert(0, HERE)
+import swarm_gitlink  # noqa: E402
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
 PROJECTS = os.environ.get("SWARM_WORKER_PROJECTS")
 WORK = os.path.expanduser(os.environ.get("SWARM_WORK_DIR", "~/work"))
@@ -122,11 +125,16 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+def diag(text, n):
+    """A subprocess diagnostic for an error or log line: redacted on the complete text, then cut to its last n chars."""
+    return swarm_gitlink.bounded_diagnostic(text or "", n)
+
+
 def sh(cmd, cwd=None, check=True, env=None, timeout=1800):
     e = dict(os.environ if env is None else env, GIT_TERMINAL_PROMPT="0")
     r = subprocess.run(cmd, cwd=cwd, env=e, capture_output=True, text=True, timeout=timeout)
     if check and r.returncode != 0:
-        raise RuntimeError(f"{' '.join(cmd[:3])} failed: {(r.stderr or r.stdout).strip()[-500:]}")
+        raise RuntimeError(f"{' '.join(cmd[:3])} failed: {diag(r.stderr or r.stdout, 500)}")
     return r
 
 
@@ -286,6 +294,64 @@ def review_findings_missing_refs(report):
     return [i.splitlines()[0].strip()[:160] for i in items if not NONE_ITEM.match(i) and not PATH_LINE.search(i)]
 
 
+def gh_json(cmd, cwd=None):
+    """(ok, data) for a gh call that prints JSON. ok is False on a nonzero exit, a missing gh or unparsable output."""
+    try:
+        r = sh(cmd, cwd=cwd, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False, None
+    if r.returncode != 0:
+        return False, None
+    try:
+        return True, json.loads(r.stdout or "")
+    except ValueError:
+        return False, None
+
+
+def live_pr(repo, ref, cwd=None):
+    """A fresh read of a PR (number or URL): {url, state, baseRefName}, or None when GitHub does not answer. Never cached:
+    a base or state read earlier in the run can be stale."""
+    ok, d = gh_json(["gh", "pr", "view", str(ref), "-R", repo, "--json", "url,state,baseRefName"], cwd)
+    return d if ok and isinstance(d, dict) and d.get("state") and d.get("url") else None
+
+
+def repo_default_branch(repo, cwd=None):
+    """The repo's actual default branch: GitHub first, then origin's HEAD symref. '' when neither answers. Never a guessed
+    "main": a repo can have both main and a different real default."""
+    ok, d = gh_json(["gh", "repo", "view", repo, "--json", "defaultBranchRef"], cwd)
+    name = ((d or {}).get("defaultBranchRef") or {}).get("name") if ok and isinstance(d, dict) else None
+    if name:
+        return str(name).strip()
+    try:
+        r = sh(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=cwd, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", r.stdout or "", re.M)
+    return m[1] if m else ""
+
+
+def fresh_pr_base(task_base, parent_base, default_lookup):
+    """(base, source) for a fresh PR (no target PR): the task's --base, then the parent's base, then the repo default. When the
+    default cannot be looked up the base is "" and --base is left out, so GitHub chooses."""
+    if task_base:
+        return str(task_base), "task --base"
+    if parent_base:
+        return str(parent_base), "base of the parent task"
+    default = default_lookup()
+    if default:
+        return default, "repo default; the task has no --base and no parent base"
+    return "", "the repo default branch could not be looked up, so --base is left for GitHub to choose"
+
+
+def no_pr(note, target_state=None):
+    """Finish fields for a publish that ends with no PR of this task's own. pr_url is an explicit None so the backend clears a
+    value stored by an earlier claim (absent would keep it)."""
+    out = {"pr_url": None, "publish_note": note}
+    if target_state:
+        out["target_pr_state"] = target_state
+    return out
+
+
 def build_prompt(task, mode="start", note=None):
     if task.get("report_only"):
         publish = "This is a report-only task. Do not commit, push or open a pull request. Deliver in REPORT.md and artifacts/."
@@ -407,7 +473,7 @@ class Runner(threading.Thread):
     def agent(self, *args, check=True, timeout=1800):
         r = subprocess.run(as_agent() + list(args), capture_output=True, text=True, timeout=timeout)
         if check and r.returncode != 0:
-            raise RuntimeError(f"agent-exec {args[0]} failed: {(r.stderr or r.stdout).strip()[-500:]}")
+            raise RuntimeError(f"agent-exec {args[0]} failed: {diag(r.stderr or r.stdout, 500)}")
         return r
 
     def stop_agent(self):
@@ -482,8 +548,10 @@ class Runner(threading.Thread):
         except ClaimLost:
             log("task", t["id"], "stopped: claim ended (cancelled, reaped or expired). Nothing published.")
         except Exception as e:
-            log("task", t["id"], "error", e)
-            status, extra = "failed", {"error": str(e)[:2000], "outcome": "worker_error"}
+            # redact the complete text first, then bound it, for both the runner log and /finish.error
+            err = swarm_gitlink.redact(str(e))
+            log("task", t["id"], "error", err[:2000])
+            status, extra = "failed", {"error": err[:2000], "outcome": "worker_error"}
         finally:
             try:
                 if status and not self.lost:
@@ -517,9 +585,9 @@ class Runner(threading.Thread):
         try:
             r = self.agent("cleanup", self.task["id"], check=False, timeout=300)
             if r.returncode != 0:
-                log("task", self.task["id"], "outbox cleanup failed:", (r.stderr or r.stdout).strip()[-300:])
+                log("task", self.task["id"], "outbox cleanup failed:", diag(r.stderr or r.stdout, 300))
         except Exception as e:
-            log("task", self.task["id"], "outbox cleanup failed:", e)
+            log("task", self.task["id"], "outbox cleanup failed:", swarm_gitlink.redact(str(e)))
 
     def fill_inbox(self):
         """Write the brief, an empty messages file and the attachments into the task's inbox folder."""
@@ -686,6 +754,11 @@ class Runner(threading.Thread):
             extra["unpushed_commits"] = g["unpushed"]
         if g.get("head"):
             extra["head_sha"] = g["head"]
+        if isinstance(g.get("gitlink_skipped"), list):  # an explicit [] is an observation too: it clears the old one
+            # Sanitize here, before the finish request (and any log) carries it; the backend sanitizes again.
+            gl = swarm_gitlink.public_gitlinks(g["gitlink_skipped"], limit=swarm_gitlink.MAX_STORED,
+                                               count=g.get("gitlink_skipped_count"))
+            extra["gitlink_skipped"], extra["gitlink_skipped_count"] = gl["items"], gl["count"]
         if code == 75:
             return "limit", extra
         status_raw = safe_read(self.outbox, "AGENT_STATUS", 20000) if fresh("AGENT_STATUS") else None
@@ -709,6 +782,16 @@ class Runner(threading.Thread):
                 self.warnings.append(f"{g['uncommitted']} uncommitted change(s) in the folder were not published")
             pub = self.publish(bundle)
             extra.update({k: v for k, v in pub.items() if k != "publish_error"})
+            if pub.get("publish_note") and report is not None:
+                # The owner reads the report: the publish outcome (no PR, terminal target, replacement) goes at its end.
+                full = safe_read(self.outbox, "REPORT.md", 25 * 1024 * 1024) or report
+                try:
+                    self.tapi("PUT", "/files/report/REPORT.md", raw=full + f"\n\n## Publish note\n{pub['publish_note']}\n".encode(),
+                              headers={"X-Claim-Id": self.claim_id})
+                except ClaimLost:
+                    raise
+                except Exception as e:
+                    self.warnings.append(f"the publish note was not added to REPORT.md ({str(e)[:200]})")
             if pub.get("publish_error"):
                 return "failed", dict(extra, outcome="publish_failed", error=pub["publish_error"])
             if word == "next":
@@ -758,7 +841,7 @@ class Runner(threading.Thread):
         try:
             r = sh(["git", "fetch", "--quiet", bpath, f"+HEAD:{work_ref}"], cwd=self.clone, check=False)
             if r.returncode != 0:
-                return {"publish_error": "could not read the work bundle: " + (r.stderr or "").strip()[-300:]}
+                return {"publish_error": "could not read the work bundle: " + diag(r.stderr, 300)}
         finally:
             os.remove(bpath)
         base = f"refs/heads/{target}" if self.remote_has(target) else f"refs/heads/{self.default_branch}"
@@ -772,30 +855,94 @@ class Runner(threading.Thread):
         if not chk.get("allowed"):
             self.warnings.append(f"not published: {chk.get('reason')}")
             return {}
+        before = sh(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{target}"], cwd=self.clone, check=False).stdout.strip()
+        new_commits = int(sh(["git", "rev-list", "--count", work_ref, "--not", before], cwd=self.clone).stdout.strip() or 0) \
+            if before else None
         try:
             sh(["git", "push", "--quiet", "origin", f"{work_ref}:refs/heads/{target}"], cwd=self.clone)
         except Exception as e:
-            return {"publish_error": str(e)[:1000]}
+            return {"publish_error": swarm_gitlink.redact(str(e))[:1000]}
+        sha = sh(["git", "rev-parse", work_ref], cwd=self.clone).stdout.strip()
         out = {"pushed_branch": target}
-        if t.get("open_pr") and not t.get("pr_number") and not t.get("push_main"):
-            try:
-                existing = sh(["gh", "pr", "list", "-R", t["repo"], "--head", target, "--json", "url", "-q", ".[0].url"],
-                              cwd=self.clone, check=False).stdout.strip()
-                if existing:
-                    out["pr_url"] = existing
-                else:
-                    body = safe_read(self.outbox, "PR_DESCRIPTION.md", 60000) or safe_read(self.outbox, "REPORT.md", 60000) or t["prompt"].encode()
-                    bpath = os.path.join(RUNNER_DIR, f"pr-body-{t['id']}.md")
-                    with open(bpath, "wb") as fh:
-                        fh.write(body)
-                    title = (t.get("title") or t["prompt"].strip().splitlines()[0])[:120]
-                    r = sh(["gh", "pr", "create", "-R", t["repo"], "--draft", "--head", target, "--base", self.default_branch,
-                            "--title", title, "--body-file", bpath], cwd=self.clone)
-                    os.remove(bpath)
-                    out["pr_url"] = r.stdout.strip().splitlines()[-1]
-            except Exception as e:
-                out["publish_error"] = "pushed, but the draft PR failed: " + str(e)[:800]
+        if t.get("push_main"):
+            return out
+        try:
+            out.update(self.publish_pr(target, sha, new_commits))
+        except Exception as e:
+            out["publish_error"] = "pushed, but the PR step failed: " + swarm_gitlink.redact(str(e))[:800]
         return out
+
+    # ---------- the PR step (docs/concepts.md, "Pull requests") ----------
+    def pr_target(self, branch):
+        """The identified PR this task updates: --pr-number, else the parent's PR when this follow-up works on the parent's
+        branch. None for a fresh task."""
+        t = self.task
+        if t.get("pr_number"):
+            return str(t["pr_number"])
+        p = t.get("parent") or {}
+        if t.get("follow_up") and p.get("pr_url") and branch == (p.get("pushed_branch") or p.get("branch")):
+            return p["pr_url"]
+        return None
+
+    def publish_pr(self, branch, sha, new_commits):
+        """After a successful push: report, reuse or open the PR. Returns the finish fields. open_pr=0 is an absolute veto on
+        creating a PR. pr_url is None (explicit, so the backend clears an earlier value) whenever this task has no PR of its own."""
+        t = self.task
+        tgt = self.pr_target(branch)
+        if not tgt:
+            if not t.get("open_pr"):
+                return {}
+            existing = sh(["gh", "pr", "list", "-R", t["repo"], "--head", branch, "--json", "url", "-q", ".[0].url"],
+                          cwd=self.clone, check=False).stdout.strip()
+            if existing:
+                return {"pr_url": existing}
+            base, src = fresh_pr_base(t.get("base"), (t.get("parent") or {}).get("base"), lambda: repo_default_branch(t["repo"], self.clone))
+            return {"pr_url": self.create_pr(branch, base), "pr_base_note": f"Opened a PR from {branch} against "
+                    f"{base or 'the GitHub default base'} ({src})."}
+        pv = live_pr(t["repo"], tgt, self.clone)
+        at = f"This task's commits are on branch {branch} at {sha[:12]}"
+        if pv is None:
+            return no_pr(f"Target PR {tgt} could not be read after the push (gh pr view failed). {at}. No PR was opened, "
+                         f"and {tgt} is not reported as this task's PR.")
+        state = str(pv["state"]).upper()
+        if state == "OPEN":
+            return {"pr_url": pv["url"]}  # the push updated the target PR; this is not a new PR
+        ctx = f"Target PR {pv['url']} was {state.lower()} before publish. "
+        base = (pv.get("baseRefName") or "").strip()
+        why = None
+        if new_commits == 0:
+            why = "this task added no new commits to its branch"
+        elif not t.get("open_pr"):
+            why = "the task did not allow opening a PR (open_pr not set); the owner bot can queue a PR task"
+        elif not base:
+            why = ("the target's live base branch is unknown; a target PR's base is never replaced by the task's --base, the "
+                   "parent's base or the repo default. The owner bot can queue a fresh PR task with an explicit --base")
+        if why:
+            return no_pr(f"{ctx}{at}. No PR was opened because {why}. The {state.lower()} PR is not reported as this "
+                         "task's PR or as merged by it.", state)
+        unused = [f"{k} {v}" for k, v in (("task --base", t.get("base")), ("parent base", (t.get("parent") or {}).get("base")))
+                  if v and str(v) != base]
+        url = self.create_pr(branch, base)
+        return {"pr_url": url, "target_pr_state": state,
+                "publish_note": f"{ctx}{at}. Opened replacement PR {url} against {base}, the target's live base"
+                                + (f" ({' and '.join(unused)} not used)" if unused else "") + "."}
+
+    def create_pr(self, branch, base):
+        """The only gh pr create call. base '' leaves --base out so GitHub picks the repo default."""
+        t = self.task
+        if not t.get("open_pr"):
+            raise RuntimeError("refusing to open a PR: the task did not allow it")
+        body = safe_read(self.outbox, "PR_DESCRIPTION.md", 60000) or safe_read(self.outbox, "REPORT.md", 60000) or t["prompt"].encode()
+        bpath = os.path.join(RUNNER_DIR, f"pr-body-{t['id']}.md")
+        with open(bpath, "wb") as fh:
+            fh.write(body)
+        title = (t.get("title") or t["prompt"].strip().splitlines()[0])[:120]
+        try:
+            r = sh(["gh", "pr", "create", "-R", t["repo"], "--draft", "--head", branch] + (["--base", base] if base else []) +
+                   ["--title", title, "--body-file", bpath], cwd=self.clone)
+        finally:
+            os.remove(bpath)
+        return r.stdout.strip().splitlines()[-1]
 
     def run_script(self, t):
         cmd = ["bash", "-c", 'mkdir -p artifacts; exec >artifacts/script.log 2>&1; exec bash -lc "$1"', "swarm-script", t["command"]]
@@ -820,7 +967,8 @@ class Runner(threading.Thread):
     def finish(self, status, extra):
         if self.warnings:
             extra = dict(extra, warnings=self.warnings)
-        body = dict({k: v for k, v in extra.items() if v is not None}, status=status, worker=NAME, claim_id=self.claim_id)
+        # pr_url None is kept: it tells the backend to clear a PR URL an earlier claim stored (absent keeps it).
+        body = dict({k: v for k, v in extra.items() if v is not None or k == "pr_url"}, status=status, worker=NAME, claim_id=self.claim_id)
         for attempt in range(6):
             try:
                 r = self.tapi("POST", "/finish", body)

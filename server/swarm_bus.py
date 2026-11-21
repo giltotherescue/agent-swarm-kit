@@ -21,6 +21,8 @@ import sys
 import threading
 import time
 
+import swarm_gitlink
+
 # Timestamps are whole seconds, like the rest of the kit.
 BODY_MAX = 3700            # the tmux header adds ~250; the supervisor pastes at most 4,000 characters
 TMUX_TOTAL_MAX = 4000
@@ -40,6 +42,8 @@ DIGEST_DEFAULT = 60
 DIGEST_MIN = 5            # a zero-minute digest would defeat the atomic per-recipient claim
 DIGEST_MAX = 7 * 24 * 60
 DIGEST_BATCH = 50
+POLL_WINDOW_MIN = 10
+POLL_WINDOW_MAX = 7 * 24 * 60
 RETENTION_BATCH = 500
 SYSTEM = "agent-control"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
@@ -236,8 +240,10 @@ class Bus:
             if not o["last_heartbeat_at"] or t - o["last_heartbeat_at"] > STALE:
                 return self._reach(False, "orchestrator has not sent a heartbeat for 10 minutes")
             return self._reach(True)
-        if not a["last_seen_at"] or t - a["last_seen_at"] > STALE:
-            return self._reach(False, "has not checked in for 10 minutes")
+        # A poll agent may declare how often it checks in (poll_window_minutes), so a daily poller is not unreachable after 10 minutes.
+        win = a.get("poll_window_minutes")
+        if not a["last_seen_at"] or t - a["last_seen_at"] > (win * 60 if win else STALE):
+            return self._reach(False, f"has not checked in for {win if win else 10} minutes")
         return self._reach(True)
 
     # ---------------- shapes ----------------
@@ -259,6 +265,7 @@ class Bus:
         return {"name": a["name"], "kind": a["kind"], "wake": a["wake"], "bot_id": a["bot_id"], "orchestrator": a["orchestrator"],
                 "description": a["description"], "notices": a["notices"],
                 "digest_minutes": max(DIGEST_MIN, a["digest_minutes"] if a["digest_minutes"] is not None else DIGEST_DEFAULT),
+                "poll_window_minutes": a.get("poll_window_minutes"),
                 "unreachable_since": a["unreachable_since"], "last_digest_at": a["last_digest_at"], "last_seen_at": a["last_seen_at"],
                 "retired_at": a["retired_at"], "aliases": aliases, "reachable": r["reachable"], "reason": r["reason"]}
 
@@ -709,6 +716,9 @@ class Bus:
             lines.append(f"Landed on GitHub: {'yes' if p['landed'] else 'no'}")
         if p.get("question"):
             lines.append(f"Question: {p['question']}")
+        gw = swarm_gitlink.warning_line(p.get("gitlink_skipped") or [], p.get("gitlink_skipped_count") or 0)
+        if gw:
+            lines.append(gw)  # before the report excerpt, so a long report cannot push it out
         lines.append(f"Report: GET /tasks/{task['id']}/report (your bus token can read it)")
         body = self.be.scrub("\n".join(lines))
         room = BODY_MAX - len(body) - 40
@@ -878,6 +888,13 @@ class Bus:
         dm = pick("digest_minutes", DIGEST_DEFAULT)
         if not isinstance(dm, int) or isinstance(dm, bool) or dm < DIGEST_MIN or dm > DIGEST_MAX:
             return 400, {"error": f"digest_minutes must be a whole number from {DIGEST_MIN} to {DIGEST_MAX}"}
+        # poll_window_minutes: wake poll only; sent null clears it, left out keeps it (and drops it if the wake is no longer poll).
+        if "poll_window_minutes" in b:
+            pw = b["poll_window_minutes"]
+            if pw is not None and (wake != "poll" or not isinstance(pw, int) or isinstance(pw, bool) or pw < POLL_WINDOW_MIN or pw > POLL_WINDOW_MAX):
+                return 400, {"error": f"poll_window_minutes is for wake poll only: a whole number from {POLL_WINDOW_MIN} to {POLL_WINDOW_MAX} (or null)"}
+        else:
+            pw = cur.get("poll_window_minutes") if cur and wake == "poll" else None
         bot_id = orch = None
         if wake == "webhook":
             raw = pick("bot_id")
@@ -921,6 +938,7 @@ class Bus:
                 self.s.run("DELETE FROM agent_aliases WHERE name = ?", name)
                 for al in aliases:
                     self.s.run("INSERT INTO agent_aliases(alias, name, created_at) VALUES(?,?,?)", al, name, t)
+            self.s.run("UPDATE agents SET poll_window_minutes = ? WHERE name = ?", pw, name)
         return (200 if cur else 201), self.shape_agent(self.s.one("SELECT * FROM agents WHERE name = ?", name))
 
     # ---------------- human page ----------------

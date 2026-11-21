@@ -58,9 +58,18 @@ class BusTest(unittest.TestCase):
             r = Done()
             r.stdout = json.dumps({"alive": True, "dead": False, "tail": "", "screen": IDLE_SCREEN, "pid": 1})
             return r
-        if args[0] == "orch-send":
-            with open(os.path.join(self.sup.inbox, "message.md")) as fh:
+        if args[0] == "orch-capture":
+            r = Done()
+            r.stdout = json.dumps({"pane": "%1", "screen": IDLE_SCREEN})
+            return r
+        if args[0] == "orch-type":   # what reaches the session: the message file when there is one, else the line
+            name = "message.md" if "--id" in args else "line.txt"
+            with open(os.path.join(self.sup.inbox, name)) as fh:
                 self.sent.append(fh.read())
+        if args[0] == "orch-enter":
+            r = Done()
+            r.stdout = json.dumps({"state": "submitted"})
+            return r
         return Done()
 
     def ready(self, message=None):
@@ -173,15 +182,13 @@ class BusTest(unittest.TestCase):
     def test_clean_text_unit(self):
         self.assertEqual(so.clean_text("a\x1b[201~b\rc\x1bd\x80e\x9ff\n\tg"), "a[201~bcdef\n\tg")
 
-    def test_oversized_message_cut_with_marker_and_no_event(self):
-        self.ready({"id": 7, "sender": "chief", "text": "a" * (so.MESSAGE_MAX + 50)})
+    def test_long_message_goes_whole_into_the_file(self):
+        self.ready({"id": 7, "sender": "chief", "text": "bus #9 " + "a" * 20000})
         out = io.StringIO()
         with redirect_stdout(out):
             self.sup.deliver()
-        self.assertIn("message cut, 50 characters omitted", self.sent[0])
-        self.assertIn("message-truncated", out.getvalue())
-        self.assertEqual(self.sup.events, [])     # the backend accepts no such event type
-
+        self.assertIn("a" * 20000 + "\n", self.sent[0])   # nothing cut: the pointer line stays short
+        self.assertEqual(len(self.sent), 1)
 
 if __name__ == "__main__":
     unittest.main()

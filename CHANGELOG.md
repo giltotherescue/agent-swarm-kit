@@ -4,99 +4,98 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
-## 0.8.1 (2026-11-21)
+## 0.8.1 (unreleased)
 
-Queued messages now reach an orchestrator during a long busy turn (agent-control PR 64).
+Primary/fallback worker routing, ported from agent-control PR 68. See [docs/multi-worker.md](docs/multi-worker.md).
 
-- **Busy delivery.** While the session is working (the spinner keeps the pane changing) the supervisor used to wait for
-  an idle pane, so a message could sit for the whole turn. Now the oldest queued message is pasted once it is
-  `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90) old, or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when the first line of the
-  message says `URGENT`. The age counts from when the backend queued it, not from when the supervisor noticed it, and
-  the supervisor wakes for that moment instead of its normal 10 second poll, so an urgent message lands about 15 seconds
-  after it was sent. Claude Code queues it for the agent's next step. After a busy paste the rest of a continuous backlog
-  follows `SWARM_ORCH_BUSY_GAP_SECONDS` (5) apart, whatever its own priority; once the queue has been empty a new message
-  waits its full time again. Idle delivery on an empty prompt is unchanged (at once).
-- **Fail closed, like agent-control PR 67.** Nothing is pasted and no Enter pressed unless the pane shows a confirmed
-  empty Claude Code input box: idle delivery, busy delivery, the Enter retry and the stop/restart/delete wrap-up alike.
-  A choice menu, a draft, a footer it does not recognize, a screen with no readable box, or a failed capture holds the
-  message (and skips the wrap-up; the session then ends at the stop deadline, 120 s). The one exception is a
-  positively identified box-less stand-in: `SWARM_ORCH_PANE_ADAPTER=plain`, set explicitly by the kit's tmux tests for
-  their fake Claude. With it, a readable screen with no box parts at all (no rule, no prompt line) and no menu takes an
-  idle delivery or the wrap-up; never a busy paste, and never an empty or failed capture. Missing chrome alone is never
-  taken as a stand-in.
-- **The box is read from the bottom, by one parser.** `agent-exec` defines the pane parser and the supervisor loads
-  that same file (agent-exec is installed alone and runs with `python3 -I`, so the parser lives there), so both read a
-  capture the same way; paired contract tests pass identical captures through both. The last rule is the box's bottom
-  and the nearest rule above it (at most 20 rows up) its top; the first row under the top must be the prompt. Under the
-  bottom there must be 1 to 8 rows, each made only of whole status items seen in real captures (split where Claude Code
-  leaves two or more spaces between its columns): the mode line (`⏵⏵ bypass permissions on (shift+tab to cycle)` and
-  its ` · esc to interrupt`, ` · ← for agents` suffixes; the mode is the variable field), `? for shortcuts`,
-  `paste again to expand`, `esc to interrupt`, `Press Ctrl-C again to exit`, `Not logged in · Run /login`,
-  `✘ Auto-update failed: <reason> · Run claude doctor`, `✓ Update installed`, the tmux focus-events note and
-  `◐ <level> · /effort`. Anything else, including a known item with more text after it (`? for shortcuts are documented
-  here`), is `unknown_footer`. An empty box is exactly one prompt row between an unindented rule and the identical rule
-  (or a rounded box with both side bars on every row). The box is a draft when the rules differ or when anywhere higher
-  on the screen another prompt line sits right under a rule (two candidate boxes: the top may be a rule pasted inside a
-  taller draft). The only hint counted as empty is the verified literal `Press up to edit queued messages`; a quoted
-  `Try "..."` cannot be told from typed text, so it is a draft.
-- **Captured again at the send boundary.** Right before each paste (after the message poll and any other network work)
-  and before each Enter retry, the supervisor reads the pane again; the wrap-up started inside a heartbeat (an admin
-  restart) does the same. With a readable box at the bottom only its footer can hold an active menu: words above it are
-  history and the box's contents are data, so a message quoting "Enter to confirm" is not a menu. If the fresh capture
-  shows the pane became busy during the message poll, the busy wait applies before anything is pasted.
-- **Enter submits only the pasted text.** Before every Enter (in `agent-exec orch-send` and in the supervisor's retry)
-  the whole unambiguous box must hold exactly the pasted text. Whitespace runs (wrapping, indentation, line breaks) are
-  collapsed to one space on both sides, not deleted, so an edit that adds or removes a space inside a line is a
-  difference; side bars are removed only in a rounded box. A prefix of the message followed by other text, someone
-  else's draft above it, or prose such as `my notes about [Pasted text` gets no Enter. Claude Code's collapsed
-  `[Pasted text #N +K lines]` marker is opaque (nothing ties it to this message, for example after a timed-out
-  `orch-send`): it never gets Enter and never a receipt; `orch-send` exits 7 and the supervisor defers the message with
-  `reason=not_verifiable`.
-- **No false receipts.** `agent-exec orch-send` exits 5 when nothing was pasted, 6 when the paste went in but Enter
-  failed, and 7 when it pasted but withheld Enter because the pane turned into a menu or the pasted text left the
-  box. The supervisor separates a definite failure before anything was typed (5, 2, 4, or agent-exec not starting:
-  pasted again later), a confirmed paste that was not submitted (6, 7: only Enter is retried, and only while the pasted
-  text is still in the box), and an unknown outcome (a timeout, an unexpected exit): Enter only if exactly the text
-  is still in the box; if the box is empty the message is left unacknowledged, never pasted again, and reported once as
-  a `delivery-unknown` event. The hold, an outstanding unsubmitted paste and a pending receipt are kept in the state file
-  (`<state dir>/orchestrators/NAME.json`), so a replacement supervisor does not paste the message again either. A hold
-  ends only when the backend no longer has the message pending or an admin runs `swarmctl orchestrator release NAME ID`
-  (it arrived: marked delivered, nothing typed) or `... --resend` (paste it once more), through the new admin route
-  `POST /orchestrators/NAME/messages/ID/release` (`orchestrator_messages.release_count`, added in place). The wrap-up's single Enter retry follows the same rule. If only the receipt
-  failed, only the receipt is retried. A cached message is dropped as soon as a heartbeat says nothing is queued.
-- **Visible deferral.** A message the pane holds back for `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per
-  message and reason as a `delivery-deferred` event, `reason=unknown_footer|draft|menu|unreadable` (the same reasons
-  as agent-control PR 67's fix round), plus `paste_failed`, `submit_failed` (Enter keeps failing) and `submit_unknown`
-  (Enter keeps timing out while the text stays in the box), and `not_verifiable` (a collapsed paste marker), with no
-  pane contents. The timer runs from the first hold of that message and survives a failed heartbeat; it
-  is cleared only when a heartbeat confirms the queue head changed. A deferral never times out into a paste.
-- **First-run screens.** A first-run screen is answered only when its whole dialog is the bottom of the pane: no input
-  box anywhere on screen (box contents and history are data, so a draft mentioning "Security notes" gets nothing), the
-  last line is the dialog's key hint (`Enter to confirm`, `Press Enter to continue`, ...), and the dialog's title sits
-  at most 15 lines above it with no rule in between. The folder trust question is answered from its selection, in both
-  wordings: Claude Code's current "Quick safety check: Is this a project you created or one you trust?" (`❯ No, exit`
-  preselected, Yes below: Down) and the older "Do you trust the files in this folder?" (Yes above: Up). Enter only once
-  the one `❯` is on the Yes option; two selections, none, or a `❯` on anything else send nothing (a screen that does
-  not move ends as `needs-login`). A sign-in or API-key screen is never answered.
-- **Busy event recorded once.** The supervisor sends `delivered_busy_seconds` with the receipt and the backend records a
-  `message-delivered-busy` event in the same first-delivery update as `message-delivered`, so a replayed receipt never
-  records it twice. The backend still accepts `message-delivered-busy` in heartbeat events.
-- **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. While busy the supervisor also asks for the
-  next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS` (so a message's wait can be timed).
-- **Older backend fallback, narrowly.** Only the backend's exact `bad event type 'delivery-deferred'` (or
-  `'delivery-unknown'`) 400 makes the supervisor drop those two events and carry on; any other 400 keeps every event
-  for the retry and sets the usual refusal state.
-- **Python 3.11.** `server/swarm_bus.py` no longer uses a backslash inside an f-string expression, so it imports on
-  Python 3.11 again.
-- Tests: `tests/test_orchestrator_busy.py` runs the real supervisor loop on a fake clock (max wait from enqueue time,
-  urgent at about 15 s, backlog at the gap, empty-reply reset, null reply, paste/Enter failures, pre-launch failure,
-  unknown outcomes, receipt replay, idle menu/draft, deferral events, the trust screen, wrap-up from a restart
-  heartbeat) with real Claude Code captures in `tests/fixtures/panes/`, plus `agent-exec`'s check between paste and
-  Enter and every probe of the second review; urgent-head test in `tests/test_bus.py`, replayed busy receipt in
-  `tests/test_orchestrator.py`. `tests/test_orchestrator_round3.py` turns the third review's probes into tests: the
-  shared-parser contract, collapsed-marker identity, ambiguous boxes and footer prefixes, first-run drafts and both
-  trust wordings, a replacement supervisor with a held message (and its release), repeated Enter timeouts, and an
-  unrelated HTTP 400; the release route is in `tests/test_orchestrator.py`.
+- **Optional primary worker.** New backend setting `SWARM_PRIMARY_WORKER`, empty by default (first-come, as before). When
+  set, other workers take an unpinned task only if the primary is stale (`SWARM_PRIMARY_STALE_SECONDS`, 90), never seen or
+  draining, the task has waited `SWARM_FALLBACK_AFTER_SECONDS` (120), the project is off the primary's allowlist, or the
+  task's workspace is on the claiming worker. Pins (`--worker`) override. See docs/multi-worker.md.
+- **No schema change.** Liveness reuses the existing `workers.last_seen`, already written on every claim and heartbeat.
+- **Not ported:** the `remote-run-broker` socket setting and LaunchAgent example; the kit ships no remote-run broker.
+
+The review queue, a simple port of agent-control PR 62. See [docs/review-queue.md](docs/review-queue.md).
+
+- **File, list, decide.** Bots file items (`decision`, `copy`, `creative`, `social_post`, `deliverable`, `pr`) with
+  `PUT /review/items`, upserted by project, bot and key (new revision on change, `unchanged` on an identical re-send,
+  reopened after changes requested, a new item after approve or reject). The admin token or Chief decides with
+  `POST /review/items/ID/decision`: approve, changes or reject, with an optional note, edited text and chosen option. New
+  `review_items` table, added in place; `swarmctl review-queue` (`swarmctl rq`) file|list|show|decide|ack|close.
+- **Stale-click guard.** Every read carries `content_hash` (SHA-256 of the ask, options and recommendation). A decision must
+  send it; a missing or changed hash gets 409 `stale` and nothing is recorded.
+- **Delivery.** The decision goes to the filing bot's bus agent as an urgent message on thread `review:ID` (pointer-only if
+  the text is too long or refused). A bot without a bus agent reads it from `GET /review/items?status=answered&acked=0`.
+  `POST /review/items/ID/ack` marks it consumed (and the bus message read).
+- **Poll window.** Poll agents may set `poll_window_minutes` (10 to 10080; `swarmctl bus register --poll-window`) so they are
+  not reported unreachable between check-ins. New `agents.poll_window_minutes` column, added in place.
+- **Not ported:** the dashboard UI, meeting flags, SLA alerts, batches and sync, media, fill-ins and variants, the legacy
+  item migration, and linked-task propagation with its retry ledger.
+
+Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).
+
+- **Submodule gitlinks are never auto-committed.** The kit's auto-commits, the backend's weekly project-log export and `swarmctl log export --dir DIR --git`, share one guarded commit. It runs in a copy of the index and unstages added, modified and deleted gitlinks (index mode 160000), found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A pin replaced by files, a pin and an ordinary file at the same path, a git error, a 60-second git timeout or a gitlink still staged aborts the commit and leaves the caller's index untouched. The commit is built with plumbing from exactly the inspected index (`write-tree`, `commit-tree`, compare-and-swap `update-ref`), so repository hooks never run for these automated commits: a formatting hook cannot stage the skipped pin, and a slow post-commit hook cannot report a failure after HEAD moved. `swarmctl log export --git` no longer runs `git add -A` on the real index or passes git's output through; it prints a redacted skip note, and on a failure a redacted error with exit code 1. The stock worker still never commits leftover work.
+- **Skips are recorded.** A finish may carry `gitlink_skipped` (path, old sha, new sha; at most 200) and `gitlink_skipped_count` (the true total). They are stored on the task, posted as a `publish` event, kept as exactly one note in the stored REPORT.md (also on publish failures; the note sits between `<!-- swarm:gitlink-skip-note -->` and `<!-- /swarm:gitlink-skip-note -->` lines, so report prose quoting its wording or a marker does not count) and added to bus notices (a WARNING line ahead of the report excerpt) and legacy webhook payloads (at most 10 entries, plus the true count). Each finish that sends `gitlink_skipped` replaces the earlier observation, also on a resumed claim; an explicit `[]` clears the list, the count and the note, and omitting the field keeps them and puts the note into the current report (also a fresh one uploaded by a resumed run). Only a generated block, each marker alone on its own line, is ever removed from a report; a marker quoted in prose is left alone.
+- **Redacted at the source, before truncation.** Every gitlink field, every log or error line that names one, and git's stderr in an export error goes through the secret patterns and agent-control's key=value rule (`TOKEN=...` becomes `TOKEN=[redacted]`) on the full value, in the worker before sending (including a failing collector's diagnostic and the `/finish` error), in both exports before logging, and again in the backend before storage, bus or webhook. A token-shaped path no longer gets the bus notice rejected.
+- **`swarmctl enqueue --allow-gitlink`** records that a pin bump is intended (task field `allow_gitlink`: `true`, `1`, `"true"`, `"1"` or `"yes"` opt in; `false`, `0`, `"false"`, `"0"`, `"no"` or `""` do not; anything else, including JSON `null`, is a 400). A follow-up inherits the parent's value only when it omits the field; an explicit value, JSON `false` included, overrides it. It is metadata for a worker that auto-commits; with the stock kit, commit an intentional pin bump explicitly.
+
+The publish policy, ported from agent-control PR 65 where the kit publishes. See docs/concepts.md, "Pull requests".
+
+- **`open_pr` is an absolute veto.** Only `--pr` opens a PR. The worker's single `gh pr create` call refuses without it,
+  and the backend drops (with a warning event) a PR link reported by a task without `--pr` unless it is the PR the task
+  was told to update (`--pr-number` or the parent's PR it inherited as a follow-up).
+- **PR base, never a guessed `main`.** A replacement for a merged or closed target PR uses that PR's live base, read from
+  GitHub after the push; if it cannot be read, no PR is opened. A fresh PR uses `--base`, then the parent's base, then the
+  repo default as GitHub (or origin's HEAD) reports it; if neither answers, `--base` is left out and GitHub chooses.
+- **Terminal targets reported honestly.** A `--pr-number` or inherited follow-up PR that was merged or closed is never
+  reported as the task's PR or as merged by it. The work is still pushed; the branch, commit and reason go to a publish
+  event (with `target_pr_state`) and a `## Publish note` at the end of REPORT.md. An open target is now reported as the
+  task's `pr_url` (a `--pr --pr-number N` task used to end "no PR was confirmed").
+- **Explicit null clears.** A finish with `pr_url: null` clears a PR link an earlier claim stored; an absent `pr_url`
+  keeps it.
+- **`--base` is persisted** (`swarmctl enqueue --base NAME`, new `tasks.base` column added in place): inherited by
+  follow-ups, and kept when a follow-up answers a waiting task, only when the answer is accepted. `POST /tasks/ID/answer`
+  takes `base` the same way.
+- **Not ported:** PR 65's merge gate (CI allowlist, null/empty rollup handling, SHA-pinned REST merge, auto-merge
+  disable) and deploy credit. The kit never merges or deploys; a human merges.
+
+Orchestrator message delivery during long busy turns, and one-line pointer delivery, ported from agent-control PRs 64
+and 67. See [docs/orchestrators.md](docs/orchestrators.md) and [docs/agent-bus.md](docs/agent-bus.md).
+
+- **Busy delivery.** A working session no longer holds its queue for the whole turn. The oldest queued message is sent once
+  it is `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90) old, or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when its first line
+  says `URGENT`, counted from when the backend queued it; the rest of a continuous backlog follows
+  `SWARM_ORCH_BUSY_GAP_SECONDS` (5) apart. Idle delivery on an empty prompt is unchanged (at once).
+- **One typed pointer line.** Claude Code 2.1.321 collapses a pasted multi-line message into `[Pasted text #N +L lines]`,
+  which cannot be verified, so nothing multi-line is pasted any more. A bus message (header and body) is written by
+  `agent-exec` to `<WORK>/orchestrators/NAME/.orchestrator/inbox/msg-ID.md` (mode 0600, written atomically, newest 200
+  and at most 7 days kept) and the session gets one line typed as literal keys: `New bus message #41 from chief
+  (URGENT): read <that path>`. A short one-line direct message is typed as is, `[Message from SENDER via swarm] TEXT`.
+- **Verified, recorded, then Enter.** `agent-exec orch-type` types the line into a confirmed empty editor and waits until
+  the editor holds exactly it (rows joined by display width, so an 80x24 pane works); otherwise it erases its own partial
+  text and no Enter follows. The supervisor then saves a `sending` record (fsync) and `agent-exec orch-enter` captures the
+  same pane ID again, presses Enter only while the editor still holds exactly the line, and confirms. A receipt needs the
+  line itself above the editor more often than before typing; Claude Code's generic queued-message hint is not one.
+- **Recovery never retypes.** After a crash the record decides: the line above the editor is a receipt, the line still
+  in the editor gets Enter (at most 3 in all), anything else is held and reported once as `delivery-unknown`. Holds,
+  sending records and pending receipts live in the state file, so a replacement supervisor never types a message twice.
+- **Release.** `swarmctl orchestrator release NAME ID` marks a held message delivered; `--resend` allows exactly one more
+  typing, used up (saved) before the keys go in; if it does not land the message is held again. New admin route
+  `POST /orchestrators/NAME/messages/ID/release` and column `orchestrator_messages.release_count`, added in place.
+- **Fail closed.** Nothing is typed and no Enter pressed on a menu, a draft, an unknown footer, an unreadable pane or a
+  failed capture, during idle and busy delivery and the stop wrap-up alike. A message held back for
+  `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per reason as a `delivery-deferred` event, with no pane
+  contents. One pane parser, defined in `agent-exec` and loaded by the supervisor.
+- **Sign-in and first-run screens.** Sign-in text above a live, empty editor (a tool printing `Invalid API key`) is
+  conversation output and no longer ends a healthy session as `needs-login`. The 2.1.321 theme picker (no key hint) is
+  recognized from its full layout and gets Enter; the folder trust question is answered from its selection. First-run
+  keys are sent only in the first 120 seconds after start; a first-run screen later is reported, never answered.
+- **Busy event recorded once.** The receipt carries `delivered_busy_seconds` and the backend records
+  `message-delivered-busy` in the same first-delivery update as `message-delivered`.
+- **Older backend fallback.** Only the exact `bad event type` 400 for the two new event types makes the supervisor drop
+  them; any other 400 keeps every event. `server/swarm_bus.py` imports on Python 3.11 again.
+- **Rollout.** The supervisor and `agent-exec` change together (`orch-send` is replaced by `orch-capture`, `orch-type` and
+  `orch-enter`); update both, then restart the orchestrator supervisor. See docs/updating-the-kit.md.
 
 ## 0.8.0 (2026-11-21)
 

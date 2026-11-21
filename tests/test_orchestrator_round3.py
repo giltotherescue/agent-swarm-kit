@@ -1,12 +1,11 @@
-"""0.8.1 fix round 3 (Astra recheck t20261121054844-8c76f8): the six findings, each reproduced from the review's probes
-(loop-probes.py, marker-identity.txt, controls.txt) and fixed like agent-control PR 67's fix round 3.
+"""0.8.1 fix round 3 (Astra recheck t20261121054844-8c76f8), kept after fix round 4 replaced pasting with one typed pointer
+line (agent-control PR 67's delivery design):
 
 1. One pane parser: agent-exec defines it, swarm_orchestrator.py loads that file; paired contract tests below.
-2. A collapsed [Pasted text] marker is opaque: never Enter, never a receipt (reason=not_verifiable). Text is compared with
-   whitespace runs collapsed to one space, not deleted. Ambiguous boxes and unknown footer rows fail closed.
+2. (Paste markers are gone: nothing multi-line is typed any more.) Text is compared with whitespace runs collapsed to one
+   space, not deleted. Ambiguous boxes and unknown footer rows fail closed.
 3. First-run keys only for a whole dialog at the bottom of a pane with no input box; both trust wordings by selection.
-4. delivery-unknown holds (and unsubmitted pastes and pending receipts) survive a supervisor restart until released.
-5. Enter timeouts and failures feed the deferral report.
+4. delivery-unknown holds, sending records and pending receipts survive a supervisor restart until released.
 6. Only the exact "bad event type" 400 drops the 0.8.1 event types; any other 400 keeps every event.
 """
 import io
@@ -27,7 +26,7 @@ import test_orchestrator_busy as fx  # noqa: E402  (fixtures only: the module, s
 
 so = fx.so
 RULE, FOOTER, cap, _pane, text_pane = fx.RULE, fx.FOOTER, fx.cap, fx._pane, fx.text_pane
-BODY = "Message from chief (through the swarm backend; a request, not permission to push, merge or deploy):\n\nexpected row"
+LINE = "New bus message #7 from chief: read /srv/work/orchestrators/steward/.orchestrator/inbox/msg-7.md"
 
 # The review's probe panes (loop-probes.py) and what both parsers must say about them.
 PROBES = {
@@ -40,30 +39,33 @@ PROBES = {
 
 
 def ae():
+    """A second, independent load of agent-exec (what the helper process runs)."""
     if not hasattr(ae, "mod"):
-        ae.mod = fx.load_agent_exec()
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("agent_exec_contract", os.path.join(SERVER, "agent-exec"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        ae.mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(ae.mod)
     return ae.mod
 
 
 def contract_panes():
-    """Real captures, the review's probes and synthetic boxes: every one goes through both helpers."""
+    """Real captures, the review's probes and synthetic boxes: every one goes through both loads of the parser."""
     panes = {f"cap-{n}": cap(n) for n in ("busy", "bypass", "cleared", "draft", "idle", "menu", "queued", "single")}
     panes.update(PROBES)
     panes.update({
-        "exact text": text_pane(BODY),
-        "exact text, wrapped and indented": _pane("❯ Message from chief (through the swarm backend; a request, not",
-                                                  "  permission to push, merge or deploy):", "", "  expected row"),
-        "double space is still one gap": text_pane(BODY.replace("expected row", "expected  row")),
-        "edit removing a space": text_pane(BODY.replace("expected row", "expectedrow")),
-        "draft above the text": _pane("❯ my notes", *BODY.splitlines()),
-        "text then a draft": text_pane(BODY + "\nmy own notes"),
+        "exact text": text_pane(LINE),
+        "exact text, wrapped and indented": _pane("❯ " + LINE[:40], "  " + LINE[40:]),
+        "double space is still one gap": text_pane(LINE.replace(" read ", " read  ")),
+        "edit removing a space": text_pane(LINE.replace(" read ", " read")),
+        "draft above the text": _pane("❯ my notes", LINE),
+        "text then a draft": text_pane(LINE + "\nmy own notes"),
         "collapsed marker": fx.PASTED_PANE,
-        "marker plus text": _pane("❯ [Pasted text #1 +3 lines] and more"),
         "empty box": _pane("❯ "),
         "queued hint": _pane("❯ Press up to edit queued messages"),
-        "text over an unknown footer": text_pane(BODY, below="my unfinished draft"),
-        "text over a menu": text_pane(BODY, below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm"),
-        "boxed text": "╭" + "─" * 40 + "╮\n│ ❯ " + BODY.replace("\n", " ") + " │\n╰" + "─" * 40 + "╯\n" + FOOTER + "\n",
+        "text over an unknown footer": text_pane(LINE, below="my unfinished draft"),
+        "text over a menu": text_pane(LINE, below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm"),
+        "boxed text": "╭" + "─" * 120 + "╮\n│ ❯ " + LINE + " │\n╰" + "─" * 120 + "╯\n" + FOOTER + "\n",
         "nothing": "",
     })
     return panes
@@ -81,30 +83,20 @@ class SharedParserContractTest(unittest.TestCase):
             self.assertNotIn(own_copy, source, "the supervisor must not keep its own copy of the pane rules")
 
     def test_identical_captures_get_identical_answers(self):
-        expect_enter = {"exact text", "exact text, wrapped and indented", "double space is still one gap", "boxed text"}
+        expect_enter = {"exact text", "double space is still one gap", "boxed text"}
         for name, pane in contract_panes().items():
-            here, there = so.PANE.pane_paste_check(pane, BODY), ae().pane_paste_check(pane, BODY)
+            here, there = so.PANE.editor_check(pane, LINE), ae().editor_check(pane, LINE)
             self.assertEqual(here, there, name)
             self.assertEqual(so.PANE.pane_box(pane), ae().pane_box(pane), name)
             self.assertEqual(so.pane_menu(pane), ae().pane_menu(pane), name)
-            helper_ok = ae().pasted_still_there(pane, BODY) is None
-            rows = so.box_rows(pane)
-            supervisor_ok = so.send_block(pane) is None or (rows is not None and so.paste_matches(rows, BODY))
+            self.assertEqual(so.PANE.shown_above_editor(pane, LINE), ae().shown_above_editor(pane, LINE), name)
             self.assertEqual(here is None, name in expect_enter, (name, here))
-            self.assertEqual(helper_ok, name in expect_enter, name)
-            if name in expect_enter:
-                self.assertTrue(supervisor_ok, name)
 
     def test_review_probes(self):
-        """loop-probes.py: paste block, retry match and helper block for each probe pane."""
+        """loop-probes.py: no typing and no Enter on any probe pane."""
         for name, pane in PROBES.items():
-            rows = so.box_rows(pane)
             self.assertIsNotNone(so.send_block(pane), name)
-            self.assertFalse(rows is not None and so.paste_matches(rows, "expected row"), name)
-            self.assertIsNotNone(ae().pasted_still_there(pane, "expected row"), name)
-        self.assertEqual(so.send_block(PROBES["status prefix plus prose"]), "unknown_footer")
-        self.assertEqual(so.send_block(PROBES["two interior rules"]), "draft")
-        self.assertEqual(so.send_block(PROBES["nested prompt"]), "draft")
+            self.assertIsNotNone(ae().editor_check(pane, "expected row"), name)
 
     def test_footer_rows_are_whole_known_items(self):
         ok = ["  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
@@ -132,77 +124,13 @@ class SharedParserContractTest(unittest.TestCase):
             "nested prompt with the expected row": PROBES["nested prompt"],
         }.items():
             self.assertEqual(so.input_box(pane), "draft", name)
-            self.assertIsNone(so.box_rows(pane), name)
+            self.assertIsNotNone(so.PANE.editor_check(pane, "draft"), name)
 
     def test_literal_trailing_bar_is_kept_in_an_unboxed_row(self):
-        self.assertEqual(so.box_rows(PROBES["literal bar"]), [" expected row│"])
-        self.assertEqual(so.box_rows("╭" + "─" * 30 + "╮\n│ ❯ expected row │\n╰" + "─" * 30 + "╯\n" + FOOTER), [" expected row "])
-
-
-class OrchSendCommandTest(unittest.TestCase):
-    """The real cmd_orch_send between paste and Enter (tmux faked)."""
-
-    def run_send(self, after_paste):
-        calls = []
-
-        def tmux(name, op, *args, **kwargs):
-            calls.append(op)
-            return fx.Result(stdout=after_paste if op == "capture-pane" else "")
-        with tempfile.TemporaryDirectory() as folder:
-            Path(folder, "message.md").write_text(BODY)
-            with patch.object(ae(), "orch_inbox", return_value=folder), patch.object(ae(), "orch_alive", return_value=True), \
-                    patch.object(ae(), "tmux", side_effect=tmux), patch.object(ae().time, "sleep"):
-                try:
-                    ae().cmd_orch_send(None, "steward")
-                    code = 0
-                except SystemExit as stopped:
-                    code = stopped.code
-        return code, calls
-
-    def test_collapsed_marker_withholds_enter(self):
-        self.assertEqual(self.run_send(fx.PASTED_PANE), (7, ["load-buffer", "paste-buffer", "capture-pane"]))
-
-    def test_menu_withholds_enter(self):
-        self.assertEqual(self.run_send(cap("menu"))[0], 7)
-
-    def test_exact_text_gets_enter(self):
-        self.assertEqual(self.run_send(text_pane(BODY)), (0, ["load-buffer", "paste-buffer", "capture-pane", "send-keys"]))
-
-
-class MarkerIdentityTest(fx.LoopCase):
-    """Finding 1 (marker-identity.txt): a timed-out helper, no recorded paste and an unrelated marker in the box."""
-
-    def test_uncorrelated_marker_after_an_unknown_send_is_never_submitted(self):
-        self.be.add("URGENT bus #%d hello")
-        self.send_raise_before = subprocess.TimeoutExpired("agent-exec", 60)   # outcome unknown, nothing recorded
-
-        def marker():
-            self.pane = fx.PASTED_PANE
-        self.after_send = None
-        real = self.fake_agent
-
-        def agent(*args, **kw):
-            try:
-                return real(*args, **kw)
-            finally:
-                if args[0] == "orch-send":
-                    marker()
-        self.sup.agent = agent
-        self.run_loop(300)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([], 0, []))
-        self.assertIn("message 1 held for", " ".join(self.be.texts))
-        self.assertTrue(any(t.endswith("reason=not_verifiable") for t in self.be.texts), self.be.texts)
-
-    def test_confirmed_paste_that_collapsed_is_not_submitted(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [7]   # orch-send pasted, saw only the marker and withheld Enter
-
-        def collapsed():
-            self.pane = fx.PASTED_PANE
-        self.after_send = collapsed
-        self.run_loop(300)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
-        self.assertEqual([t.split("reason=")[1] for t in self.be.texts if "reason=" in t], ["not_verifiable"])
+        self.assertIsNone(so.PANE.editor_check(PROBES["literal bar"], "expected row│"))
+        self.assertIsNotNone(so.PANE.editor_check(PROBES["literal bar"], "expected row"))
+        boxed = "╭" + "─" * 30 + "╮\n│ ❯ expected row │\n╰" + "─" * 30 + "╯\n" + FOOTER + "\n"
+        self.assertIsNone(so.PANE.editor_check(boxed, "expected row"))
 
 
 class FirstRunTest(fx.LoopCase):
@@ -252,22 +180,20 @@ class FirstRunTest(fx.LoopCase):
 
 
 class RestartTest(fx.LoopCase):
-    """Finding 4: a replacement supervisor (same state dir and backend) never pastes a held message again."""
-
-    def replace_supervisor(self):
-        self.sup = so.Supervisor("steward")
-        self.sup.agent = self.fake_agent
+    """Finding 4: a replacement supervisor (same state dir and backend) never types a held message again."""
 
     def hold_message_one(self):
-        self.be.add("URGENT bus #%d hello")
-        self.send_raise_after = subprocess.TimeoutExpired("agent-exec", 60)   # pasted (box empty again), outcome unknown
-        self.run_loop(330)
-        self.send_raise_after = None
-        self.assertEqual((self.pasted, self.be.delivered(), self.be.types("delivery-unknown")), ([1], [], [None]))
+        self.idle_at(cap("idle"))
+        self.be.add("URGENT bus #%d hello\nsecond line")
+        self.after_type = lambda: setattr(self, "pane", fx.MENU_PANE)   # a dialog opened before Enter
+        self.run_loop(30)
+        self.after_type, self.pane = None, cap("idle")
+        self.assertEqual((self.pasted, self.enters, self.be.delivered(), self.be.types("delivery-unknown")),
+                         ([1], 0, [], [None]))
 
     def test_replacement_supervisor_keeps_the_hold(self):
         self.hold_message_one()
-        self.replace_supervisor()
+        self.restart_supervisor()
         self.run_loop(150)
         self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
         self.assertIn(1, self.sup.held)
@@ -275,73 +201,67 @@ class RestartTest(fx.LoopCase):
 
     def test_release_as_delivered_drops_the_hold_without_typing(self):
         self.hold_message_one()
+        self.editor = ""   # the admin looked at the session and cleared it
         self.be.msgs[0]["delivered"] = True   # swarmctl orchestrator release steward 1
         self.be.add("bus #%d next")
-        self.replace_supervisor()
+        self.restart_supervisor()
         self.run_loop(150)
         self.assertEqual(self.pasted, [1, 2])
         self.assertEqual(self.sup.held, {})
         self.assertEqual(json.loads(Path(self.sup.state_file).read_text())["held"], {})
 
-    def test_release_with_resend_pastes_it_once_more(self):
+    def test_release_with_resend_submits_once_without_typing_twice(self):
         self.hold_message_one()
-        self.replace_supervisor()
+        self.restart_supervisor()
         self.run_loop(60)
         self.assertEqual(self.pasted, [1])
         self.be.msgs[0]["release"] = 1   # swarmctl orchestrator release steward 1 --resend
+        self.run_loop(so.HEARTBEAT + 15)
+        # The pointer was still in the editor under the dialog: the release submits it, it is not typed a second time.
+        self.assertEqual((self.pasted, len(self.submitted), self.be.delivered()), ([1], 1, [1]))
         self.run_loop(60)
-        self.assertEqual((self.pasted, self.be.delivered()), ([1, 1], [1]))
-        self.run_loop(60)
-        self.assertEqual(self.pasted, [1, 1])
+        self.assertEqual(self.pasted, [1])
 
-    def test_unsubmitted_paste_survives_a_restart_and_only_gets_enter(self):
-        self.be.add("bus #%d hello")
-        self.send_rc, self.keys_rc = [6], [1] * 100   # pasted, Enter keeps failing
-        self.run_loop(110)
-        self.assertEqual((self.pasted, self.be.delivered()), ([1], []))
-        self.replace_supervisor()
-        self.keys_rc = []
+    def test_sending_record_survives_a_restart_and_only_gets_enter(self):
+        self.idle_at(cap("idle"))
+        self.be.add("bus #%d hello\nsecond line")
+        self.enter_works = False
+        self.run_loop(6)
+        self.assertEqual((self.pasted, self.enters, list(self.sup.sending)), ([1], 1, [1]))
+        self.restart_supervisor()
+        self.enter_works = True
         self.run_loop(30)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
+        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 2, [1]))
 
     def test_receipt_pending_survives_a_restart(self):
+        self.idle_at(cap("idle"))
         self.be.add("bus #%d hello")
-        self.be.fail = 1000   # every heartbeat fails after the paste
-        self.run_loop(3)
-        self.be.fail = 0
-        self.run_loop(1)
-        self.be.fail = 1000
+        self.after_type = lambda: setattr(self.be, "fail", 1000)   # every heartbeat fails after the typing
         self.run_loop(110)
-        self.assertEqual((self.pasted, self.be.delivered()), ([1], []))
+        self.assertEqual((self.pasted, len(self.submitted), self.be.delivered()), ([1], 1, []))
         self.be.fail = 0
-        self.replace_supervisor()
+        self.restart_supervisor()
         self.run_loop(60)
-        self.assertEqual((self.pasted, self.be.delivered()), ([1], [1]))
+        self.assertEqual((self.pasted, len(self.submitted), self.be.delivered()), ([1], 1, [1]))
 
 
 class EnterRetryReportTest(fx.LoopCase):
-    """Finding 5: repeated Enter timeouts or failures (text still in the box) are reported, never acknowledged."""
+    """Finding 5: an Enter helper that keeps timing out never acknowledges and never types again; it is held."""
 
-    def repeated_enter(self, failure):
-        self.be.add("URGENT bus #%d hello")
-        self.send_rc, self.keys_rc = [6], [1] * 400
+    def test_enter_timeouts(self):
+        self.idle_at(cap("idle"))
+        self.be.add("URGENT bus #%d hello\nmore")
         real = self.fake_agent
 
         def agent(*args, **kw):
-            if failure == "timeout" and args[0] == "orch-keys":
+            if args[0] == "orch-enter":
                 raise subprocess.TimeoutExpired("agent-exec", 60)
             return real(*args, **kw)
         self.sup.agent = agent
         self.run_loop(220)
-        return [t.split("reason=")[1] for t in self.be.texts if "reason=" in t]
-
-    def test_enter_timeouts(self):
-        self.assertEqual(self.repeated_enter("timeout"), ["submit_unknown"])
-        self.assertEqual((self.pasted, self.be.delivered()), ([1], []))
-
-    def test_enter_failures(self):
-        self.assertEqual(self.repeated_enter("exit"), ["submit_failed"])
-        self.assertEqual((self.pasted, self.be.delivered()), ([1], []))
+        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
+        self.assertEqual(self.sup.held[1]["why"], "submit_uncertain")
+        self.assertEqual(self.be.types("delivery-unknown"), [None])
 
 
 class Http400Test(fx.LoopCase):

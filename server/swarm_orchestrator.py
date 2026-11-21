@@ -23,17 +23,23 @@ for SWARM_ORCH_SCREEN_SECONDS ends the session and sets the state needs-login: t
 wait in the backend, and nothing restarts until an admin runs `swarmctl orchestrator start NAME`.
 
 Queued messages are typed one at a time when the pane is idle. During a long busy turn (the spinner keeps the pane
-changing) the oldest message is pasted anyway once it is SWARM_ORCH_BUSY_MAX_WAIT_SECONDS old, counted from the backend's
+changing) the oldest message is typed anyway once it is SWARM_ORCH_BUSY_MAX_WAIT_SECONDS old, counted from the backend's
 enqueue time (urgent, "URGENT" in its first line: SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS), and Claude Code queues it for the
 agent's next step; the rest of a continuous backlog follows SWARM_ORCH_BUSY_GAP_SECONDS apart. The loop wakes for that
-moment rather than its normal poll. The guard fails closed: right before every paste and every Enter (idle, busy, the
-Enter retry and the stop wrap-up) the pane is captured again, and only a confirmed empty Claude Code input box takes a
-paste; a menu, a draft, an unrecognized footer or an unreadable pane holds the message (reported once per reason as
-delivery-deferred after SWARM_ORCH_DEFER_REPORT_SECONDS). The pane parser is agent-exec's (loaded from that file). A
-message id that was pasted is never pasted again, also after a supervisor restart (state file): a failed Enter is
-retried alone while exactly the pasted text is in the box (a collapsed [Pasted text] marker is never submitted), a
-failed receipt is retried alone, and an unknown outcome leaves the message unacknowledged (a delivery-unknown event)
-until an admin runs swarmctl orchestrator release NAME ID [--resend] or the backend no longer has it pending.
+moment rather than its normal poll.
+
+Delivery (agent-control PR 67's design): nothing multi-line is typed (Claude Code collapses it into an unverifiable
+[Pasted text] marker). The message goes to <WORK>/orchestrators/NAME/.orchestrator/inbox/msg-ID.md (written by agent-exec)
+and one pointer line is typed as literal keys ("New bus message #41 from chief: read <path>"); a short one-line direct
+message is typed as is. Right before typing the pane is captured again and only a confirmed empty Claude Code input box
+takes it; a menu, a draft, an unrecognized footer or an unreadable pane holds the message (reported once per reason as
+delivery-deferred after SWARM_ORCH_DEFER_REPORT_SECONDS). agent-exec orch-type types into one pane ID and verifies the
+editor holds exactly the line; the supervisor then saves a "sending" record (fsync); agent-exec orch-enter captures that
+pane again, presses Enter only while the line is still exactly in the editor, and confirms by the line appearing above
+the editor more often than before. Recovery never types again: the record decides between a receipt, another Enter (at
+most SUBMIT_TRIES) and a hold (delivery-unknown). A hold lasts, also after a supervisor restart (state file), until an
+admin runs swarmctl orchestrator release NAME ID [--resend] (one release: one typing) or the backend no longer has it
+pending. The pane parser is agent-exec's (loaded from that file).
 
 Settings (environment, defaults in brackets): the runner's SWARM_URL, SWARM_WORKER_NAME, SWARM_WORKER_TOKEN_FILE,
 SWARM_WORKER_PROJECTS, SWARM_AGENT_USER, SWARM_WORK_DIR, SWARM_HANDOFF_DIR, SWARM_RUNNER_DIR, SWARM_AGENT_ENV_FILE,
@@ -43,7 +49,7 @@ SWARM_ORCH_IDLE_SECONDS [20], SWARM_ORCH_BUSY_MARKERS [esc to interrupt], SWARM_
 SWARM_ORCH_BACKOFF_MAX [300], SWARM_ORCH_HEALTHY_SECONDS [600], SWARM_ORCH_CRASH_LIMIT [5],
 SWARM_ORCH_CRASH_WINDOW [1800], SWARM_ORCH_MESSAGE_POLL_SECONDS [10: while no message is held, idle or busy, ask
 the backend for the next message this often], SWARM_ORCH_BUSY_MAX_WAIT_SECONDS [90], SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS [15], SWARM_ORCH_BUSY_GAP_SECONDS [5]
-(a queued message is pasted into a busy pane after this wait, see below), SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
+(a queued message is typed into a busy pane after this wait, see below), SWARM_ORCH_SCREEN_SECONDS [10], SWARM_ORCH_LOGIN_MARKERS and
 SWARM_ORCH_BLOCK_MARKERS (| separated, defaults below), SWARM_ORCH_LOGIN_CHECK [1], SWARM_ORCH_DEFER_REPORT_SECONDS [120:
 a message held back this long by the pane is reported once per reason as a delivery-deferred event]. Tests also use
 SWARM_ORCH_WITH_SECRETS, SWARM_ORCH_SESSIONS_DIR, SWARM_ORCH_CLAUDE_DIR and SWARM_ORCH_PANE_ADAPTER [claude; plain marks a
@@ -96,23 +102,24 @@ SCREEN_SECONDS = env_float("SWARM_ORCH_SCREEN_SECONDS", 10)   # a blocking scree
 SCREEN_LINES = 30                                             # only the bottom of the visible screen is read
 FIRST_RUN_TRIES = 3
 MESSAGE_POLL = env_float("SWARM_ORCH_MESSAGE_POLL_SECONDS", 10)   # no message held: ask for one this often (idle or busy)
-BUSY_MAX_WAIT = env_float("SWARM_ORCH_BUSY_MAX_WAIT_SECONDS", 90)       # busy pane: paste the oldest message after this wait
+BUSY_MAX_WAIT = env_float("SWARM_ORCH_BUSY_MAX_WAIT_SECONDS", 90)       # busy pane: type the oldest message after this wait
 BUSY_URGENT_WAIT = env_float("SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS", 15)  # same, for a message whose first line says URGENT
-BUSY_GAP = env_float("SWARM_ORCH_BUSY_GAP_SECONDS", 5)                   # minimum time between two busy pastes
-NOT_PASTED = (2, 4, 5)   # orch-send exit codes that mean nothing was typed (no message file, no session, paste failed)
+BUSY_GAP = env_float("SWARM_ORCH_BUSY_GAP_SECONDS", 5)                   # minimum time between two busy deliveries
 NEW_EVENT_TYPES = ("delivery-deferred", "delivery-unknown")   # 0.8.1 event types an older backend refuses (HTTP 400)
-PASTED_NOT_SUBMITTED = (6, 7)   # orch-send: pasted, then Enter failed (6) or was withheld because the pane changed (7)
 NOT_LAUNCHED = -2        # agent-exec could not be started at all (OSError): definitely nothing typed
 UNKNOWN = -1             # agent-exec ran but its outcome is unknown (timeout, crash, unexpected exit code)
+TYPE_NOTHING, TYPE_ERASED = 5, 8   # orch-type: no key went in / not landed and our partial text erased (else: held)
+DIRECT_LINE_MAX = 300    # a one-line direct message up to this length is typed as is
+SUBMIT_TRIES = 3         # Enter presses while the line stays in the editor before the message is held
+FIRST_RUN_WINDOW = 120   # seconds after a start in which first-run screens get keys (a login screen is reported any time)
 # "claude" (default): Claude Code's input box must be confirmed empty before anything is typed. "plain": a box-less
-# stand-in program, for tests only; an idle delivery or wrap-up may go onto its readable screen (never a busy paste).
+# stand-in program, for tests only; an idle delivery or wrap-up may go onto its readable screen (never a busy one).
 PANE_ADAPTER = os.environ.get("SWARM_ORCH_PANE_ADAPTER", "claude").strip().lower()
 PLAIN = PANE_ADAPTER == "plain"
 DEFER_REPORT = env_float("SWARM_ORCH_DEFER_REPORT_SECONDS", 120)   # a delivery held this long is reported once per reason
-MESSAGE_MAX = 15000    # characters pasted at most (agent-exec types the first 20000 of the file, header included)
 BIN_DIR = HERE   # swarmctl lives beside this file
-# Control characters except newline and tab: C0 (ESC, CR), DEL, C1, line and paragraph separators. A pasted message must
-# never contain ESC[201~ (the end of a bracketed paste) or anything else a terminal would act on.
+# Control characters except newline and tab: C0 (ESC, CR), DEL, C1, line and paragraph separators. Nothing typed or written
+# for the session may contain anything a terminal would act on.
 CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 
 
@@ -155,7 +162,28 @@ def _load_pane_parser():
 
 
 PANE = _load_pane_parser()
-INPUT_RULE, PROMPT_LINE, PASTE_MARKER = PANE.PANE_RULE, PANE.PANE_PROMPT, PANE.PANE_PASTED
+INPUT_RULE, PROMPT_LINE = PANE.PANE_RULE, PANE.PANE_PROMPT
+
+
+# Claude Code 2.1.321's first-run theme picker, matched as its whole layout from its title to the last non-blank line of the
+# pane ("Syntax theme: ..."; it has no Enter hint). Real capture: tests/fixtures/panes/pane-theme-picker.txt.
+THEME_TITLE = "Choose the text style that looks best with your terminal"
+THEME_LAYOUT = re.compile(
+    r"Choose the text style that looks best with your terminal\n"
+    r"To change this later, run /theme\n"
+    r"(?:(?:❯ )?(?:✔ )?(?:\d\. )?(?:Auto \(match terminal\)|(?:Dark|Light) mode(?: \([A-Za-z -]+\))?)(?: ✔)?\n){2,12}"
+    r"(?:╌+\n(?:[^\n]*\n){1,12}?╌+\n)?"
+    r"Syntax theme: [^\n]*\n")
+
+
+def theme_picker(screen):
+    """True when the bottom of the pane is exactly the theme picker with one selected (❯) option."""
+    lines = [ln.strip() for ln in (screen or "").splitlines() if ln.strip()]
+    start = max((i for i, ln in enumerate(lines) if ln == THEME_TITLE), default=None)
+    if start is None:
+        return False
+    region = lines[start:]
+    return bool(THEME_LAYOUT.fullmatch("\n".join(region) + "\n")) and sum(ln.startswith("❯") for ln in region) == 1
 
 
 def classify(screen):
@@ -166,6 +194,9 @@ def classify(screen):
     last line is the dialog's key hint, and the lowest first-run title sits at most DIALOG_LINES above it with no rule in
     between. The folder trust question (old and new wording) gets Enter only with the one ❯ on its Yes option; with the ❯
     on "No, exit" it gets the arrow key towards Yes; anything else is a screen it does not answer."""
+    box = PANE.pane_box(screen)
+    if box["state"] in ("empty", "draft") and box["footer_ok"]:
+        return None   # a live Claude Code editor at the bottom: the session is up; sign-in words above it are output
     lines = [ln for ln in (screen or "").splitlines() if ln.strip()][-SCREEN_LINES:]
     text = "\n".join(lines).lower()
     for m in LOGIN_MARKERS:
@@ -174,7 +205,9 @@ def classify(screen):
     for m in BLOCK_MARKERS:
         if m.lower() in text:
             return ("block", f"a Claude first-run screen it does not answer ({m!r})")
-    if not lines or not DIALOG_HINT.match(lines[-1]) or PANE.pane_box(screen)["state"] is not None:
+    if theme_picker(screen):
+        return ("first-run", "the theme picker", ["Enter"])
+    if not lines or not DIALOG_HINT.match(lines[-1]) or box["state"] is not None:
         return None
     if any(INPUT_RULE.match(a) and PROMPT_LINE.match(b) for a, b in zip(lines, lines[1:])):
         return None   # an input box's top and prompt: not a dialog
@@ -215,25 +248,13 @@ def pane_menu(screen):
     return PANE.pane_menu(screen)
 
 
-def box_rows(screen):
-    """The rows of the one unambiguous input box at the bottom, with a valid footer, else None."""
-    box = PANE.pane_box(screen)
-    return box["rows"] if box["rows"] is not None and box["footer_ok"] else None
-
-
-def paste_matches(rows, expected):
-    """True when the box rows hold exactly the expected text (whitespace runs collapsed to one space, not deleted).
-    Claude Code's collapsed "[Pasted text ...]" marker never matches: it cannot be tied to a message."""
-    return PANE.pane_same_text(rows, expected)
-
-
 def input_draft(screen):
     """True unless an empty input box is confirmed: typed text may be on screen, or the box cannot be read."""
     return input_box(screen) != "empty"
 
 
 def send_block(screen, busy=False, plain=False):
-    """Why nothing may be pasted or submitted onto this screen: "menu", "draft", "unknown_footer", "unreadable"; else None.
+    """Why nothing may be typed or submitted onto this screen: "menu", "draft", "unknown_footer", "unreadable"; else None.
 
     Fails closed: only a confirmed empty input box is safe. The one exception is a positively identified box-less
     stand-in (SWARM_ORCH_PANE_ADAPTER=plain, a test adapter): a readable, non-empty screen with no box and no menu takes
@@ -369,18 +390,23 @@ class Supervisor:
         self.pending_poll = 0
         self.busy_started = None
         self.seen = {}                  # message id -> when this process first saw it (only if the backend sent no `at`)
-        self.draining = False           # a busy paste happened and the queue has not been empty since: the next uses the gap
+        self.draining = False           # a busy delivery happened and the queue has not been empty since: the next uses the gap
         self.last_busy_paste = 0
         # Delivery state that must survive a supervisor restart (kept in the state file, see save): a replacement process
-        # must not paste again what this one pasted.
-        self.submitted_ids = set(int(i) for i in self.saved.get("submitted_ids") or [])   # pasted and submitted; receipt retried alone
-        self.unsubmitted = self.saved.get("unsubmitted")   # {id, busy, sender, certain, body, release}: pasted or maybe, Enter alone
-        # id -> {why, release}: outcome unknown, never pasted again and never acknowledged until released (the backend no
-        # longer has it pending, or an admin ran swarmctl orchestrator release NAME ID [--resend])
+        # must not type again what this one typed.
+        self.submitted_ids = set(int(i) for i in self.saved.get("submitted_ids") or [])   # submitted; receipt retried alone
+        # id -> {line, enters, before, busy, release}: the pointer line was typed and verified and Enter is about to be, or
+        # was, pressed. Saved (fsync'd) BEFORE Enter; a supervisor that finds it never types again (recover).
+        self.sending = {int(k): v for k, v in (self.saved.get("sending") or {}).items()}
+        # id -> {why, release}: never typed again and never acknowledged until released (the backend no longer has it
+        # pending, or an admin ran swarmctl orchestrator release NAME ID [--resend]). why "released": one more typing,
+        # which first becomes "resend_typing" (saved) so a failed typing or a crash re-holds instead of typing twice.
         self.held = {int(k): v for k, v in (self.saved.get("held") or {}).items()}
+        if self.saved.get("unsubmitted"):   # a 0.8.1 pre-release state file: an unconfirmed paste is held, never retyped
+            self.held.setdefault(int(self.saved["unsubmitted"]["id"]), {"why": "submit_uncertain", "release": 0})
         self.defer_since = {}           # id -> when the pane first held this message back (continuous)
         self.defer_told = set()         # (id, reason) already reported as delivery-deferred
-        self.delivered_busy = None      # seconds waited, sent with the receipt when the delivery was a busy paste
+        self.delivered_busy = None      # seconds waited, sent with the receipt when the delivery was a busy one
 
     # ---------- local state and lock ----------
     def load(self):
@@ -394,12 +420,22 @@ class Supervisor:
         data = {k: getattr(self, k) for k in ("desired", "config", "generation", "restart_generation", "last_exit",
                                               "restart_count", "started_at", "session_id")}
         data["needs_login"] = self.state == "needs-login"
-        data.update(held={str(k): v for k, v in self.held.items()}, unsubmitted=self.unsubmitted,
+        data.update(held={str(k): v for k, v in self.held.items()}, sending={str(k): v for k, v in self.sending.items()},
                     submitted_ids=sorted(self.submitted_ids))
         tmp = self.state_file + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh)
+            fh.flush()
+            os.fsync(fh.fileno())   # delivery records must be on disk before the key they protect
         os.replace(tmp, self.state_file)
+        try:
+            fd = os.open(self.dir, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def take_lock(self):
         """Two supervisors for one name never run at once on this machine (the backend refuses a second one too)."""
@@ -500,35 +536,39 @@ class Supervisor:
         msg = r.get("message")
         if not msg:
             # Authoritative: nothing is queued (delivered, expired, or the record was recreated). Drop the cached head and
-            # the backlog state; an outstanding receipt or unsubmitted paste is kept apart and retried on its own.
+            # the backlog state; an outstanding receipt or sending record is kept apart and retried on its own.
             self.message, self.draining, self.seen = None, False, {}
-        elif not self.message or self.message["id"] != msg["id"]:
-            self.message = msg
+        else:
+            self.message = msg   # always the fresh head: a release count or text change is seen at once
         if self.desired == "running" and not self.deleted:
             self.reconcile(msg)
-        # Deferral tracking follows the confirmed queue head (and an outstanding paste); a failed heartbeat changes nothing.
+        # Deferral tracking follows the confirmed queue head (and an outstanding sending record); a failed heartbeat changes nothing.
         keep = {msg["id"]} if msg else set()
-        if self.unsubmitted:
-            keep.add(self.unsubmitted["id"])
+        keep |= set(self.sending)
         self.defer_since = {k: v for k, v in self.defer_since.items() if k in keep}
         self.defer_told = {k for k in self.defer_told if k[0] in keep}
         self.save()
         return True
 
     def reconcile(self, msg):
-        """After an authoritative reply (the record runs, so `message` is the oldest pending one, or None): release holds
-        and forget receipts the backend no longer needs. Messages are pending oldest first, so an id below the head, or
-        any id when nothing is pending, was delivered or removed. A head the admin released for one more paste (its
-        `release` count went up since the hold) is pasted again."""
+        """After an authoritative reply (the record runs, so `message` is the oldest pending one, or None): drop holds and
+        records the backend no longer needs. Messages are pending oldest first, so an id below the head, or any id when
+        nothing is pending, was delivered or removed. A head the admin released for one more typing (its `release` count
+        went up) becomes "released": typed at most once more."""
         head = msg["id"] if msg else None
-        for mid in sorted(self.held):
+        release = int(msg.get("release") or 0) if msg else 0
+        for mid in sorted(set(self.held) | set(self.sending)):
             if head is None or mid < head:
-                del self.held[mid]
-                log(self.name, f"message {mid} is no longer pending in the backend; its delivery-unknown hold is released")
-            elif mid == head and int(msg.get("release") or 0) > int(self.held[mid].get("release") or 0):
-                del self.held[mid]
-                self.submitted_ids.discard(mid)
-                log(self.name, f"message {mid} was released by an admin; it is pasted again")
+                self.held.pop(mid, None)
+                self.sending.pop(mid, None)
+                log(self.name, f"message {mid} is no longer pending in the backend; its delivery record is dropped")
+            elif mid == head:
+                rec = self.held.get(mid) or self.sending.get(mid)
+                if release > int(rec.get("release") or 0) and (self.held.get(mid) or {}).get("why") != "released":
+                    self.sending.pop(mid, None)
+                    self.held[mid] = {"why": "released", "release": release}
+                    self.submitted_ids.discard(mid)
+                    log(self.name, f"message {mid} was released by an admin; it is typed once more")
         self.submitted_ids = {i for i in self.submitted_ids if head is not None and i >= head}
 
     def fetch_bus_token(self):
@@ -703,6 +743,8 @@ class Supervisor:
         now_ = time.time()
         if not self.screen_seen or self.screen_seen[0] != kind[1]:
             self.screen_seen = (kind[1], now_)
+        if kind[0] == "first-run" and now_ - (self.started_at or 0) > FIRST_RUN_WINDOW:
+            kind = ("block", f"{kind[1]} (after the start-up window, so not answered)")
         if kind[0] == "first-run":
             label, keys = kind[1], kind[2]
             tries = self.first_run_tries.get(label, 0)
@@ -745,7 +787,8 @@ class Supervisor:
         self.state, self.stop_reason, self.after_stop = "stopping", reason, then
         self.stop_deadline = time.time() + STOP_GRACE
         self.stop_sent_at = 0
-        screen = self.capture()
+        self.capture()
+        pane, screen = self.pane_capture()
         if screen is not None and classify(screen):
             # Nothing to wrap up, and never type into a sign-in or first-run screen: end it now.
             self.stop_deadline = time.time()
@@ -759,12 +802,10 @@ class Supervisor:
             return
         wrap = (f"The supervisor is stopping this session ({reason}). Within {int(STOP_GRACE)} seconds, "
                 "update CHECKPOINT.md and write a short HANDOVER.md, then stop working.")
-        self.write_inbox("message.md", wrap)
-        rc = self.send_keys_safely("orch-send", *self.send_flags())
-        sent = rc == 0
-        if not sent and rc not in NOT_PASTED + (NOT_LAUNCHED,):
-            # Pasted (or maybe): one Enter, only when the pasted text is still in the box and nothing else came up.
-            sent = self.submit_ok(wrap) is None and self.send_keys_safely("orch-keys", "Enter") == 0
+        before = PANE.shown_above_editor(screen, wrap, PLAIN) or 0
+        self.write_inbox("line.txt", wrap + "\n")
+        sent = self.helper("orch-type", "--pane", pane, *self.send_flags()) == 0 and \
+            self.enter(pane, before) in ("submitted", "in_editor")
         self.tail_changed = time.time()
         self.stop_sent_at = time.time() if sent else 0
         self.event("stop", f"stopping: {reason}; wrap-up message {'sent' if sent else 'could not be sent'}")
@@ -800,25 +841,23 @@ class Supervisor:
     def send_flags(self):
         return ["--plain"] if PLAIN else []
 
-    def submit_ok(self, expected, certain=True):
-        """Before an Enter that submits pasted text: None when the fresh pane shows exactly that text in one unambiguous
-        input box over a known footer and no active menu, else the reason (agent-exec pane_paste_check): "gone" when the
-        box is empty again, "not_verifiable" for Claude Code's collapsed [Pasted text] marker (never correlated with a
-        message, so never submitted), "draft" when it holds anything else, or "menu", "unknown_footer", "unreadable"."""
-        screen = self.capture()
-        if screen is not None and classify(screen):
-            return "menu"
-        if not screen or not screen.strip():
-            return "unreadable"
-        if PLAIN and certain and send_block(screen, plain=True) is None:
-            return None   # the box-less stand-in: nothing to read, and the paste was confirmed
-        return PANE.pane_paste_check(screen, expected)
-
-    def send_keys_safely(self, *args):
-        """Run orch-send or orch-keys; returns the exit code, NOT_LAUNCHED when agent-exec could not be started,
-        UNKNOWN when it ran but its outcome is unknown (timeout)."""
+    def pane_capture(self, pane=None):
+        """(pane id, screen) from one capture of the session's pane (or of this pane only); (None, None) when it cannot
+        be read. A delivery attempt resolves the pane ID once and sends every capture and key of it to that pane."""
         try:
-            return self.agent(args[0], self.name, *args[1:], check=False, timeout=60).returncode
+            r = self.agent("orch-capture", self.name, *(["--pane", pane] if pane else []), check=False, timeout=60)
+            out = json.loads(r.stdout or "{}")
+        except (ValueError, subprocess.SubprocessError, OSError):
+            return None, None
+        if not isinstance(out, dict) or not out.get("pane") or not isinstance(out.get("screen"), str):
+            return None, None
+        return out["pane"], out["screen"]
+
+    def helper(self, *args, timeout=60):
+        """Run an agent-exec orch-* command for this session; its exit code, NOT_LAUNCHED when agent-exec could not be
+        started, UNKNOWN when it ran but its outcome is unknown (timeout)."""
+        try:
+            return self.agent(args[0], self.name, *args[1:], check=False, timeout=timeout).returncode
         except OSError as e:
             log(self.name, args[0], "could not be started:", e)
             return NOT_LAUNCHED
@@ -826,9 +865,20 @@ class Supervisor:
             log(self.name, args[0], "outcome unknown:", e)
             return UNKNOWN
 
+    def enter(self, pane, before):
+        """agent-exec orch-enter (a fresh capture of that pane, Enter only while the editor holds exactly line.txt, then
+        confirm): "submitted", "in_editor", "unknown", "not_in_editor", "enter_failed", or None when the outcome is unknown."""
+        try:
+            r = self.agent("orch-enter", self.name, "--pane", pane, "--before", str(int(before or 0)), *self.send_flags(),
+                           check=False, timeout=60)
+            st = json.loads(r.stdout or "{}").get("state") if r.returncode == 0 else None
+        except (ValueError, AttributeError, subprocess.SubprocessError, OSError):
+            return None
+        return st if st in ("submitted", "in_editor", "unknown", "not_in_editor", "enter_failed") else None
+
     def defer(self, mid, reason):
         """The pane holds this message back. After DEFER_REPORT seconds of it, one event per message and reason (the
-        reason only, never pane contents). Nothing is ever pasted because of a timeout."""
+        reason only, never pane contents). Nothing is ever typed because of a timeout."""
         now = time.time()
         since = self.defer_since.setdefault(mid, now)
         if now - since >= DEFER_REPORT and (mid, reason) not in self.defer_told:
@@ -840,15 +890,17 @@ class Supervisor:
         self.defer_told = {k for k in self.defer_told if k[0] != mid}
 
     def hold(self, mid, why, release=0):
-        """Outcome unknown: never paste this id again, never acknowledge it, also after a supervisor restart (saved),
-        until it is released (see reconcile); tell the backend once."""
-        self.unsubmitted = None
-        if mid not in self.held:
+        """It may have reached Claude, or keys went somewhere unexpected: never typed again, never acknowledged, also after
+        a supervisor restart (saved), until it is released (see reconcile); tell the backend once."""
+        rec = self.sending.pop(mid, None)
+        release = max(int(release or 0), int((rec or {}).get("release") or 0))
+        if (self.held.get(mid) or {}).get("why") in (None, "released", "resend_typing"):
             self.held[mid] = {"why": why, "release": release}
-            self.event("delivery-unknown", f"message {mid}: delivery outcome unknown ({why}); left unacknowledged and not "
-                                           f"pasted again; check the session, then run: swarmctl orchestrator release "
-                                           f"{self.name} {mid} (it arrived) or add --resend (paste it again)")
+            self.event("delivery-unknown", f"message {mid}: not delivered and not typed again (reason={why}); check the "
+                                           f"session, then run: swarmctl orchestrator release {self.name} {mid} (it "
+                                           f"arrived) or add --resend (type it once more)")
         self.save()
+        self.defer(mid, why)
 
     def queued_at(self, m, now):
         """When the backend queued this message (its `at`, never later than now), else when this process first saw it."""
@@ -858,19 +910,24 @@ class Supervisor:
         return self.seen.setdefault(m["id"], now)
 
     def busy_deadline(self, m, now):
-        """Earliest time this message may be pasted into a busy pane. The first of a backlog waits its own time from when
-        it was queued (urgent: the shorter wait); after a busy paste the rest of a continuous backlog follow the gap."""
+        """Earliest time this message may be typed into a busy pane. The first of a backlog waits its own time from when
+        it was queued (urgent: the shorter wait); after a busy delivery the rest of a continuous backlog follow the gap."""
         gap_at = self.last_busy_paste + BUSY_GAP
         if self.draining:
             return gap_at
         return max(gap_at, self.queued_at(m, now) + (BUSY_URGENT_WAIT if is_urgent(m) else BUSY_MAX_WAIT))
+
+    def blocked_head(self):
+        """The cached head is held (not released): nothing to type."""
+        h = self.held.get(self.message["id"]) if self.message else None
+        return bool(h) and h.get("why") != "released"
 
     def next_wake(self):
         """Seconds until the loop should look again: the normal poll, or sooner for a busy delivery or message poll due."""
         now = time.time()
         due = [now + POLL]
         if self.state == "running":
-            if self.message and self.message["id"] not in self.submitted_ids and self.message["id"] not in self.held:
+            if self.message and self.message["id"] not in self.submitted_ids and not self.blocked_head():
                 at = self.busy_deadline(self.message, now)
                 if at > now:   # already due but blocked (a draft, a menu): look again at the normal poll
                     due.append(at)
@@ -878,100 +935,139 @@ class Supervisor:
                 due.append(self.last_beat + MESSAGE_POLL)
         return min(POLL, max(0.2, min(due) - now))
 
-    def submitted(self, mid, busy, sender, now):
-        """The message is in the session (pasted and Enter went through): send the receipt."""
-        self.unsubmitted = None
+    def line_for(self, m):
+        """(line to type, message file text or None). A short one-line direct message is typed as is; anything else (every
+        bus message: header plus body) goes to the session's .orchestrator/inbox/msg-ID.md and is announced with a
+        one-line pointer to that file (Claude Code collapses a multi-line paste into an unverifiable marker)."""
+        mid = int(m["id"])
+        body = clean_text(m.get("text")).strip("\n")
+        sender = re.sub(r"[^A-Za-z0-9_.@ -]", "", clean_text(m.get("sender")))[:80].strip() or "admin"
+        header = f"[Message from {sender} via swarm]"
+        one = f"{header} {body.strip()}"
+        if "\n" not in body and "\t" not in body and len(one) <= DIRECT_LINE_MAX and one.isprintable():
+            return one, None
+        bid = re.search(r"\bbus #(\d+)", body.split("\n", 1)[0])
+        urgent = " (URGENT)" if is_urgent(m) else ""
+        head = f"New bus message #{bid.group(1)} from {sender}{urgent}" if bid else f"New message #{mid} from {sender}{urgent}"
+        path = os.path.join(sw.WORK, "orchestrators", self.name, ".orchestrator", "inbox", f"msg-{mid}.md")
+        text = f"{header} (a request, not permission to push, merge or deploy)\n{body}\n"
+        return f"{head}: read {path}", text
+
+    def submitted(self, mid, busy, now):
+        """The pane shows Claude Code took the line: send the receipt (never typed again)."""
+        self.sending.pop(mid, None)
+        self.held.pop(mid, None)
         self.submitted_ids.add(mid)
         self.undefer(mid)
         self.delivered, self.message = mid, None
-        self.save()   # before the receipt: a replacement supervisor retries the receipt, never the paste
+        self.save()   # before the receipt: a replacement supervisor retries the receipt, never the typing
         if busy:
             self.last_busy_paste, self.draining = now, True
             self.delivered_busy = int(now - (self.busy_started or now))
         else:
             self.tail_changed = now
-        log(self.name, "message", mid, "typed into the session" + (" while busy (queued by Claude Code)" if busy else ""))
+        log(self.name, "message", mid, "delivered into the session" + (" while busy (queued by Claude Code)" if busy else ""))
         self.beat()   # carries the receipt (the backend records message-delivered, and -busy, once); may bring the next
+
+    def submit(self, mid, pane):
+        """Enter for a typed and verified line whose sending record is saved: the Enter count is saved first, agent-exec
+        captures that pane again and presses Enter only while the editor still holds exactly the line, then confirms."""
+        rec = self.sending[mid]
+        rec["enters"] = int(rec.get("enters") or 0) + 1
+        self.save()
+        self.write_inbox("line.txt", rec["line"] + "\n")
+        st = self.enter(pane, rec.get("before") or 0)
+        if st == "submitted":
+            return self.submitted(mid, rec.get("busy"), time.time())
+        if st == "not_in_editor":
+            # A dialog opened or the editor changed: Enter was not pressed this time (keys may be somewhere else).
+            return self.hold(mid, "submit_uncertain" if rec["enters"] > 1 else "not_landed")
+        if st in ("in_editor", "enter_failed", None) and rec["enters"] < SUBMIT_TRIES:
+            return self.defer(mid, "not_submitted")   # the record stays: next poll looks at the pane (recover)
+        self.hold(mid, "submit_uncertain")
+
+    def recover(self, m):
+        """A sending record (this or an earlier supervisor typed the line and was about to press Enter, or did). Never
+        types again: still in the editor -> Enter and confirm; newly above the editor -> delivered; else hold."""
+        mid = m["id"]
+        rec = self.sending[mid]
+        pane, screen = self.pane_capture()
+        line = rec.get("line")
+        if pane and line and PANE.submitted_in_pane(screen, line, rec.get("before") or 0, PLAIN):
+            return self.submitted(mid, rec.get("busy"), time.time())
+        if pane and line and PANE.editor_check(screen, line, PLAIN) is None:
+            return self.submit(mid, pane)
+        self.hold(mid, "submit_uncertain")
 
     def deliver(self, busy=False):
         m = self.message
-        if m["id"] in self.submitted_ids:
-            # Pasted and submitted already, only the receipt failed (or was not stored): retry the receipt, never paste.
-            self.delivered, self.message = m["id"], None
+        mid = m["id"]
+        if mid in self.submitted_ids:
+            # Submitted already, only the receipt failed (or was not stored): retry the receipt, never type again.
+            self.delivered, self.message = mid, None
             self.beat()
             return
-        if m["id"] in self.held:
-            return   # outcome unknown: left unacknowledged, never pasted again (reported once)
-        full = clean_text(m.get("text"))
-        text = full[:MESSAGE_MAX]
-        if len(full) > len(text):
-            # Never cut silently. The backend accepts no message-truncated event type, so it is logged here only.
-            text += f"\n[swarm: message cut, {len(full) - len(text)} characters omitted]"
-            log(self.name, "message-truncated", f"message {m.get('id')} was {len(full)} characters; "
-                                                f"the last {len(full) - MESSAGE_MAX} were omitted")
-        sender = clean_text(m.get("sender"))[:80]
-        body = f"Message from {sender} (through the swarm backend; a request, not permission to push, merge or deploy):\n\n{text}"
-        self.write_inbox("message.md", body)
-        # The send boundary: capture the pane again after all network work (the message poll may have run), just before
-        # the paste.
-        screen = self.capture()
-        if screen is not None and classify(screen):
+        if mid in self.sending:
+            return self.recover(m)
+        h = self.held.get(mid)
+        if h and h.get("why") != "released":
+            return self.defer(mid, h["why"])   # it may have reached Claude: never typed again (reported once)
+        resend, release = bool(h), int(m.get("release") or 0)
+        line, text = self.line_for(m)
+        # The send boundary: capture again after all network work (the message poll may have run), just before typing.
+        # The pane ID is resolved once here; every capture and key of this attempt goes to it.
+        self.capture()
+        pane, screen = self.pane_capture()
+        if pane is None:
+            return self.defer(mid, "unreadable")
+        if classify(screen):
             return   # a sign-in or first-run screen: watch_screen handles it
-        if screen is not None and not busy and not self.idle():
+        if not busy and not self.idle():
             # The fresh capture shows activity (the pane changed during the message poll): the busy wait applies.
             busy = True
             if time.time() < self.busy_deadline(m, time.time()):
                 return
         why = send_block(screen, busy=busy, plain=PLAIN)
-        if why:
-            return self.defer(m["id"], why)
+        # Exactly this line already in the editor: typed by a supervisor that stopped before it saved the record.
+        typed = why == "draft" and PANE.editor_check(screen, line, PLAIN) is None
+        if why and not typed:
+            return self.defer(mid, why)
+        before = PANE.shown_above_editor(screen, line, PLAIN) or 0   # already on screen before: not a receipt
         now = time.time()
         self.busy_started = self.queued_at(m, now)
-        rc = self.send_keys_safely("orch-send", *self.send_flags())
-        if rc in NOT_PASTED or rc == NOT_LAUNCHED:
-            return self.defer(m["id"], "paste_failed")   # definitely nothing typed: tried again later, reported if it lasts
-        if rc == 0:
-            return self.submitted(m["id"], busy, sender, now)
-        # Pasted and not submitted (6, 7), or the outcome is unknown: never paste again. Enter is retried alone, and only
-        # while the pasted text is still in the box; an unknown outcome with an empty box is never guessed at.
-        self.unsubmitted = {"id": m["id"], "busy": busy, "sender": sender, "certain": rc in PASTED_NOT_SUBMITTED,
-                            "body": body, "release": int(m.get("release") or 0)}
-        self.message = None
-        self.save()
-        log(self.name, "message", m["id"], f"pasted or maybe pasted, not confirmed submitted (orch-send exit {rc}); "
-                                           "retrying Enter only while the text is still in the box")
-
-    def retry_submit(self):
-        u = self.unsubmitted
-        mid = u["id"]
-        why = self.submit_ok(u["body"], u["certain"])
-        if why == "gone":
-            # Pasted text no longer in the box: maybe submitted (by the Enter whose outcome is unknown), maybe cleared.
-            return self.hold(mid, "the pasted text left the input box without a confirmed Enter", u.get("release") or 0)
-        if why:
-            return self.defer(mid, why)
-        rc = self.send_keys_safely("orch-keys", "Enter")
-        if rc == 0:
-            return self.submitted(mid, u["busy"], u["sender"], time.time())
-        if rc == UNKNOWN and u["certain"]:
-            self.unsubmitted = dict(u, certain=False)   # Enter may have gone through: next time only if the text remains
-            self.save()
-        # Both a failed and an unknown Enter count towards the deferral report (reason only, no receipt).
-        self.defer(mid, "submit_unknown" if rc == UNKNOWN else "submit_failed")
+        self.write_inbox("line.txt", line + "\n")
+        if not typed:
+            if resend:
+                self.held[mid] = {"why": "resend_typing", "release": release}
+                self.save()   # the release is used up before the keys, even if this process dies
+            if text is not None:
+                self.write_inbox("message.md", text)
+            rc = self.helper("orch-type", "--pane", pane, *(["--id", str(mid)] if text is not None else []), *self.send_flags())
+            if rc != 0:
+                if not resend and rc in (TYPE_NOTHING, NOT_LAUNCHED):
+                    return self.defer(mid, "type_failed")   # nothing typed: tried again next poll
+                if not resend and rc == TYPE_ERASED:
+                    return self.defer(mid, "not_landed")   # did not verify, our text removed again: next poll
+                return self.hold(mid, "not_landed", release)   # keys may be somewhere, or the release's typing is spent
+        self.sending[mid] = {"line": line, "enters": 0, "before": before, "busy": busy, "release": release}
+        self.held.pop(mid, None)
+        self.save()   # durable before Enter
+        self.submit(mid, pane)
 
     def handle_messages(self):
         """Idle: type the queued message. Busy: once it is due (busy_deadline). Nothing queued: poll the backend."""
-        if self.unsubmitted:
-            return self.retry_submit()
         if not self.message and time.time() - self.last_beat >= MESSAGE_POLL:
             # The heartbeat carries the next pending message, busy or idle (busy: so its wait can be timed), and any
             # receipt that has not got through yet.
             self.beat_ok = self.beat()
-        if not self.message or self.message["id"] in self.held:
+        if not self.message or self.blocked_head():
+            if self.message:
+                self.defer(self.message["id"], self.held[self.message["id"]]["why"])
             return
-        if self.idle():
-            self.deliver()
-        elif self.message["id"] in self.submitted_ids or time.time() >= self.busy_deadline(self.message, time.time()):
+        mid = self.message["id"]
+        if self.idle() or mid in self.sending:
+            self.deliver(busy=not self.idle())
+        elif mid in self.submitted_ids or time.time() >= self.busy_deadline(self.message, time.time()):
             self.deliver(busy=True)
 
     def step(self):

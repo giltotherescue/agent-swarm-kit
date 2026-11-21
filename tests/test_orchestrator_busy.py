@@ -7,6 +7,7 @@ with its enqueue time `at`). No tmux, no network. Real Claude Code captures live
 """
 import json
 import os
+import textwrap
 import shutil
 import sys
 import tempfile
@@ -130,26 +131,37 @@ class InputBoxTest(unittest.TestCase):
         self.assertEqual(so.input_box(clipped), "empty")   # documented limit: nothing on screen shows the clipped top
 
     def test_quoted_menu_words_inside_the_box_are_data(self):
-        body = "Message from chief (through the swarm backend; a request):\n\nThe installer says Enter to confirm."
-        pane = _pane(*("❯ " + body).splitlines())
+        line = "[Message from chief via swarm] The installer says Enter to confirm."
+        pane = _pane("❯ " + line)
         self.assertFalse(so.pane_menu(pane))
-        self.assertTrue(so.paste_matches(so.box_rows(pane), body))
+        self.assertIsNone(so.PANE.editor_check(pane, line))
         self.assertTrue(so.pane_menu(_pane("❯ ", below=FOOTER + "\n Enter to confirm · Esc to cancel")))
 
-    def test_paste_identity_from_the_box_start(self):
-        body = "Message from chief (through the swarm backend; a request):\n\nhello"
-        ok = {"exact": _pane(*("❯ " + body).splitlines()),
-              "wrapped": _pane("❯ Message from chief (through the swarm", "  backend; a request):", "", "  hello")}
-        bad = {"prefix only, someone's draft after it": _pane("❯ Message from chief (through the swarm backend; a request):", "my own notes"),
-               "draft before it": _pane("❯ my notes", "Message from chief (through the swarm backend; a request):", "", "hello"),
-               "partial marker in prose": _pane("❯ my notes about [Pasted text"),
-               "marker plus text": _pane("❯ [Pasted text #1 +3 lines] and more"),
-               "malformed marker": _pane("❯ [Pasted text #x]"),
-               "collapsed marker (opaque)": PASTED_PANE}
+    def test_pointer_identity_in_the_editor(self):
+        line = "New bus message #7 from chief: read /w/orchestrators/x/.orchestrator/inbox/msg-7.md"
+        ok = {"exact": _pane("❯ " + line), "trailing spaces": _pane("❯ " + line + "   ")}
+        bad = {"prefix only": _pane("❯ " + line[:30]), "someone's text after it": _pane("❯ " + line, "  my own notes"),
+               "draft before it": _pane("❯ my notes " + line), "collapsed marker": PASTED_PANE,
+               "extra space inside": _pane("❯ " + line.replace("from chief", "from  chief").replace("from  chief", "fromchief")),
+               "menu under the box": _pane("❯ " + line, below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm"),
+               "unknown footer": _pane("❯ " + line, below=FOOTER + "\nuser@host:~$ "),
+               "no box": line + "\n"}
         for name, pane in ok.items():
-            self.assertTrue(so.paste_matches(so.box_rows(pane), body), name)
+            self.assertIsNone(so.PANE.editor_check(pane, line), name)
         for name, pane in bad.items():
-            self.assertFalse(so.paste_matches(so.box_rows(pane), body), name)
+            self.assertIsNotNone(so.PANE.editor_check(pane, line), name)
+
+    def test_wrapped_pointer_at_80_columns(self):
+        line = "New bus message #82 from chief (URGENT): read /home/swarm-runner/work/orchestrators/steward/.orchestrator/inbox/msg-82.md"
+        rule = "─" * 80
+        rows = textwrap.wrap(line, 78, break_on_hyphens=False)
+        self.assertGreater(len(rows), 1)
+        pane = "\n".join(["⏺ Done."] * 10 + [rule, "❯ " + rows[0]] + ["  " + r for r in rows[1:]] +
+                         [rule, "  ? for shortcuts", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]) + "\n"
+        self.assertIsNone(so.PANE.editor_check(pane, line))
+        self.assertIsNotNone(so.PANE.editor_check(pane, line.replace(" read ", " read  x")))
+        hist = pane.replace(rule + "\n❯ " + rows[0], "❯ " + line + "\n" + rule + "\n❯ " + rows[0], 1)
+        self.assertEqual(so.PANE.shown_above_editor(hist, line), 1)
 
     def test_cap_draft_minus_bottom_rule_still_shows_the_draft(self):
         lines = cap("draft").rstrip("\n").splitlines()
@@ -234,9 +246,15 @@ class TrustScreenTest(unittest.TestCase):
             self.assertEqual(so.classify(pane)[0], "login")
 
 
+
+
 class Result:
     def __init__(self, rc=0, stdout="{}"):
         self.returncode, self.stdout, self.stderr = rc, stdout, ""
+
+
+class Crash(BaseException):
+    """The supervisor process dies here (not an Exception: step()'s error handler must not catch it)."""
 
 
 class FakeBackend:
@@ -285,8 +303,8 @@ class FakeBackend:
             raise urllib.error.URLError("reply lost")
         head = next(({k: m[k] for k in ("id", "at", "sender", "text", "release") if k in m} for m in self.msgs
                      if not m["delivered"]), None)
-        return {"desired": "running", "deleted": False, "generation": 1, "restart_generation": self.restart_generation, "message": head,
-                "config": {}}
+        return {"desired": "running", "deleted": False, "generation": 1, "restart_generation": self.restart_generation,
+                "message": head, "config": {}}
 
     def delivered(self):
         return [m["id"] for m in self.msgs if m["delivered"]]
@@ -295,13 +313,57 @@ class FakeBackend:
         return [mid for t, mid in self.events if t == typ]
 
 
+class Driver:
+    """agent-exec's PaneDriver for the simulated pane (no sleeping: time advances on its own clock)."""
+
+    def __init__(self, t):
+        self.t, self.clock = t, 0.0
+
+    def capture(self):
+        return self.t.render()
+
+    def type(self, text):
+        self.t.typed.append(text)
+        if self.t.on_type:
+            self.t.on_type(text)
+        if self.t.can_edit():
+            self.t.editor += text
+        return True
+
+    def keys(self, *keys):
+        for k in keys:
+            if k == "BSpace":
+                self.t.editor = self.t.editor[:-1]
+            elif k == "Enter":
+                self.t.enters += 1
+                if self.t.on_enter:
+                    self.t.on_enter()
+                if self.t.enter_works and self.t.editor and self.t.can_edit():
+                    self.t.history.append(self.t.editor)
+                    self.t.submitted.append(self.t.editor)
+                    self.t.editor = ""
+        return True
+
+    def sleep(self, s):
+        self.clock += s
+
+    def now(self):
+        return self.clock
+
+
 class LoopCase(unittest.TestCase):
+    """The real Supervisor on a fake clock. agent-exec is simulated around a Claude Code editor drawn into self.pane (a
+    template with an empty box, or a box-less stand-in screen): typed text shows in the box (wrapped at the rule width,
+    later rows indented, like Claude Code) and Enter moves it into the conversation above the box. orch-type and
+    orch-enter run agent-exec's real type_line and enter_line against that pane."""
+
     def setUp(self):
         self.now = 1_800_000_000.0
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         for target, attr, val in ((so.sw, "RUNNER_DIR", os.path.join(self.tmp, "runner")),
                                   (so.sw, "HANDOFF", os.path.join(self.tmp, "handoff")),
+                                  (so.sw, "WORK", os.path.join(self.tmp, "work")),
                                   (so.time, "time", lambda: self.now)):
             p = patch.object(target, attr, val)
             p.start()
@@ -310,54 +372,94 @@ class LoopCase(unittest.TestCase):
         p = patch.object(so.sw, "api", self.be.api)
         p.start()
         self.addCleanup(p.stop)
-        self.sup = so.Supervisor("steward")
-        self.sup.agent = self.fake_agent
-        self.sup.beat()
         self.pane, self.spinning = BUSY_PANE, True
-        self.pasted, self.enters, self.typed = [], 0, []   # message ids pasted; Enter presses by orch-keys; texts sent
-        self.send_rc, self.keys_rc = [], []                 # queued exit codes for orch-send / orch-keys (default 0)
-        self.keys, self.killed, self.on_keys, self.status_fail = [], 0, None, 0   # status_fail: next N orch-status fail
-        self.send_raise_before = self.send_raise_after = None
-        self.pane_before, self.after_send = None, None   # after_send(): the pane changes right after orch-send returns
-        self.paste_pane = None   # what a paste that was not submitted left in the box (the expanded text)
+        self.editor, self.history = "", []
+        self.typed, self.submitted, self.pasted, self.enters = [], [], [], 0   # pasted: message ids whose line was typed
+        self.files = {}                       # message id -> text of the message file
+        self.enter_works, self.on_type, self.on_enter, self.after_type = True, None, None, None
+        self.type_rc, self.enter_raise, self.type_raise = [], None, None
+        self.keys, self.keys_rc, self.killed, self.on_keys, self.status_fail = [], [], 0, None, 0
+        self.sup = self.new_supervisor()
+        self.sup.beat()
+
+    def new_supervisor(self):
+        sup = so.Supervisor("steward")
+        sup.agent = self.fake_agent
+        return sup
+
+    def restart_supervisor(self):
+        """A replacement supervisor process: only the state file survives."""
+        self.sup = self.new_supervisor()
+        self.sup.beat()
+
+    def can_edit(self):
+        box = so.PANE.pane_box(self.pane or "")
+        return box["state"] == "empty" or self.box_less()
+
+    def box_less(self):
+        lines = so.PANE.pane_lines(self.pane or "")
+        return bool(lines) and not any(so.INPUT_RULE.match(ln) or so.PROMPT_LINE.match(ln) for ln in lines)
+
+    def render(self):
+        if not self.pane:
+            return self.pane or ""
+        lines = self.pane.rstrip("\n").split("\n")
+        box = so.PANE.pane_box(self.pane)
+        if box["state"] == "empty" and box["top"] is not None:
+            top, bot = box["top"], box["bottom"]
+            if self.editor:
+                width = so.PANE.pane_cells(lines[bot].strip()) - 2
+                rows = textwrap.wrap(self.editor, width, break_on_hyphens=False) or [""]
+                lines[top + 1:bot] = ["❯ " + rows[0]] + ["  " + r for r in rows[1:]]
+            lines[top:top] = ["❯ " + h for h in self.history]
+        elif self.box_less():
+            lines += [ln for h in self.history for ln in (h, "got: " + h)] + ([self.editor] if self.editor else [])
+        return "\n".join(lines) + "\n"
+
+    def line(self):
+        return Path(self.sup.inbox, "line.txt").read_text().rstrip("\n")
 
     def fake_agent(self, *args, **kw):
-        """agent-exec as the supervisor sees it. A paste that is not submitted (exit 6 or 7) leaves the text in the box,
-        like Claude Code; a successful Enter on it clears the box."""
-        if args[0] == "orch-status":
+        cmd, opts = args[0], dict(zip(args[2::2], args[3::2]))
+        plain = "--plain" in args
+        if cmd == "orch-status":
             if self.status_fail:
                 self.status_fail -= 1
                 raise RuntimeError("agent-exec orch-status failed (1)")   # as Supervisor.agent(check=True) raises
             tail = f"✻ Working (esc to interrupt) {self.now}" if self.spinning else "done\n❯ "
-            return Result(stdout=json.dumps({"alive": True, "dead": False, "tail": tail, "screen": self.pane, "pid": 7}))
-        if args[0] == "orch-send":
-            if self.send_raise_before:
-                raise self.send_raise_before
-            text = Path(self.sup.inbox, "message.md").read_text()
-            rc = self.send_rc.pop(0) if self.send_rc else 0
-            if rc not in so.NOT_PASTED:
-                self.typed.append(text)
-                mid = next((m["id"] for m in self.be.msgs if m["text"] in text), None)
-                self.pasted.append(mid)
-                if rc != 0:
-                    self.pane_before, self.pane = self.pane, text_pane(text)
-                    self.paste_pane = self.pane
-            if self.after_send:
-                self.after_send()
-            if self.send_raise_after:
-                raise self.send_raise_after
-            return Result(rc)
-        if args[0] == "orch-keys":
+            return Result(stdout=json.dumps({"alive": True, "dead": False, "tail": tail, "screen": self.render(), "pid": 7}))
+        if cmd == "orch-capture":
+            if self.status_fail or self.pane is None:
+                return Result(stdout=json.dumps({"pane": None, "screen": ""}))
+            ok = opts.get("--pane") in (None, "%1")
+            return Result(stdout=json.dumps({"pane": "%1" if ok else None, "screen": self.render() if ok else ""}))
+        if cmd == "orch-type":
+            line = self.line()
+            if "--id" in opts:
+                self.files[int(opts["--id"])] = Path(self.sup.inbox, "message.md").read_text()
+            self.pasted.append((self.sup.message or {}).get("id"))
+            if self.type_rc:
+                return Result(self.type_rc.pop(0))
+            out = so.PANE.type_line(Driver(self), line, plain)
+            if self.type_raise:
+                raise self.type_raise
+            if self.after_type:
+                self.after_type()
+            return Result({"ok": 0, "nothing": 5, "erased": 8}.get(out, 9), json.dumps({"typed": out}))
+        if cmd == "orch-enter":
+            st = so.PANE.enter_line(Driver(self), self.line(), int(opts.get("--before") or 0), plain)
+            if self.enter_raise:
+                raise self.enter_raise
+            return Result(stdout=json.dumps({"state": st}))
+        if cmd == "orch-keys":
             rc = self.keys_rc.pop(0) if self.keys_rc else 0
             if rc == 0:
                 self.keys.append(list(args[2:]))
                 self.enters += "Enter" in args[2:]
-                if "Enter" in args[2:] and self.pane is not None and self.pane is self.paste_pane:
-                    self.pane = self.pane_before
                 if self.on_keys:
                     self.on_keys(list(args[2:]))
             return Result(rc)
-        if args[0] == "orch-kill":
+        if cmd == "orch-kill":
             self.killed += 1
             return Result()
         raise AssertionError(args)
@@ -371,13 +473,12 @@ class LoopCase(unittest.TestCase):
             self.now += self.sup.next_wake()
         return steps
 
-    def paste_times(self):
-        return [t for t, _ in self.paste_log]
+    def idle_at(self, pane):
+        self.spinning, self.pane = False, pane
+        self.run_loop(25)
 
-
-class BusyDeliveryTest(LoopCase):
     def track(self):
-        """Record when each paste happens (relative to the start)."""
+        """Record when each message's line is typed (relative to now)."""
         start, self.paste_log, real = self.now, [], self.fake_agent
 
         def agent(*args, **kw):
@@ -389,6 +490,15 @@ class BusyDeliveryTest(LoopCase):
         self.sup.agent = agent
         return start
 
+    def paste_times(self):
+        return [t for t, _ in self.paste_log]
+
+    def pointer(self, mid, bus=None, sender="chief", urgent=False):
+        path = os.path.join(self.tmp, "work", "orchestrators", "steward", ".orchestrator", "inbox", f"msg-{mid}.md")
+        return f"New bus message #{bus or mid} from {sender}{' (URGENT)' if urgent else ''}: read {path}"
+
+
+class BusyDeliveryTest(LoopCase):
     def test_busy_pane_delivers_after_max_wait_measured_from_enqueue(self):
         self.run_loop(3)
         self.track()
@@ -397,6 +507,7 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual(self.be.delivered(), [1])
         self.assertTrue(89 <= self.paste_times()[0] <= 91, self.paste_log)
         self.assertEqual(self.be.types("message-delivered-busy"), [1])
+        self.assertEqual(self.submitted, ["[Message from chief via swarm] bus #1 hello"])   # one short line: as is
 
     def test_urgent_queued_just_after_a_poll_lands_at_about_15_seconds(self):
         self.run_loop(3)
@@ -404,8 +515,9 @@ class BusyDeliveryTest(LoopCase):
         self.be.add("URGENT bus #%d thread t | reply\n\nstop")   # just after the heartbeat: found ~10 s later
         self.run_loop(40)
         self.assertTrue(14.5 <= self.paste_times()[0] <= 16, self.paste_log)
+        self.assertEqual(self.submitted, [self.pointer(1, urgent=True)])
 
-    def test_old_message_found_busy_is_pasted_at_once(self):
+    def test_old_message_found_busy_is_typed_at_once(self):
         self.be.add("bus #%d hello", at=self.now - 600)   # queued while nobody looked (enqueue time, not discovery)
         self.track()
         self.run_loop(15)
@@ -422,10 +534,10 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual([m for _, m in self.paste_log], [1, 2, 3])
         self.assertTrue(times[0] <= 16, times)
         self.assertTrue(4.5 <= times[1] - times[0] <= 6.5 and 4.5 <= times[2] - times[1] <= 6.5, times)
+        self.assertEqual(self.be.delivered(), [1, 2, 3])
 
     def test_empty_receipt_reply_resets_the_backlog(self):
         self.run_loop(3)
-        self.track()
         self.be.add("URGENT bus #%d first")
         self.run_loop(20)
         self.assertEqual(self.be.delivered(), [1])
@@ -446,18 +558,18 @@ class BusyDeliveryTest(LoopCase):
         self.assertIsNone(self.sup.message)
         self.pane = BUSY_PANE
         self.run_loop(120)
-        self.assertEqual(self.pasted, [])
+        self.assertEqual(self.typed, [])
 
-    def test_menu_and_draft_and_unreadable_box_block_busy_paste(self):
+    def test_menu_and_draft_and_unreadable_box_block_busy_delivery(self):
         self.be.add("bus #%d hello")
         for pane in (MENU_PANE, _pane("❯ half-typed thought"), _pane("❯ ", "second line draft"), "⏺ working\n❯ \n",
-                     cap("draft"), cap("single"), cap("menu")):
+                     cap("draft"), cap("single"), cap("menu"), PASTED_PANE):
             self.pane = pane
             self.run_loop(120)
-            self.assertEqual(self.pasted, [], pane[-80:])
+            self.assertEqual((self.typed, self.enters), ([], 0), pane[-80:])
         self.pane = cap("queued")
         self.run_loop(15)
-        self.assertEqual(self.pasted, [1])
+        self.assertEqual(self.be.delivered(), [1])
 
     def test_blocked_message_does_not_spin_the_loop(self):
         self.be.add("bus #%d hello")
@@ -465,113 +577,31 @@ class BusyDeliveryTest(LoopCase):
         steps = self.run_loop(200)
         self.assertLess(len(steps), 200 / so.POLL + 15)
 
-    def test_receipt_retry_without_repaste_and_one_busy_event(self):
+    def test_receipt_retry_without_retyping_and_one_busy_event(self):
         self.be.add("bus #%d hello")
         self.be.lose_reply = 1   # the backend stores the receipt, the reply is lost: the receipt is sent again
         self.run_loop(120)
-        self.assertEqual(self.pasted, [1])
+        self.assertEqual((len(self.typed), self.enters), (1, 1))
         self.assertEqual(self.be.types("message-delivered"), [1])
         self.assertEqual(self.be.types("message-delivered-busy"), [1])
 
-    def test_failed_heartbeat_after_paste_retries_only_the_receipt(self):
+    def test_failed_heartbeats_after_submission_retry_only_the_receipt(self):
         self.be.add("bus #%d hello")
         self.run_loop(85)
         self.be.fail = 3
-        self.run_loop(60)
-        self.assertEqual(self.pasted, [1])
-        self.assertEqual(self.be.delivered(), [1])
-
-    def test_paste_failure_retries_the_paste(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [5]   # tmux paste-buffer failed: nothing typed
-        self.run_loop(120)
-        self.assertEqual(self.pasted, [1])
-        self.assertEqual(self.be.delivered(), [1])
-
-    def test_failed_enter_is_retried_alone_and_acked_only_after_submit(self):
-        self.be.add("bus #%d hello")
-        self.send_rc, self.keys_rc = [6], [1] * 1000   # pasted, Enter failed; Enter retries keep failing
-        self.run_loop(130)
-        self.assertEqual(self.pasted, [1])
-        self.assertEqual(self.be.delivered(), [])     # not acknowledged before the submit is confirmed
-        self.assertEqual(self.typed and len(self.typed), 1)
-        self.keys_rc = []                             # the next Enter goes through
-        self.run_loop(15)
-        self.assertEqual(self.pasted, [1])            # never pasted a second time
-        self.assertEqual(self.enters, 1)
-        self.assertEqual(self.be.delivered(), [1])
-        self.assertEqual(self.be.types("message-delivered-busy"), [1])
-
-    def test_unknown_outcome_with_empty_box_is_held_not_acknowledged(self):
-        """orch-send timed out after Claude Code took the text (box empty again): maybe submitted, maybe not. No receipt,
-        no Enter, never pasted again; one delivery-unknown event."""
-        self.be.add("bus #%d hello")
-        self.send_raise_after = so.subprocess.TimeoutExpired("agent-exec", 60)
-        self.run_loop(130)
-        self.send_raise_after = None
-        self.run_loop(200)
-        self.assertEqual(self.pasted, [1])
-        self.assertEqual(self.enters, 0)
-        self.assertEqual(self.be.delivered(), [])
-        self.assertEqual(self.be.types("delivery-unknown"), [None])
-        self.assertIn(1, self.sup.held)
-
-    def test_unknown_outcome_with_the_text_still_in_the_box_gets_enter(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [6]   # the fake leaves the text in the box ...
-        self.send_raise_after = so.subprocess.TimeoutExpired("agent-exec", 60)   # ... and the outcome is unknown
-        self.run_loop(110)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
-        self.assertEqual(self.be.types("delivery-unknown"), [])
-
-    def test_pre_launch_failure_is_not_acknowledged_and_is_pasted_later(self):
-        """Probe: OSError before orch-send started used to give 0 pastes, 1 Enter and a receipt."""
-        self.be.add("bus #%d hello")
-        self.send_raise_before = OSError("agent-exec: no such file")
-        self.run_loop(130)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([], 0, []))
-        self.send_raise_before = None
-        self.run_loop(15)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, [1]))
-
-    def test_enter_withheld_by_orch_send_is_not_pressed_onto_a_menu(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [7]   # pasted, then orch-send saw the pane change and withheld Enter
-
-        def to_menu():
-            self.pane, self.after_send = MENU_PANE, None
-        self.after_send = to_menu
-        self.run_loop(300)
-        self.assertEqual(self.pasted, [1])
-        self.assertEqual((self.enters, self.be.delivered()), (0, []))
-        self.assertEqual(self.be.types("delivery-deferred"), [None])
-        self.pane = self.paste_pane = text_pane(self.typed[0])
-        self.run_loop(15)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
-
-    def test_confirmed_paste_whose_text_is_gone_is_held(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [6]
-
-        def emptied():
-            self.pane = BUSY_PANE   # the box is empty again: the text went somewhere, unknown where
-        self.after_send = emptied
-        self.run_loop(160)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
-        self.assertEqual(self.be.types("delivery-unknown"), [None])
+        self.run_loop(80)
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (1, 1, [1]))
 
     def test_pane_changes_during_the_message_poll(self):
-        """Probe: the pane turned into the trust menu inside the message-poll heartbeat; the paste used the old capture."""
-        self.spinning = False
-        self.pane = cap("idle")
-        self.run_loop(25)
+        """The pane turned into the trust menu inside the message-poll heartbeat: the send-time capture sees it."""
+        self.idle_at(cap("idle"))
         self.be.add("bus #%d hello")
 
         def flip():
             self.pane = MENU_PANE
         self.be.on_beat = flip
         self.run_loop(30)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([], 0, []))
+        self.assertEqual((self.typed, self.enters, self.be.delivered()), ([], 0, []))
 
     def test_older_backend_refusing_the_new_event_types_does_not_stop_the_session(self):
         self.run_loop(3)
@@ -582,60 +612,23 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual(self.sup.state, "running")
         self.assertIsNone(self.sup.blocked)
         self.assertEqual(self.be.types("delivery-deferred"), [])
-        self.assertFalse(any(e["type"] == "delivery-deferred" for e in self.sup.events))
-
-    def test_unrelated_draft_after_a_paste_gets_no_enter(self):
-        self.be.add("bus #%d hello")
-        self.send_rc = [6]
-
-        def other():
-            self.pane = _pane("❯ someone else's draft")
-        self.after_send = other
-        self.run_loop(300)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 0, []))
-        self.assertTrue(self.be.texts[-1].endswith("reason=draft"), self.be.texts)
-
-    def test_quoted_menu_words_in_the_pasted_message_do_not_stall_it(self):
-        self.be.add("bus #%d says: The installer says Enter to confirm.")
-        self.send_rc = [6]
-
-        def show_paste():
-            text = Path(self.sup.inbox, "message.md").read_text()
-            self.pane = _pane(*("❯ " + text).splitlines())
-        self.after_send = show_paste
-        self.run_loop(110)
-        self.assertEqual((self.pasted, self.enters, self.be.delivered()), ([1], 1, [1]))
 
     def test_activity_seen_on_the_fresh_capture_applies_the_busy_wait(self):
-        """PR 67 review: idle at observation, busy on the post-poll capture; the new normal message was pasted at once."""
-        self.spinning = False
-        self.pane = cap("idle")
-        self.run_loop(25)
+        """Idle at observation, busy on the post-poll capture: the new normal message waits the busy time."""
+        self.idle_at(cap("idle"))
         self.be.add("bus #%d normal")
         start = self.now
 
         def go_busy():
             self.pane, self.spinning, self.be.on_beat = cap("busy"), True, None
         self.be.on_beat = go_busy
-        self.track()
         self.run_loop(60)
-        self.assertEqual(self.pasted, [])
+        self.assertEqual(self.typed, [])
         self.run_loop(45)
-        self.assertEqual(self.pasted, [1])
+        self.assertEqual(self.be.delivered(), [1])
         self.assertGreaterEqual(self.sup.last_busy_paste - start, 89)
 
-    def test_repeated_paste_failure_is_reported(self):
-        self.be.add("bus #%d hello")
-        self.pane = cap("idle")
-        self.spinning = False
-        self.send_rc = [5] * 1000   # tmux never takes the paste
-        self.run_loop(200)
-        self.assertEqual((self.pasted, self.be.delivered()), ([], []))
-        self.assertEqual([t for t in self.be.texts if "reason=" in t][-1].split("reason=")[1], "paste_failed")
-        self.assertEqual(len(self.be.types("delivery-deferred")), 1)
-
     def test_failed_heartbeat_keeps_deferral_tracking(self):
-        """PR 67 review: one failed GET reset the timer and the dedup set (two notices for one id there)."""
         self.be.add("bus #%d hello")
         self.pane = _pane("❯ draft")
         self.run_loop(100)
@@ -646,25 +639,289 @@ class BusyDeliveryTest(LoopCase):
         self.assertEqual(self.be.types("delivery-deferred"), [None])
 
     def test_sustained_deferral_is_reported_once_per_reason(self):
-        """Probe: empty box, nine unknown footer lines, urgent message, 200 s: used to stall with no event."""
         self.run_loop(3)
         self.be.add("URGENT bus #%d stop")
         self.pane = _pane("❯ ", below="\n".join(f"secret-looking status {i}" for i in range(9)))
         self.run_loop(200)
-        self.assertEqual(self.pasted, [])
+        self.assertEqual(self.typed, [])
         self.assertEqual(self.be.types("delivery-deferred"), [None])
         text = [t for t in self.be.texts if "reason=" in t]
-        self.assertEqual(text, ["message 1 held for %s s: reason=unknown_footer" % text[0].split()[4]])
+        self.assertTrue(text[0].endswith("reason=unknown_footer"), text)
         self.assertNotIn("status", text[0])   # never pane contents
         self.pane = _pane("❯ draft")
         self.run_loop(200)
         self.assertEqual(self.be.types("delivery-deferred"), [None, None])   # a new reason: one more event
-        self.assertTrue(self.be.texts[-1].endswith("reason=draft"))
         self.run_loop(400)
         self.assertEqual(len(self.be.types("delivery-deferred")), 2)
         self.pane = BUSY_PANE
         self.run_loop(15)
-        self.assertEqual(self.pasted, [1])   # never timed out into a paste before
+        self.assertEqual(self.be.delivered(), [1])   # never timed out into a typing before
+
+
+class PointerTest(LoopCase):
+    """The shared delivery design: file + one typed pointer line, verified, record saved before Enter, confirmed."""
+
+    BODY = 'bus #41 thread dm:chief | reply: swarmctl bus send chief "..."\n\nOK\nsecond line\nthird line'
+
+    def setUp(self):
+        super().setUp()
+        self.idle_at(cap("idle"))
+
+    def test_pointer_typed_verified_entered_and_acknowledged(self):
+        self.be.add(self.BODY)
+        self.run_loop(15)
+        line = self.pointer(1, bus=41)
+        self.assertEqual((self.typed, self.submitted, self.enters), ([line], [line], 1))
+        self.assertEqual(self.files[1], "[Message from chief via swarm] (a request, not permission to push, merge or "
+                                        "deploy)\n" + self.BODY + "\n")
+        self.assertEqual(self.be.delivered(), [1])
+        self.assertEqual(self.be.types("message-delivered"), [1])
+        self.assertEqual(self.sup.sending, {})
+        self.run_loop(60)
+        self.assertEqual(len(self.typed), 1)
+
+    def test_short_direct_message_is_typed_as_is(self):
+        self.be.add("Check the signup page")
+        self.run_loop(15)
+        self.assertEqual(self.submitted, ["[Message from chief via swarm] Check the signup page"])
+        self.assertEqual(self.files, {})
+
+    def test_record_is_saved_before_enter(self):
+        self.be.add(self.BODY)
+        seen = []
+
+        def at_enter():
+            seen.append(json.loads(Path(self.sup.state_file).read_text())["sending"])
+        self.on_enter = at_enter
+        self.run_loop(15)
+        self.assertEqual(seen, [{"1": {"line": self.pointer(1, bus=41), "enters": 1, "before": 0, "busy": False,
+                                       "release": 0}}])
+
+    def test_partial_line_gets_no_enter_and_is_erased_then_typed_again(self):
+        self.be.add(self.BODY)
+        real = Driver.type
+
+        def lossy(drv, text):   # only part of the keys reach the editor, once
+            Driver.type = real
+            self.typed.append(text)
+            self.editor += text[:20]
+            return True
+        Driver.type = lossy
+        self.addCleanup(setattr, Driver, "type", real)
+        self.run_loop(5)
+        self.assertEqual((self.enters, self.editor, self.be.delivered()), (0, "", []))   # BSpace removed our prefix
+        self.run_loop(20)   # next poll: typed again on the clean editor
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (2, 1, [1]))
+
+    def test_foreign_text_in_the_editor_gets_no_enter_and_is_left_alone(self):
+        self.be.add(self.BODY)
+        self.on_type = lambda text: setattr(self, "on_type", None) or setattr(self, "editor", "x")   # a stray key first
+        self.run_loop(300)
+        self.assertEqual((self.enters, self.editor, self.be.delivered()), (0, "x" + self.pointer(1, bus=41), []))
+        self.assertEqual((len(self.typed), self.sup.held[1]["why"]), (1, "not_landed"))
+
+    def test_dialog_between_typing_and_enter_gets_no_enter(self):
+        self.be.add(self.BODY)
+
+        def dialog():
+            self.pane = MENU_PANE
+        self.after_type = dialog
+        self.run_loop(15)
+        self.after_type = None
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (1, 0, []))
+        self.assertEqual(self.sup.held[1]["why"], "not_landed")
+        self.pane = cap("idle")
+        self.run_loop(300)
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (1, 0, []))   # held: never typed again
+        self.assertEqual(self.be.types("delivery-unknown"), [None])
+
+    def test_crash_after_typing_before_the_record_types_nothing_again(self):
+        self.be.add(self.BODY)
+        self.type_raise = Crash()
+        with self.assertRaises(Crash):
+            self.run_loop(15)
+        self.type_raise = None
+        self.assertEqual(self.sup.sending, {})
+        self.restart_supervisor()
+        self.run_loop(120)   # the restarted supervisor sees a recent change (busy wait), then submits what is there
+        self.assertEqual((len(self.typed), self.submitted, self.be.delivered()), (1, [self.pointer(1, bus=41)], [1]))
+
+    def test_crash_before_enter_presses_enter_once_without_retyping(self):
+        self.be.add(self.BODY)
+        real = self.on_enter
+
+        def die():
+            raise Crash()
+        self.on_enter = die   # the process dies with the record saved, before the key reaches the pane
+        with self.assertRaises(Crash):
+            self.run_loop(15)
+        self.on_enter = real
+        self.assertEqual((self.enters, self.submitted), (1, []))   # counted, but nothing reached the editor
+        self.restart_supervisor()
+        self.run_loop(15)
+        self.assertEqual((len(self.typed), len(self.submitted), self.be.delivered()), (1, 1, [1]))
+
+    def test_crash_after_enter_never_submits_twice(self):
+        self.be.add(self.BODY)
+        self.enter_raise = Crash()   # Enter went in; the supervisor died before it recorded anything else
+        with self.assertRaises(Crash):
+            self.run_loop(15)
+        self.enter_raise = None
+        self.assertEqual(len(self.submitted), 1)
+        self.restart_supervisor()
+        self.run_loop(60)
+        self.assertEqual((len(self.typed), len(self.submitted), self.enters, self.be.delivered()), (1, 1, 1, [1]))
+
+    def test_unknown_after_enter_without_evidence_is_held(self):
+        self.be.add(self.BODY)
+        self.enter_raise = Crash()
+        with self.assertRaises(Crash):
+            self.run_loop(15)
+        self.enter_raise = None
+        self.history.clear()   # the conversation scrolled away: no evidence either way
+        self.restart_supervisor()
+        self.run_loop(300)
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (1, 1, []))
+        self.assertEqual(self.sup.held[1]["why"], "submit_uncertain")
+
+    def test_enter_that_does_not_take_is_retried_then_held(self):
+        self.be.add(self.BODY)
+        self.enter_works = False
+        self.run_loop(120)
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (1, so.SUBMIT_TRIES, []))
+        self.assertEqual(self.sup.held[1]["why"], "submit_uncertain")
+
+    def test_queued_hint_alone_is_not_a_receipt(self):
+        self.be.add(self.BODY)
+
+        def swallow():
+            self.editor, self.pane, self.enter_works = "", cap("queued"), False   # the box shows only the generic hint
+        self.on_enter = swallow
+        self.run_loop(60)
+        self.assertEqual(self.be.delivered(), [])
+        self.assertIn(self.sup.held.get(1, {}).get("why"), ("submit_uncertain", "not_landed"))
+
+    def dialog_takes_the_line(self):
+        self.pane, self.editor = MENU_PANE, ""   # a dialog opened right after the line verified, and took it
+
+    def test_release_types_once_then_holds_again(self):
+        """Recheck 3 finding 2: one admin --resend allowed two typings. Now one release, one typing."""
+        self.be.add(self.BODY)
+        self.after_type = self.dialog_takes_the_line
+        self.run_loop(15)
+        self.assertEqual(self.sup.held[1]["why"], "not_landed")
+        self.pane = cap("idle")
+        self.be.msgs[0]["release"] = 1    # swarmctl orchestrator release steward 1 --resend
+        self.run_loop(so.HEARTBEAT + 15)  # the next heartbeat brings it; the resend's typing does not verify either
+        self.assertEqual(len(self.typed), 2)
+        self.assertEqual(self.sup.held[1], {"why": "not_landed", "release": 1})
+        self.pane = cap("idle")
+        self.after_type = None
+        self.run_loop(300)
+        self.assertEqual((len(self.typed), self.be.delivered()), (2, []))   # no second typing for the same release
+        self.be.msgs[0]["release"] = 2
+        self.run_loop(so.HEARTBEAT + 15)
+        self.assertEqual((len(self.typed), len(self.submitted), self.be.delivered()), (3, 1, [1]))
+
+    def test_release_survives_a_crash_after_it_was_consumed(self):
+        self.be.add(self.BODY)
+        self.after_type = self.dialog_takes_the_line
+        self.run_loop(15)
+        self.pane, self.after_type = cap("idle"), None
+        self.be.msgs[0]["release"] = 1
+        self.type_raise = Crash()
+        with self.assertRaises(Crash):
+            self.run_loop(so.HEARTBEAT + 15)
+        self.type_raise = None
+        self.assertEqual(self.sup.held[1], {"why": "resend_typing", "release": 1})   # used up before the keys
+        self.restart_supervisor()
+        self.run_loop(300)   # the release is spent: no second typing and no Enter on the half-known state
+        self.assertEqual((len(self.typed), self.enters, self.be.delivered()), (2, 0, []))
+        self.be.msgs[0]["release"] = 2   # the admin releases again: the line already in the editor is submitted, not retyped
+        self.run_loop(so.HEARTBEAT + 15)
+        self.assertEqual((len(self.typed), len(self.submitted), self.be.delivered()), (2, 1, [1]))
+
+    def test_80x24_pane_delivers(self):
+        rule = "─" * 80
+        self.idle_at("\n".join(["⏺ Done."] * 18 + [rule, "❯ ", rule, "  ? for shortcuts",
+                                                  "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]) + "\n")
+        self.be.add(self.BODY)
+        rows = []
+        self.on_type = lambda text: None
+        self.after_type = lambda: rows.append(len(so.PANE.pane_box(self.render())["rows"]))
+        self.run_loop(15)
+        self.assertGreater(rows[0], 1)   # the pointer wrapped over several editor rows and still verified
+        self.assertEqual(self.submitted, [self.pointer(1, bus=41)])
+        self.assertEqual(self.be.delivered(), [1])
+
+    def test_invalid_api_key_text_above_an_empty_editor_is_not_a_login_screen(self):
+        """Recheck 3 finding 5: a tool diagnostic above a live editor killed the session as needs-login."""
+        lines = cap("idle").rstrip("\n").splitlines()
+        top = next(i for i, ln in enumerate(lines) if so.INPUT_RULE.match(ln))
+        pane = "\n".join(lines[:top] + ["⏺ Bash(curl api)", "  ⎿  Error: Invalid API key · Please run /login"] + lines[top:]) + "\n"
+        self.assertIsNone(so.classify(pane))
+        self.idle_at(pane)
+        self.be.add(self.BODY)
+        self.run_loop(60)
+        self.assertEqual((self.sup.state, self.killed), ("running", 0))
+        self.assertEqual(self.be.delivered(), [1])
+        # A real sign-in screen (no live editor) still stops the session and gets no keys.
+        self.idle_at("Select login method:\n ❯ 1. Claude account with subscription\n   2. Anthropic Console account\n")
+        self.run_loop(30)
+        self.assertEqual((self.sup.state, self.keys), ("needs-login", []))
+
+
+class ThemePickerTest(LoopCase):
+    """Recheck 3 finding 4: the real 2.1.321 theme picker at 220x50 has no Enter hint."""
+
+    def test_capture_is_recognized(self):
+        self.assertEqual(so.classify(cap_file("pane-theme-picker.txt")), ("first-run", "the theme picker", ["Enter"]))
+        draft = _pane("❯ Choose the text style that looks best with your terminal")
+        self.assertIsNone(so.classify(draft))
+        cut = cap_file("pane-theme-picker.txt").replace("  Syntax theme: Monokai Extended (ctrl+t to disable)", "")
+        self.assertIsNone(so.classify(cut))
+        self.assertIsNone(so.classify(cap_file("pane-theme-picker.txt").replace("❯", " ")))   # no selection marker
+
+    def test_enter_inside_the_start_up_window_only(self):
+        self.spinning = False
+        self.sup.started_at = int(self.now)
+        self.pane = cap_file("pane-theme-picker.txt")
+
+        def answered(k):
+            self.pane = cap("idle")
+        self.on_keys = answered
+        self.run_loop(20)
+        self.assertEqual(self.keys, [["Enter"]])
+        self.assertEqual(self.sup.state, "running")
+
+    def test_no_keys_after_the_start_up_window(self):
+        self.spinning = False
+        self.sup.started_at = int(self.now) - so.FIRST_RUN_WINDOW - 10
+        self.pane = cap_file("pane-theme-picker.txt")
+        self.run_loop(30)
+        self.assertEqual(self.keys, [])
+
+
+class CollapsedPasteCaptureTest(LoopCase):
+    """Recheck 3 finding 1: the real 2.1.321 captures of a collapsed multi-line paste (idle and busy). The marker is a
+    draft: no typing onto it and never Enter; the pointer design never produces one."""
+
+    def test_marker_is_a_draft_and_blocks(self):
+        for name in ("pane-idle-multiline-paste.txt", "pane-busy-urgent-paste.txt"):
+            pane = cap_file(name)
+            self.assertEqual((so.send_block(pane), so.send_block(pane, busy=True), so.classify(pane)), ("draft", "draft", None))
+            self.assertIsNotNone(so.PANE.editor_check(pane, "New bus message #1 from chief: read /x/msg-1.md"), name)
+
+    def test_no_keys_onto_a_collapsed_paste(self):
+        self.idle_at(cap_file("pane-idle-multiline-paste.txt"))
+        self.be.add("bus #%d hello\nmore")
+        self.run_loop(200)
+        self.assertEqual((self.typed, self.enters, self.be.delivered()), ([], 0, []))
+        self.assertTrue(self.be.texts[-1].endswith("reason=draft"), self.be.texts)
+
+
+def cap_file(name):
+    return (PANES / name).read_text()
 
 
 class IdleAndStopTest(LoopCase):
@@ -672,9 +929,7 @@ class IdleAndStopTest(LoopCase):
         self.spinning = False
 
     def test_idle_empty_prompt_delivers_immediately_without_busy_event(self):
-        self.go_idle()
-        self.pane = cap("idle")
-        self.run_loop(25)   # the pane is quiet for IDLE seconds
+        self.idle_at(cap("idle"))
         self.be.add("bus #%d hello")
         start = self.now
         self.run_loop(15)
@@ -683,12 +938,11 @@ class IdleAndStopTest(LoopCase):
         self.assertEqual(self.be.types("message-delivered-busy"), [])
 
     def test_idle_box_less_screen_is_refused_and_reported(self):
-        """Fail closed like agent-control PR 67: a screen with no Claude Code input box gets nothing."""
         self.go_idle()
         self.pane = "fake claude ready\n"
         self.be.add("bus #%d hello")
         self.run_loop(200)
-        self.assertEqual((self.pasted, self.be.delivered()), ([], []))
+        self.assertEqual((self.typed, self.be.delivered()), ([], []))
         self.assertTrue(self.be.texts[-1].endswith("reason=unreadable"), self.be.texts)
 
     def test_idle_box_less_stand_in_delivers_only_with_the_plain_adapter(self):
@@ -698,46 +952,23 @@ class IdleAndStopTest(LoopCase):
         with patch.object(so, "PLAIN", True):
             self.run_loop(40)
         self.assertEqual(self.be.delivered(), [1])
+        self.assertEqual(len(self.submitted), 1)
 
-    def test_plain_adapter_never_pastes_onto_a_failed_or_empty_capture(self):
-        self.go_idle()
-        with patch.object(so, "PLAIN", True):
-            self.pane = "fake claude ready\n"
-            self.run_loop(25)
-            self.be.add("bus #%d hello")
-            for pane in ("", "\n\n", "fake claude ready\n" + RULE + "\n❯ \n"):
-                self.pane = pane
-                self.run_loop(60)
-                self.assertEqual(self.pasted, [], repr(pane))
-            self.pane = "fake claude ready\n"
-
-            def fail_capture():
-                self.status_fail = 1   # step()'s status read worked; the send-time capture fails
-            self.be.lose_reply, self.be.on_beat = 0, fail_capture
-            self.sup.message = None
-            self.now += so.MESSAGE_POLL
-            self.sup.step()
-            self.assertEqual((self.sup.message or {}).get("id"), 1)
-            self.assertEqual(self.pasted, [])
-            self.be.on_beat = None
-            self.run_loop(15)
-        self.assertEqual(self.pasted, [1])
-
-    def test_stationary_menu_or_draft_never_gets_an_idle_paste(self):
+    def test_stationary_menu_or_draft_never_gets_an_idle_typing(self):
         self.go_idle()
         self.be.add("bus #%d hello")
         for pane in (MENU_PANE, cap("draft"), cap("single"), _pane("❯ ", RULE, "after a pasted rule"),
                      _pane('❯ Try "restarting the service"')):
             self.pane = pane
             self.run_loop(200)
-            self.assertEqual((self.pasted, self.enters), ([], 0), pane[-80:])
+            self.assertEqual((self.typed, self.enters), ([], 0), pane[-80:])
         self.pane = cap("cleared")
         self.run_loop(30)
-        self.assertEqual(self.pasted, [1])
+        self.assertEqual(self.be.delivered(), [1])
 
     def test_trust_screen_gets_down_then_enter_on_yes(self):
-        """Real capture cap-menu: "❯ No, exit" preselected. Down, then Enter only once the ❯ is on the Yes line."""
         self.go_idle()
+        self.sup.started_at = int(self.now)
         self.be.add("bus #%d hello")
         self.pane = cap("menu")
 
@@ -749,145 +980,86 @@ class IdleAndStopTest(LoopCase):
         self.on_keys = keys
         self.run_loop(60)
         self.assertEqual(self.keys, [["Down"], ["Enter"]])
-        self.assertEqual(self.be.delivered(), [1])   # the message waited behind the screen, then went in
+        self.assertEqual(self.be.delivered(), [1])
         self.assertEqual(self.killed, 0)
 
     def test_trust_screen_that_ignores_down_never_gets_enter(self):
         self.go_idle()
+        self.sup.started_at = int(self.now)
         self.pane = cap("menu")
         self.run_loop(60)
         self.assertNotIn(["Enter"], self.keys)
         self.assertEqual(self.keys, [["Down"]] * so.FIRST_RUN_TRIES)
-        self.assertEqual(self.sup.state, "needs-login")   # stays at the screen: stopped for an admin
+        self.assertEqual(self.sup.state, "needs-login")
 
     def test_login_screen_is_never_answered(self):
         self.go_idle()
         self.be.add("bus #%d hello")
         self.pane = cap("menu").rstrip() + "\n Select login method:\n ❯ 1. Claude account\n"
         self.run_loop(60)
-        self.assertEqual((self.keys, self.pasted), ([], []))
+        self.assertEqual((self.keys, self.typed), ([], []))
         self.assertEqual(self.sup.state, "needs-login")
 
     def test_wrap_up_is_not_sent_onto_a_menu_or_draft(self):
         self.go_idle()
         for pane in (MENU_PANE, cap("draft")):
-            self.pane = self.sup.screen = pane
+            self.pane = pane
             self.sup.state = "running"
             self.sup.begin_stop("the desired state is stopped")
-            self.assertEqual((self.pasted, self.typed, self.enters), ([], [], 0))
+            self.assertEqual((self.typed, self.enters), ([], 0))
             self.assertEqual(self.sup.stop_sent_at, 0)   # falls back to the stop deadline
             self.assertEqual(self.sup.stop_deadline, self.now + so.STOP_GRACE)
 
-    def test_wrap_up_is_sent_on_an_empty_prompt(self):
+    def test_wrap_up_is_typed_and_entered_on_an_empty_prompt(self):
         self.go_idle()
-        self.pane = self.sup.screen = cap("idle")
+        self.pane = cap("idle")
         self.sup.begin_stop("the desired state is stopped")
-        self.assertEqual(len(self.typed), 1)
-        self.assertIn("stopping this session", self.typed[0])
+        self.assertEqual(len(self.submitted), 1)
+        self.assertIn("stopping this session", self.submitted[0])
         self.assertEqual(self.sup.stop_sent_at, self.now)
 
-    def test_wrap_up_with_failed_enter_retries_enter_once(self):
+    def test_wrap_up_skipped_when_the_capture_fails(self):
         self.go_idle()
-        self.pane = self.sup.screen = cap("idle")
-        self.send_rc = [6]
+        self.pane = cap("idle")
+        self.status_fail = 2
+        self.sup.begin_stop("the desired state is stopped")
+        self.assertEqual((self.typed, self.enters, self.sup.stop_sent_at), ([], 0, 0))
+        self.assertIn("reason=unreadable", self.sup.events[-1]["text"])
+
+    def test_wrap_up_dialog_after_typing_gets_no_enter(self):
+        self.go_idle()
+        self.pane = cap("idle")
+        self.after_type = lambda: setattr(self, "pane", MENU_PANE)
         self.sup.begin_stop("restart requested by an admin", then="start")
-        self.assertEqual((len(self.typed), self.enters), (1, 1))
-        self.assertEqual(self.sup.stop_sent_at, self.now)
-
-
-class WrapUpTest(LoopCase):
-    def setUp(self):
-        super().setUp()
-        self.spinning = False
+        self.assertEqual((len(self.typed), self.enters, self.sup.stop_sent_at), (1, 0, 0))
 
     def test_restart_heartbeat_captures_the_pane_again(self):
-        """Probe: cached cap-idle, live trust menu, restart_generation incremented on the next heartbeat: the wrap-up was
-        pasted using the stale capture."""
-        self.pane = cap("idle")
-        self.run_loop(25)
+        self.idle_at(cap("idle"))
         self.pane = MENU_PANE
         self.be.restart_generation = 1
         self.now += so.HEARTBEAT
         self.sup.step()
         self.assertEqual(self.sup.state, "stopping")
-        self.assertEqual((self.typed, self.enters), ([], 0))
-        self.assertEqual(self.sup.stop_sent_at, 0)
-        self.assertEqual(self.sup.stop_deadline, self.now + so.STOP_GRACE)
-
-    def test_wrap_up_skipped_when_the_capture_fails(self):
-        self.pane = self.sup.screen = cap("idle")
-        self.status_fail = True
-        self.sup.begin_stop("the desired state is stopped")
         self.assertEqual((self.typed, self.enters, self.sup.stop_sent_at), ([], 0, 0))
-        self.assertEqual(self.sup.stop_deadline, self.now + so.STOP_GRACE)
-        self.assertIn("reason=unreadable", self.sup.events[-1]["text"])
-
-    def test_wrap_up_onto_a_box_less_screen_is_skipped(self):
-        self.pane = self.sup.screen = "fake claude ready\n"
-        self.sup.begin_stop("the desired state is stopped")
-        self.assertEqual((self.typed, self.sup.stop_sent_at), ([], 0))
-        with patch.object(so, "PLAIN", True):
-            self.sup.begin_stop("the desired state is stopped")
-        self.assertEqual(len(self.typed), 1)
-
-    def test_wrap_up_unknown_outcome_with_empty_box_gets_no_enter(self):
-        self.pane = self.sup.screen = cap("idle")
-        self.send_raise_after = so.subprocess.TimeoutExpired("agent-exec", 60)
-        self.sup.begin_stop("restart requested by an admin", then="start")
-        self.assertEqual((len(self.typed), self.enters, self.sup.stop_sent_at), (1, 0, 0))
-
-    def test_wrap_up_enter_withheld_onto_a_menu(self):
-        self.pane = self.sup.screen = cap("idle")
-        self.send_rc = [7]
-        real = self.fake_agent
-
-        def agent(*args, **kw):
-            r = real(*args, **kw)
-            if args[0] == "orch-send":
-                self.pane = MENU_PANE   # the pane became a menu after the paste
-            return r
-        self.sup.agent = agent
-        self.sup.begin_stop("restart requested by an admin", then="start")
-        self.assertEqual((len(self.typed), self.enters, self.sup.stop_sent_at), (1, 0, 0))
 
 
-def load_agent_exec():
-    import importlib.machinery
-    import importlib.util
-    loader = importlib.machinery.SourceFileLoader("agent_exec_busy", os.path.join(SERVER, "agent-exec"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_exec_busy", loader))
-    loader.exec_module(mod)
-    return mod
+class AgentExecCommandsTest(unittest.TestCase):
+    """agent-exec's own commands on a real (private) tmux socket are covered by test_orchestrator.SupervisorTest; here the
+    message file is checked directly."""
 
-
-class OrchSendEnterCheckTest(unittest.TestCase):
-    """agent-exec orch-send looks at the pane between the paste and Enter (exit 7 withholds Enter)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.ae = load_agent_exec()
-
-    def check(self, screen, plain=False):
-        return self.ae.pasted_still_there(screen, "Message from chief (through the swarm backend)\n\nhello", plain)
-
-    def test_pasted_text_in_the_box_gets_enter(self):
-        quoted = "Message from chief (through the swarm backend)\n\nThe installer says Enter to confirm."
-        for pane in (_pane("❯ Message from chief (through the swarm backend)", "", "  hello"),):
-            self.assertIsNone(self.check(pane), pane[-120:])
-        self.assertIsNone(self.ae.pasted_still_there(_pane(*("❯ " + quoted).splitlines()), quoted))
-
-    def test_menu_or_gone_text_withholds_enter(self):
-        for pane in (cap("menu"), MENU_PANE, cap("idle"), cap("busy"), cap("queued"), "", "\n\n", cap("draft"), cap("single"),
-                     _pane("❯ Message from chief (through the swarm backend)", "", "  hello", "my own edit"),
-                     _pane("❯ my notes about [Pasted text"), _pane("❯ [Pasted text #1 +3 lines]", below=""), PASTED_PANE,
-                     _pane("❯ [Pasted text #1 +3 lines]", below=FOOTER + "\nuser@host:~$ "),
-                     _pane("❯ hello", below=FOOTER + "\n ❯ 1. Yes\n Enter to confirm")):
-            self.assertIsNotNone(self.check(pane), pane[-120:])
-
-    def test_plain_stand_in(self):
-        self.assertIsNone(self.check("fake claude ready\nMessage from chief (through the swarm backend)\n", plain=True))
-        self.assertIsNotNone(self.check("fake claude ready\n", plain=True))
-        self.assertIsNotNone(self.check("Message from chief (through the swarm backend)\n ❯ 1. Grid\n", plain=True))
+    def test_message_file_is_private_and_atomic(self):
+        ae = so.PANE
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = ae.Paths(str(tmp / "work"), str(tmp / "handoff"))
+        inbox = Path(ae.orch_inbox(p, "steward"))
+        inbox.mkdir(parents=True)
+        (inbox / "message.md").write_text("[Message from chief via swarm]\nhello\n")
+        path = ae.orch_message_file(p, "steward", 12)
+        self.assertEqual(path, str(tmp / "work" / "orchestrators" / "steward" / ".orchestrator" / "inbox" / "msg-12.md"))
+        self.assertEqual(Path(path).read_text(), "[Message from chief via swarm]\nhello\n")
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(path))), ["msg-12.md"])
 
 
 if __name__ == "__main__":

@@ -61,36 +61,56 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
   the bottom of the pane (its key hint the last line, no input box on screen: text in a draft or in history is never
   answered). The folder trust screen, in both wordings, is answered from its selection: with the `❯` on "No, exit" it
   gets the arrow key towards Yes (Down for the current "Quick safety check", Up for the older "Do you trust the files
-  in this folder"), and Enter only once the one `❯` is on the Yes option (0.8.1). A sign-in screen
+  in this folder"), and Enter only once the one `❯` is on the Yes option (0.8.1). The 2.1.321 theme picker has no key
+  hint and is recognized from its full layout (title, the style list with one `❯`, the syntax-theme line). First-run
+  keys go only in the first 120 seconds after a start; a first-run screen later is never answered and ends as
+  `needs-login` like a screen that does not move. Sign-in text above a live, empty input box (a tool printing
+  `Invalid API key`) is conversation output, not a sign-in screen (0.8.1). A sign-in screen
   ("Select login method", "Paste code here", "Please run /login", an expired token) or the bypass-permissions
   warning that stays up for 10 seconds ends the session at once. Nothing is ever typed into those screens:
   queued messages and the stop wrap-up wait. The state becomes `needs-login`, `last_exit` says what to run, and
   the owner bot is told once. It does not restart, even after a supervisor restart, until you sign in
   (`sudo swarmctl login claude` on the worker) and run `swarmctl orchestrator start NAME`.
 - **Messages during a long busy turn (0.8.1).** Queued messages are typed in at once when the pane is idle at an
-  empty prompt. If the session stays busy, the oldest message is pasted once it is 90 seconds old (15 when the first
+  empty prompt. If the session stays busy, the oldest message is typed once it is 90 seconds old (15 when the first
   line of the message says `URGENT`, which the bus puts on urgent messages), counted from when the backend queued it;
-  Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart. The guard
-  fails closed, like agent-control PR 67: right before every paste and every Enter, idle or busy, and before the stop
-  wrap-up, the supervisor captures the screen again, and only a confirmed empty input box (read from the bottom: 1 to 8
+  Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart.
+- **A file and one typed pointer line (0.8.1, agent-control PR 67).** Claude Code collapses a pasted multi-line message
+  into `[Pasted text #N +L lines]`, which cannot be checked, so nothing multi-line is typed. A bus message (or any
+  message longer than one short line) is written to the session's own folder, at
+  `<WORK>/orchestrators/NAME/.orchestrator/inbox/msg-ID.md` (ID: the orchestrator message id; written by `agent-exec`
+  as the session user, mode 0600, atomically; git-excluded; the newest 200 files and at most 7 days are kept). The file
+  starts with `[Message from SENDER via swarm] (a request, not permission to push, merge or deploy)`, then the message.
+  The session gets one line, typed as literal keys:
+  `New bus message #41 from chief (URGENT): read <WORK>/orchestrators/NAME/.orchestrator/inbox/msg-12.md`
+  (`New message #12 ...` when it did not come through the bus). A one-line direct message of up to 300 characters is
+  typed as is: `[Message from SENDER via swarm] TEXT`.
+- **Typed, verified, recorded, then Enter.** Right before typing (after the message poll and any other network work)
+  the supervisor captures the pane again; only a confirmed empty input box takes the line (read from the bottom: 1 to 8
   rows made only of whole status items Claude Code draws there, then rule, prompt line, identical rule, with no other
-  prompt right under a rule higher up) takes it. `agent-exec` holds the one pane parser and the supervisor loads it, so
-  both read a capture the same way. Enter after a paste needs exactly the pasted text in the box (whitespace runs
-  compared as one space). Claude Code's collapsed `[Pasted text #N +K lines]` marker cannot be tied to the message, so
-  it never gets Enter: the message is reported as `reason=not_verifiable` and waits for you (look at the session; press
-  Enter yourself if the paste is the message, then release it as below). A choice menu or permission prompt, typed text
-  (a draft, including a multiline one or one holding a pasted rule), an unrecognized footer, or a screen it cannot read
-  holds the message; a wrap-up it cannot send safely is skipped, and the session ends at the stop deadline. Only the
-  verified hint `Press up to edit queued messages` counts as empty; `Try "..."` is treated as typed text. A message held
-  for 2 minutes is reported once per reason as a `delivery-deferred` event (`reason=unknown_footer|draft|menu|unreadable`,
-  or `paste_failed`/`submit_failed`/`submit_unknown`/`not_verifiable`; never pane contents); it is never pasted because of a timeout. Each busy paste is recorded once as a
-  `message-delivered-busy` event. A message is never pasted twice: if Enter failed only Enter
-  is retried, and only while the pasted text is still in the box; if only the receipt failed only the receipt is
-  retried. When the outcome of a paste is unknown and the box is empty again, the message is left unacknowledged and
-  reported once as `delivery-unknown`. These states are kept in the supervisor's state file, so a restarted supervisor
-  does not paste it again either. Check the session, then run `swarmctl orchestrator release NAME ID` if the message
-  arrived (marked delivered, nothing typed) or `swarmctl orchestrator release NAME ID --resend` to have it pasted once
-  more. The queue behind a held message waits until then. The only exception to the box rule is the kit's tests: with
+  prompt right under a rule higher up). `agent-exec orch-type` types the line into that pane (by its tmux pane ID) and
+  waits until the editor holds exactly the line (rows joined by display width, so a wrapped line in an 80x24 pane
+  works); if it does not, it removes its own partial text and nothing more happens this time. The supervisor then saves
+  a `sending` record to its state file (fsync), and `agent-exec orch-enter` captures the same pane again, presses Enter
+  only while the editor still holds exactly the line, and confirms: the line must show above the editor more often
+  than before it was typed. Claude Code's generic `Press up to edit queued messages` hint is not a receipt. Text above
+  a live editor is conversation, never a dialog or a sign-in screen. `agent-exec` holds the one pane parser and the
+  supervisor loads it.
+- **Never typed twice.** After a crash or restart the `sending` record decides, and nothing is typed again: the line
+  above the editor is a receipt, the line still in the editor gets Enter (at most 3 Enters in all), anything else is
+  held. A line found exactly in the editor with no record (the supervisor died between typing and saving) is submitted,
+  not typed again. A held message is reported once as a `delivery-unknown` event and stays held, also across
+  supervisor restarts. Check the session, then run `swarmctl orchestrator release NAME ID` if the message arrived
+  (marked delivered, nothing typed) or `swarmctl orchestrator release NAME ID --resend` to have it typed once more: one
+  release allows one typing, used up before the keys go in; if it does not land the message is held again. The queue
+  behind a held message waits until then. If only the receipt failed, only the receipt is retried. Each busy delivery
+  is recorded once as a `message-delivered-busy` event.
+- **Fails closed.** A choice menu or permission prompt, typed text (a draft), an unrecognized footer, a screen it
+  cannot read or a failed capture holds the message; a wrap-up it cannot send safely is skipped, and the session ends
+  at the stop deadline. Only the verified hint `Press up to edit queued messages` counts as empty; `Try "..."` is
+  treated as typed text. A message held for 2 minutes is reported once per reason as a `delivery-deferred` event
+  (`reason=unknown_footer|draft|menu|unreadable|not_landed|not_submitted|type_failed|submit_uncertain`; never pane
+  contents); it is never typed because of a timeout. The only exception to the box rule is the kit's tests: with
   `SWARM_ORCH_PANE_ADAPTER=plain` a stand-in program with no box parts at all gets idle messages and the wrap-up.
 - **Checkpoint.** The first prompt and the standing rules tell the agent to keep `CHECKPOINT.md` in its folder
   current, so even a crash with no session to resume loses little.
@@ -139,7 +159,7 @@ could not get past; see above), and `unreachable` (set by the backend when the h
 | `swarmctl orchestrator status NAME` | Settings, pid, tmux session, session id, uptime, last exit and the last events |
 | `swarmctl orchestrator logs NAME --lines 200` | The last lines of its terminal (up to 500), uploaded with each heartbeat |
 | `swarmctl orchestrator message NAME "text"` | One message, typed into the session when the agent is idle |
-| `swarmctl orchestrator release NAME ID [--resend]` | After a `delivery-unknown` event: the message arrived (marked delivered), or `--resend` to paste it once more (0.8.1) |
+| `swarmctl orchestrator release NAME ID [--resend]` | After a `delivery-unknown` event: the message arrived (marked delivered), or `--resend` to type it once more (0.8.1) |
 | `swarmctl orchestrator stop NAME` | Graceful stop: a wrap-up message, then the session ends when the agent goes quiet, or after 2 minutes |
 | `swarmctl orchestrator start NAME` | Set it to run. Also clears a crash loop and `needs-login` |
 | `swarmctl orchestrator restart NAME` | Graceful stop, then start. Also clears a crash loop and `needs-login` |
@@ -219,7 +239,7 @@ In `/etc/agent-swarm/swarm.env` (all optional):
 | `SWARM_ORCH_SCOPE` | `SWARM_TASK_SCOPE` (1) | Run the session in its own systemd user scope |
 | `SWARM_ORCH_POLL_SECONDS` | 10 | How often the supervisor looks at the session (was 5 before 0.7.1) |
 | `SWARM_ORCH_MESSAGE_POLL_SECONDS` | 10 | While no message is held, how often the supervisor asks the backend for the next one, idle or busy (0.8.0, busy too since 0.8.1; see [agent-bus.md](agent-bus.md)) |
-| `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS`, `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS`, `SWARM_ORCH_BUSY_GAP_SECONDS` | 90, 15, 5 | While the session is busy: how long a queued message waits before it is pasted (urgent: the shorter wait), and the pause between two busy pastes (0.8.1) |
+| `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS`, `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS`, `SWARM_ORCH_BUSY_GAP_SECONDS` | 90, 15, 5 | While the session is busy: how long a queued message waits before it is typed (urgent: the shorter wait), and the pause between two busy deliveries (0.8.1) |
 | `SWARM_ORCH_SCREEN_SECONDS` | 10 | How long a sign-in screen may stay up before the session is ended |
 | `SWARM_ORCH_LOGIN_MARKERS`, `SWARM_ORCH_BLOCK_MARKERS` | see `server/swarm_orchestrator.py` | Text (several separated by a vertical bar) that marks a sign-in screen or a screen it does not answer |
 | `SWARM_ORCH_LOGIN_CHECK` | 1 | 0 skips the sign-in check before a start (the screen check still runs) |
