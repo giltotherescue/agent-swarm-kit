@@ -11,6 +11,10 @@ output is captured; the CLI prints only the redacted skip note, and on a failure
 mode is 160000 on either side (added, modified, deleted), found from `git diff --cached --raw -z`, so it does not
 depend on `.gitmodules`. The pin stays modified in the worktree. If only pins remain, no commit is made. The
 caller's real index is replaced only after a successful commit, so any failure leaves it exactly as it was.
+The commit is made with plumbing (`git write-tree` from that index, `git commit-tree`, then `git update-ref HEAD`
+as a compare-and-swap on the old HEAD), so repository hooks (pre-commit, post-commit, reference-transaction and the
+rest) never run for it: a hook cannot stage the skipped pin, and a slow hook cannot time out after HEAD moved. If HEAD
+moved meanwhile, nothing is published and HEAD and the index are left as they are.
 
 It fails closed (raises, commits nothing, leaves the index alone) when:
 

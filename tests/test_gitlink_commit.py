@@ -298,13 +298,20 @@ class SourceRedactionTests(unittest.TestCase):
         self.assertNotIn("abcdefgh12345", err.getvalue())
         self.assertNotIn("A1b2C3d4", err.getvalue())
 
-    def test_failing_hook_stderr_is_redacted_before_it_is_cut(self):
-        # Round-2 recheck: TOKEN=abcdefgh12345, then padding sized so the last 300 characters start right after "TOKEN=".
-        hook = self.wd / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'TOKEN=abcdefgh12345\\n' >&2\nprintf '%0286d' 0 | tr 0 p >&2\nexit 1\n")
-        hook.chmod(0o755)
+    def failing_commit_tree(self):
+        """Patch git commit-tree to fail with TOKEN=abcdefgh12345 then padding sized so the last 300 characters start
+        right after "TOKEN=" (round-2 recheck). Hooks no longer run for exporter commits, so the stderr is injected."""
+        real_run = subprocess.run
+        def fake(cmd, *a, **k):
+            if "commit-tree" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, b"", ("TOKEN=abcdefgh12345\n" + "p" * 286).encode())
+            return real_run(cmd, *a, **k)
+        from unittest.mock import patch
+        return patch.object(gl.subprocess, "run", fake)
+
+    def test_failing_git_stderr_is_redacted_before_it_is_cut(self):
         import contextlib, io
-        with self.assertRaises(RuntimeError) as cm:
+        with self.failing_commit_tree(), self.assertRaises(RuntimeError) as cm:
             gl.commit_leftover(self.wd, "m", allow_gitlink=False)
         msg = str(cm.exception)
         self.assertIn("git ", msg)
@@ -312,7 +319,7 @@ class SourceRedactionTests(unittest.TestCase):
             self.assertNotIn(frag, msg)
         self.assertLessEqual(len(msg), 400)
         err = io.StringIO()
-        with contextlib.redirect_stderr(err):
+        with self.failing_commit_tree(), contextlib.redirect_stderr(err):
             sb.git_commit(str(self.wd), "Project log export")
         self.assertIn("git commit failed", err.getvalue())
         self.assertNotIn("abcdefgh", err.getvalue())
@@ -370,11 +377,7 @@ class SanitizeTests(unittest.TestCase):
         self.assertTrue(len(it["path"]) <= 200 and len(it["old"]) <= 12 and "\n" not in it["path"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class CliExportTests(Base):
+class CliBase(Base):
     """`swarmctl log export --dir DIR --git`, run through an installed-style symlink, uses the guarded exporter."""
     FIXTURE = "TOKEN=abcdefgh12345"
 
@@ -396,6 +399,9 @@ class CliExportTests(Base):
     def run_ctl(self, *args):
         return subprocess.run([str(self.ctl), *args], env=self.env, capture_output=True, text=True, timeout=60)
 
+
+
+class CliExportTests(CliBase):
     def test_cli_export_skips_pins_and_never_prints_the_token(self):
         head = g(self.wd, "rev-parse", "HEAD")
         r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
@@ -415,9 +421,7 @@ class CliExportTests(Base):
         self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "", "the real index matches the new HEAD")
 
     def test_cli_export_failure_is_redacted_and_exits_nonzero(self):
-        hook = self.wd / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'TOKEN=abcdefgh12345\\n' >&2\nprintf '%0286d' 0 | tr 0 p >&2\nexit 1\n")
-        hook.chmod(0o755)
+        (self.wd / ".git" / "refs" / "heads" / "main.lock").write_text("")   # update-ref cannot take the branch lock
         head, before = g(self.wd, "rev-parse", "HEAD"), g(self.wd, "ls-files", "-s")
         r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -425,3 +429,71 @@ class CliExportTests(Base):
         for frag in ("abcdefgh", "12345"):
             self.assertNotIn(frag, r.stdout + r.stderr)
         self.assertEqual((g(self.wd, "rev-parse", "HEAD"), g(self.wd, "ls-files", "-s")), (head, before))
+
+
+class ExporterHookTests(CliBase):
+    """Exporter commits run no repository hooks (Astra recheck 4): the published tree is the inspected tree."""
+
+    def hook(self, name, body):
+        h = self.wd / ".git" / "hooks" / name
+        h.write_text("#!/bin/sh\n" + body)
+        h.chmod(0o755)
+
+    def test_formatting_pre_commit_hook_cannot_commit_the_skipped_pin(self):
+        # P1: a hook that formats README and runs `git add --update` would also stage the modified tracked submodule
+        self.hook("pre-commit", 'printf "formatted\\n" > README.md\ngit add --update\n')
+        before = g(self.wd, "rev-parse", "HEAD:engine")
+        r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("left uncommitted", r.stderr)
+        self.assertIn("engine", r.stderr)
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD:engine"), before, "the skipped pin stays at its old value")
+        self.assertEqual(g(self.wd, "show", "HEAD:README.md"), "changed", "the hook did not run")
+        self.assertTrue(self.pin_modified())
+        self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "", "the real index matches the new HEAD")
+
+    def test_post_commit_hook_is_not_run_and_cannot_time_out(self):
+        # P2: a slow post-commit hook used to hit the timeout after HEAD moved, leaving the real index stale
+        marker = Path(self.tmp.name) / "hook-ran"
+        for name in ("pre-commit", "commit-msg", "prepare-commit-msg", "post-commit", "reference-transaction"):
+            self.hook(name, f'echo {name} >> "{marker}"\nsleep 5\n')
+        head = g(self.wd, "rev-parse", "HEAD")
+        r = self.run_ctl("log", "export", "--dir", str(self.wd), "--git")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("committed in", r.stdout)
+        self.assertFalse(marker.exists(), "no repository hook runs for an exporter commit")
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD~1"), head)
+        self.assertEqual(g(self.wd, "show", "HEAD:README.md"), "changed")
+        self.assertEqual(g(self.wd, "show", ":README.md"), "changed", "the real index is consistent with HEAD")
+        self.assertEqual(g(self.wd, "diff", "--cached", "--name-only"), "")
+
+    def test_moved_head_is_not_overwritten(self):
+        # update-ref is a compare-and-swap: if HEAD moves between inspection and publish, nothing is published
+        (self.wd / "new.txt").write_text("n\n")
+        before = (self.wd / ".git" / "index").read_bytes()
+        real_run, moved = subprocess.run, []
+        def racing(cmd, *a, **k):
+            if "update-ref" in cmd and not moved:
+                moved.append(commit(self.wd / "engine", "c", "c\n"))   # unrelated; then move HEAD out from under us
+                real_run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q",
+                          "--allow-empty", "-m", "race"], cwd=str(self.wd), check=True, capture_output=True)
+                moved.append(g(self.wd, "rev-parse", "HEAD"))
+            return real_run(cmd, *a, **k)
+        from unittest.mock import patch
+        with patch.object(gl.subprocess, "run", racing), self.assertRaises(RuntimeError):
+            self.run_commit(allow_gitlink=False)
+        self.assertEqual(g(self.wd, "rev-parse", "HEAD"), moved[-1], "the concurrent commit is kept")
+        self.assertEqual((self.wd / ".git" / "index").read_bytes(), before, "the real index is unchanged")
+
+    def test_identity_and_message_unchanged(self):
+        from unittest.mock import patch
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
+        with patch.dict(os.environ, clean, clear=True):
+            self.assertTrue(gl.commit_leftover(self.wd, "  export msg  \n\n\n", allow_gitlink=False))
+        self.assertEqual(g(self.wd, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%B"),
+                         "swarm-backend <swarm-backend@localhost>|swarm-backend <swarm-backend@localhost>|  export msg")
+        self.assertIn("commit: ", g(self.wd, "reflog", "-1"))
+
+
+if __name__ == "__main__":
+    unittest.main()

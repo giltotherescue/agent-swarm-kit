@@ -5,7 +5,9 @@ commits for someone is the backend's project-log export folder, and it goes thro
 separate index (the caller's index is untouched unless the commit succeeds): `git add -A`, then every staged entry whose
 index mode is 160000 on either side (added, modified, deleted) is unstaged, found from `git diff --cached --raw -z`, so
 .gitmodules is not needed. A gitlink replaced by a directory of files or by an ordinary file at the same path, any git
-error, a timeout, or a gitlink still staged after unstaging aborts the commit (fails closed).
+error, a timeout, or a gitlink still staged after unstaging aborts the commit (fails closed). The commit is built with
+plumbing (write-tree, commit-tree, update-ref compare-and-swap), so repository hooks never run for it: the tree published
+is exactly the tree inspected.
 
 `allow_gitlink` (task field, `swarmctl enqueue --allow-gitlink`) and AGENT_ALLOW_GITLINK=1 are metadata for a caller
 that auto-commits on a task's behalf; the stock export always passes allow_gitlink=False.
@@ -84,14 +86,17 @@ def gitlink_allowed(task=None, env=None):
     return v is True or str(v).strip().lower() in ("1", "true", "yes")
 
 
-def _git_raw(wd, args, check=True, index=None):
+def _git_raw(wd, args, check=True, index=None, input=None):
     """git with raw bytes, literal pathspecs and a timeout. Fails closed; error text is redacted."""
     env = dict(os.environ, GIT_LITERAL_PATHSPECS="1")
     if index:
         env["GIT_INDEX_FILE"] = index
-    name = "git " + " ".join(a for a in args[:3] if isinstance(a, str))
+    shown = list(args)
+    while shown[:1] == ["-c"]:
+        shown = shown[2:]            # "-c key=value" pairs are not the command
+    name = "git " + " ".join(a for a in shown[:3] if isinstance(a, str))
     try:
-        r = subprocess.run(["git", *args], cwd=str(wd), capture_output=True, env=env, timeout=GIT_TIMEOUT)
+        r = subprocess.run(["git", *args], cwd=str(wd), capture_output=True, env=env, timeout=GIT_TIMEOUT, input=input)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} timed out after {GIT_TIMEOUT} seconds")
     if check and r.returncode:
@@ -203,7 +208,19 @@ def commit_leftover(wd, message, allow_gitlink=None, skipped=None, log=None, ide
                                    + ", ".join(sanitize_field(g["path"], 200) for g in left[:MAX_ITEMS]))
         if not _git_raw(wd, ["diff", "--cached", "--name-only"], index=tmp).stdout.strip():
             return False
-        _git_raw(wd, ["-c", "user.name=" + identity[0], "-c", "user.email=" + identity[1], "commit", "-q", "-m", message], index=tmp)
+        # Plumbing, not `git commit`: exporter commits intentionally run NO repository hooks. A pre-commit hook could
+        # stage the very pin skipped above (`git add -u`), and a slow post-commit hook could time out after HEAD moved.
+        # write-tree publishes exactly the inspected index; update-ref (hooks disabled too) is a compare-and-swap on
+        # HEAD, so on any failure HEAD and the real index are both unchanged.
+        tree = _git_raw(wd, ["write-tree"], index=tmp).stdout.decode().strip()
+        old = _git_raw(wd, ["rev-parse", "--verify", "-q", "HEAD"], check=False).stdout.decode().strip()
+        ident = ["-c", "user.name=" + identity[0], "-c", "user.email=" + identity[1]]
+        msg = _git_raw(wd, ["stripspace"], input=message.encode()).stdout  # what `git commit -m` does to the message
+        new = _git_raw(wd, [*ident, "commit-tree", tree, *(["-p", old] if old else [])], input=msg).stdout.decode().strip()
+        subject = (msg.decode("utf-8", "replace").splitlines() or [""])[0]
+        # core.hooksPath=/dev/null: update-ref would otherwise run a reference-transaction hook
+        _git_raw(wd, ["-c", "core.hooksPath=/dev/null", "update-ref", "-m",
+                      ("commit: " if old else "commit (initial): ") + subject, "HEAD", new, old])
         os.replace(tmp, real)
         return True
     finally:
