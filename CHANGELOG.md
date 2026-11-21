@@ -26,6 +26,10 @@ Parent report and artifacts for follow-up and child tasks, ported from agent-con
 Docs note on the pack-once, shard-in-parallel remote-run pattern, ported from agent-control PR 70. See
 [docs/sizing-and-sandboxes.md](docs/sizing-and-sandboxes.md). Docs only; the kit ships no task-shim or remote-run.
 
+Docs note on Sandbox snapshot metadata and `ENGINE_REVISION`, ported from agent-control PRs 73 and 74: no `._*`/`.DS_Store`
+(`COPYFILE_DISABLE=1`), no `.git`, and an optional root `ENGINE_REVISION` file for a pinned submodule SHA. See
+[docs/sizing-and-sandboxes.md](docs/sizing-and-sandboxes.md). Docs only; the kit ships no packer or runner.
+
 Per-project test-base env var, ported from agent-control PR 69. See [docs/git-policy.md](docs/git-policy.md).
 
 - **`CLOZY_TEST_BASE=origin/<PR base>`** is exported for the whole task of a `clozy` task (so `test:changed` can narrow); the
