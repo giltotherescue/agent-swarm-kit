@@ -95,6 +95,8 @@ class WorkerTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def admin(self, method, path, body=None):
+        if method == "POST" and path == "/tasks" and isinstance(body, dict) and "owner" not in body and not body.get("follow_up"):
+            body = dict(body, owner="tester")  # enqueue needs an owner
         r = urllib.request.Request(os.environ["SWARM_URL"] + path, method=method,
                                    data=json.dumps(body).encode() if body is not None else None,
                                    headers={"Authorization": "Bearer adm", "Content-Type": "application/json"})

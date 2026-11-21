@@ -23,7 +23,7 @@ class EnqueueOwnerHttpTest(unittest.TestCase):
 
     def test_missing_or_empty_owner_is_rejected_with_hint(self):
         for body in ({"prompt": "no owner one"}, {"prompt": "no owner two", "owner": ""}, {"prompt": "no owner three", "owner": "  "}):
-            st, err = self.b.call("POST", "/tasks", body)
+            st, err = self.b.call("POST", "/tasks", body, bare=True)
             self.assertEqual(st, 400)
             self.assertIn("--owner <bot id or alias>", err["error"])
 
@@ -41,7 +41,7 @@ class EnqueueOwnerHttpTest(unittest.TestCase):
     def test_follow_up_of_ownerless_parent_needs_owner_but_internal_works(self):
         t = self.b.req("POST", "/tasks", {"prompt": "legacy parent", "owner": "alice"})["task"]
         self.b.api.s.run("UPDATE tasks SET state = 'done', owner = NULL WHERE id = ?", t["id"])
-        st, err = self.b.call("POST", "/tasks", {"prompt": "public follow", "follow_up": t["id"]})
+        st, err = self.b.call("POST", "/tasks", {"prompt": "public follow", "follow_up": t["id"]}, bare=True)
         self.assertEqual(st, 400)
         self.assertIn("--owner", err["error"])
         who = {"role": "admin", "bot": None}
