@@ -330,6 +330,51 @@ def repo_default_branch(repo, cwd=None):
     return m[1] if m else ""
 
 
+DEFAULT_TASK_BASE_ENV = "clozy=CLOZY_TEST_BASE"
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_BRANCH_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def task_base_env_map(raw=None):
+    """project -> env var name from SWARM_TASK_BASE_ENV ("project=NAME,project2=NAME2"; empty turns it off).
+    Bad names, and SWARM_* names, are dropped."""
+    raw = os.environ.get("SWARM_TASK_BASE_ENV", DEFAULT_TASK_BASE_ENV) if raw is None else raw
+    out = {}
+    for part in raw.split(","):
+        proj, _, name = part.partition("=")
+        proj, name = proj.strip().lower(), name.strip()
+        if proj and _ENV_NAME.match(name) and not name.startswith("SWARM_"):
+            out[proj] = name
+    return out
+
+
+def safe_branch(name):
+    """The branch name if it is a plausible git ref (no whitespace, .., //, shell or path tricks), else None."""
+    if not isinstance(name, str):
+        return None
+    b = name.strip()
+    for prefix in ("refs/heads/", "origin/"):
+        if b.startswith(prefix):
+            b = b[len(prefix):]
+    parts = b.split("/")
+    if (not b or len(b) > 200 or not _BRANCH_OK.match(b) or ".." in b or "//" in b
+            or b.endswith(("/", ".")) or any(x.startswith(".") or x.endswith(".lock") for x in parts)):
+        return None
+    return b
+
+
+def task_base_env(task, environ=None, mapping=None):
+    """{NAME: "origin/<PR base>"} to export for the whole task, {} when the project is not mapped or NAME is already set.
+    The branch is the task's --base, else the parent's base (never a commit sha); unsafe or missing -> origin/main."""
+    environ = os.environ if environ is None else environ
+    mapping = task_base_env_map() if mapping is None else mapping
+    name = mapping.get(str(task.get("project") or "").strip().lower())
+    if not name or environ.get(name):
+        return {}
+    b = safe_branch(task.get("base")) or safe_branch((task.get("parent") or {}).get("base"))
+    return {name: f"origin/{b}" if b else "origin/main"}
+
+
 def fresh_pr_base(task_base, parent_base, default_lookup):
     """(base, source) for a fresh PR (no target PR): the task's --base, then the parent's base, then the repo default. When the
     default cannot be looked up the base is "" and --base is left out, so GitHub chooses."""
@@ -489,6 +534,9 @@ class Runner(threading.Thread):
             args.append("--scope")
         if os.environ.get("SWARM_REQUIRE_SCOPE", "0") == "1":
             args.append("--require-scope")
+        extra = task_base_env(self.task)
+        if extra:
+            args += ["--task-env", ",".join(f"{k}={v}" for k, v in extra.items())]
         started = time.time()
         logf = open(os.path.join(RUNNER_DIR, "logs", self.task["id"] + ".log"), "ab")
         self.proc = subprocess.Popen(as_agent() + args + ["--"] + command, stdout=logf, stderr=subprocess.STDOUT)

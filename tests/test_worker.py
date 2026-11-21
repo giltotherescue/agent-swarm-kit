@@ -351,6 +351,18 @@ class RepoWorkerTest(WorkerTest):
         self.assertIn("SWARM_TASK_ID=" + tid, env)
 
 
+    def test_task_base_env_reaches_the_whole_task(self):
+        # CLOZY_TEST_BASE=origin/<PR base> is in the task's own environment (a plain script, no shim), and an
+        # unmapped project gets nothing. Unit cases: tests/test_task_base_env.py.
+        for project, want in (("clozy", True), ("other", False)):
+            self.admin("POST", "/tasks", {"prompt": "env " + project, "command": "env > artifacts/env.txt"})
+            task = self.w.api("POST", "/worker/claim", {"worker": "test"})["task"]
+            task.update(project=project, base="feat/y")
+            sem = threading.BoundedSemaphore(1); sem.acquire()
+            self.w.Runner(task, sem).run()
+            env = self.admin("GET", f"/tasks/{task['id']}/artifacts/env.txt")
+            self.assertEqual("CLOZY_TEST_BASE=origin/feat/y" in env, want, env)
+
     def test_failing_collector_diagnostic_is_redacted_in_log_and_finish(self):
         # A collector that fails while naming a token-shaped pin, with padding past the old 500-character cut.
         real = self.w.AGENT_EXEC
