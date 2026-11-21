@@ -485,6 +485,20 @@ class ExporterHookTests(CliBase):
         self.assertEqual(g(self.wd, "rev-parse", "HEAD"), moved[-1], "the concurrent commit is kept")
         self.assertEqual((self.wd / ".git" / "index").read_bytes(), before, "the real index is unchanged")
 
+    def test_real_timeout_before_publish_keeps_head_and_index(self):
+        # replaces the old pre-commit-hook timeout probe: a real git process (write-tree, after the inspection and
+        # before publishing) outlives the timeout; HEAD and the real index stay byte-identical
+        import shutil
+        from unittest.mock import patch
+        wrap = Path(self.tmp.name) / "slowgit"; wrap.mkdir()
+        (wrap / "git").write_text(f'#!/bin/sh\n[ "$1" = write-tree ] && sleep 2\nexec {shutil.which("git")} "$@"\n')
+        (wrap / "git").chmod(0o755)
+        before = (g(self.wd, "rev-parse", "HEAD"), (self.wd / ".git" / "index").read_bytes())
+        with patch.dict(os.environ, {"PATH": f"{wrap}:{os.environ['PATH']}"}), patch.object(gl, "GIT_TIMEOUT", 0.5), \
+                self.assertRaisesRegex(RuntimeError, "git write-tree timed out"):
+            self.run_commit(allow_gitlink=False)
+        self.assertEqual((g(self.wd, "rev-parse", "HEAD"), (self.wd / ".git" / "index").read_bytes()), before)
+
     def test_identity_and_message_unchanged(self):
         from unittest.mock import patch
         clean = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
