@@ -56,6 +56,8 @@ class NoticeBase(unittest.TestCase):
         if owner is not None:
             body["owner"] = owner
         self.b.req("POST", "/tasks", body)
+        if owner is None:  # enqueue now needs an owner; an ownerless row is a legacy one
+            self.b.api.s.run("UPDATE tasks SET owner = NULL WHERE id = ?", tid)
         c = self.b.claim()
         self.assertEqual(c["id"], tid)
         if report is not None:

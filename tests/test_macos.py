@@ -182,7 +182,7 @@ class SingleUserRun(unittest.TestCase):
         with open(f"{home}/bin/launchctl", "w") as fh:
             fh.write("#!/bin/sh\nexit 0\n")
         os.chmod(f"{home}/bin/launchctl", 0o755)
-        env = dict(os.environ, HOME=home, SWARM_MAC_FORCE="1", PATH=f"{home}/bin:" + os.environ["PATH"])
+        env = dict(os.environ, HOME=home, SWARM_MAC_FORCE="1", PATH=f"{home}/bin:" + os.environ["PATH"], ENQUEUE_OWNER="tester")
         for k in [k for k in env if k.startswith("SWARM_") and k != "SWARM_MAC_FORCE"]:
             del env[k]
         subprocess.run(["bash", SETUP, "--with-backend"], env=env, check=True, capture_output=True)
