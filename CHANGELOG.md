@@ -6,6 +6,9 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+Docs note on the pack-once, shard-in-parallel remote-run pattern, ported from agent-control PR 70. See
+[docs/sizing-and-sandboxes.md](docs/sizing-and-sandboxes.md). Docs only; the kit ships no task-shim or remote-run.
+
 Per-project test-base env var, ported from agent-control PR 69. See [docs/git-policy.md](docs/git-policy.md).
 
 - **`CLOZY_TEST_BASE=origin/<PR base>`** is exported for the whole task of a `clozy` task (so `test:changed` can narrow); the
