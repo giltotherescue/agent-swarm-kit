@@ -4,6 +4,12 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## Unreleased
+
+- Docs: short pattern for efficient manager / Chief of Staff routines (cheap state checks first, no overlapping schedules, nudge
+  only idle bots, delete expired one-offs, filter notices server-side). See
+  [docs/routines.md](docs/routines.md#efficient-manager-routines).
+
 ## 0.8.1 (2026-11-21)
 
 Guideline for the periodic keep-moving check, from Gil (2026-11-21). Blanket timed wake-ups that message every project bot mostly

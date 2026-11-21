@@ -113,6 +113,16 @@ ids=$(python3 idle-bots.py bot-a bot-b bot-c) || exit 0   # check failed: wake n
 # send one short "what is next?" message to each id in $ids
 ```
 
+## Efficient manager routines
+
+A pattern for a Chief of Staff or other manager routine, from Gil's 2026-11-21 optimization:
+
+- **Cheap state checks first, deep reads only on change.** Check the queue, the log, and card and chat activity timestamps. Read a project in depth only if something changed since the last run. If nothing changed, end quietly.
+- **No overlapping schedules.** Example: a heartbeat every 8 hours (7am, 3pm, 11pm) plus a 2-hour idle check that skips the hours the heartbeat already covers.
+- **Nudge only idle bots.** See [keep-moving check](#keep-moving-check-wake-only-idle-bots).
+- **Delete expired one-off routines.** A finished one-off still costs a wake-up if it stays on the schedule.
+- **Filter on the server.** Drop non-actionable notices there, rather than keeping a routine that wakes up just to conclude "nothing to do".
+
 ## Keeping routines cheap
 
 - Prefer webhooks over polling. A webhook routine runs only when there is news.
