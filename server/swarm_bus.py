@@ -443,7 +443,8 @@ class Bus:
         text = str(e)
         if self.be.secret_hit(text) or self.CREDENTIAL_RE.search(text):
             return f"{name}: [text withheld]"
-        return f"{name}: {re.sub(r'[\x00-\x1f\x7f]+', ' ', self.be.scrub(text))[:160]}"
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", self.be.scrub(text))[:160]   # outside the f-string: Python 3.11
+        return f"{name}: {text}"
 
     def log(self, what, mid, e):
         print(what, mid, self.safe_err(e), file=sys.stderr, flush=True)

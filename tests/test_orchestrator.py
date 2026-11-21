@@ -396,7 +396,9 @@ class SupervisorTest(unittest.TestCase):
                         SWARM_ORCH_CLAUDE_DIR=str(self.tmp / "claude-home"), SWARM_ORCH_SCREEN_SECONDS="1",
                         SWARM_ORCH_HEARTBEAT_SECONDS="1", SWARM_ORCH_POLL_SECONDS="0.3", SWARM_ORCH_IDLE_SECONDS="1",
                         SWARM_ORCH_STOP_GRACE="6", SWARM_ORCH_BACKOFF_START="0.5", SWARM_ORCH_BACKOFF_MAX="2",
-                        SWARM_ORCH_CRASH_LIMIT="5", SWARM_ORCH_CRASH_WINDOW="1800")
+                        SWARM_ORCH_CRASH_LIMIT="5", SWARM_ORCH_CRASH_WINDOW="1800",
+                        # the fake Claude has no input box: the explicit box-less stand-in adapter (tests only)
+                        SWARM_ORCH_PANE_ADAPTER="plain")
         self.env.pop("SWARM_WORKER_PROJECTS", None)
         self.procs = []
         self.addCleanup(self.cleanup)

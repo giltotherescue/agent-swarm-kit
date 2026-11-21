@@ -57,7 +57,9 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
   for the agent user (`CLAUDE_CODE_OAUTH_TOKEN` or another key or proxy in `agent.env`, an `apiKeyHelper`, or a
   saved `/login`). Without one it does not start Claude. While the session runs it reads the bottom of the
   screen. Claude Code's first-run screens (the theme picker, the security notes, the folder trust question)
-  get Enter, which accepts the default, at most 3 times each ("first-run" event). A sign-in screen
+  get Enter, which accepts the default, at most 3 times each ("first-run" event). The current folder trust screen
+  ("Quick safety check: Is this a project you created or one you trust?") preselects "No, exit": it gets Down, and
+  Enter only once the `❯` is on "Yes, I trust this folder" (0.8.1). A sign-in screen
   ("Select login method", "Paste code here", "Please run /login", an expired token) or the bypass-permissions
   warning that stays up for 10 seconds ends the session at once. Nothing is ever typed into those screens:
   queued messages and the stop wrap-up wait. The state becomes `needs-login`, `last_exit` says what to run, and
@@ -66,14 +68,21 @@ swarmctl orchestrator ...  ──>  backend (orchestrators table, events, one pe
 - **Messages during a long busy turn (0.8.1).** Queued messages are typed in at once when the pane is idle at an
   empty prompt. If the session stays busy, the oldest message is pasted once it is 90 seconds old (15 when the first
   line of the message says `URGENT`, which the bus puts on urgent messages), counted from when the backend queued it;
-  Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart. Before
-  every paste and every Enter, idle or busy, and before the stop wrap-up, the supervisor reads the screen: a choice
-  menu or permission prompt, or typed text in the input box (a draft, including a multiline one or one holding a
-  pasted rule), blocks it. Only Claude Code's exact hints in an empty box (`Try "..."`,
-  `Press up to edit queued messages`, `Queued · ctrl+x ctrl+s to send now`) count as empty. A busy paste also needs an
-  input box it can read; a wrap-up it cannot send safely is skipped, and the session ends at the stop deadline. Each
-  busy paste is recorded once as a `message-delivered-busy` event. A message is never pasted twice by one supervisor
-  process: if Enter failed only Enter is retried, and if only the delivery receipt failed only the receipt is retried.
+  Claude Code queues it for the agent's next step. The rest of a continuous backlog follows 5 seconds apart. The guard
+  fails closed, like agent-control PR 67: right before every paste and every Enter, idle or busy, and before the stop
+  wrap-up, the supervisor captures the screen again, and only a confirmed empty input box (read from the bottom: a
+  known footer, then rule, prompt line, identical rule) takes it. A choice menu or permission prompt, typed text (a
+  draft, including a multiline one or one holding a pasted rule), an unrecognized footer, or a screen it cannot read
+  holds the message; a wrap-up it cannot send safely is skipped, and the session ends at the stop deadline. Only the
+  verified hint `Press up to edit queued messages` counts as empty; `Try "..."` is treated as typed text. A message held
+  for 2 minutes is reported once per reason as a `delivery-deferred` event (`reason=unknown_footer|draft|menu|unreadable`,
+  never pane contents); it is never pasted because of a timeout. Each busy paste is recorded once as a
+  `message-delivered-busy` event. A message is never pasted twice by one supervisor process: if Enter failed only Enter
+  is retried, and only while the pasted text is still in the box; if only the receipt failed only the receipt is
+  retried. When the outcome of a paste is unknown and the box is empty again, the message is left unacknowledged and
+  reported once as `delivery-unknown`: check the session, then delete the message or restart the supervisor (a new
+  supervisor process pastes it again). The only exception to the box rule is the kit's tests: with
+  `SWARM_ORCH_PANE_ADAPTER=plain` a stand-in program with no box parts at all gets idle messages and the wrap-up.
 - **Checkpoint.** The first prompt and the standing rules tell the agent to keep `CHECKPOINT.md` in its folder
   current, so even a crash with no session to resume loses little.
 - **Events.** Every start, stop, crash, restart, crash loop, adoption, Relay registration, message delivery and
@@ -192,6 +201,8 @@ In `/etc/agent-swarm/swarm.env` (all optional):
 | `SWARM_RELAY_REGISTER_CMD` | empty (no Relay) | Command that registers `{name}` on Agent Relay |
 | `SWARM_ORCH_CLAUDE` | `claude` | The Claude Code command |
 | `SWARM_ORCH_STOP_GRACE` | 120 | Seconds a graceful stop waits for the wrap-up |
+| `SWARM_ORCH_DEFER_REPORT_SECONDS` | 120 | A message the pane holds back this long is reported once per reason as `delivery-deferred` (0.8.1) |
+| `SWARM_ORCH_PANE_ADAPTER` | claude | Tests only: `plain` marks a box-less stand-in program instead of Claude Code (0.8.1) |
 | `SWARM_ORCH_IDLE_SECONDS` | 20 | Quiet seconds before a message is typed in |
 | `SWARM_ORCH_BACKOFF_START`, `SWARM_ORCH_BACKOFF_MAX` | 5, 300 | First and longest pause before a restart |
 | `SWARM_ORCH_CRASH_LIMIT`, `SWARM_ORCH_CRASH_WINDOW` | 5, 1800 | Crashes within this many seconds that make a crash loop |
@@ -214,12 +225,13 @@ Who may call what is in [backend.md](backend.md#who-can-call-what).
   Code, for `with-secrets` and for the Relay command. They have not run a real Claude session for days, a
   real Relay registration, the systemd unit and user scope on a real server, or the launchd agent on a real Mac.
 - **First start on a new worker.** Claude Code in a terminal (not `-p`) shows one-time screens. The supervisor
-  answers the theme picker, the security notes and the folder trust question with Enter. It does not accept the
+  answers the theme picker, the security notes and the older folder trust question with Enter, and the current one
+  ("Quick safety check") with Down, then Enter once "Yes, I trust this folder" is selected. It does not accept the
   bypass-permissions warning by itself (Enter there means "No, exit"): if `needs-login` says it stopped at that
   screen, accept it once by hand as the agent user (`sudo -iu agent claude --permission-mode bypassPermissions`,
   pick "Yes, I accept", then `/exit`), then `swarmctl orchestrator start NAME`. The screen texts are matched as
-  Claude Code 2.1 shows them; they were checked against a real install for the theme picker and the sign-in
-  menu only.
+  Claude Code 2.1 shows them; they were checked against a real install for the theme picker, the sign-in
+  menu and the current folder trust screen.
 - **Sign-in screens are matched by text.** A sign-in phrase that the agent itself prints and leaves at the
   bottom of an idle screen for 10 seconds would also stop it. Change the list with `SWARM_ORCH_LOGIN_MARKERS`.
 - **Idle detection is a guess.** "Quiet terminal and no `esc to interrupt`" is how Claude Code looks today. If

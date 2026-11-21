@@ -23,7 +23,8 @@ Orchestrators (WORK/orchestrators/NAME, tmux socket and session orch-NAME; see d
   agent-exec --work DIR --handoff DIR orch-start NAME [--agent-env FILE] [--secrets A,B] [--with-secrets PATH]
              [--relay-name X] [--scope] -- COMMAND ARGS...
   agent-exec --work DIR --handoff DIR orch-status NAME [--lines N] [--sessions-dir DIR]
-  agent-exec --work DIR --handoff DIR orch-send NAME        (types inbox/orch-NAME/message.md, then Enter; exit 5 nothing pasted, 6 pasted but Enter failed)
+  agent-exec --work DIR --handoff DIR orch-send NAME [--plain] (types inbox/orch-NAME/message.md, then Enter; exit 5 nothing pasted, 6 pasted but
+                                                            Enter failed, 7 pasted but Enter withheld: menu or text gone)
   agent-exec --work DIR --handoff DIR orch-kill NAME
   agent-exec --work DIR --handoff DIR orch-keys NAME KEY...   (only Enter, Down, Up, Escape, 1-9: answers a first-run screen)
   agent-exec --work DIR --handoff DIR orch-check NAME [--agent-env FILE] [--claude-dir DIR]   (does Claude have a sign-in?)
@@ -555,8 +556,43 @@ def cmd_orch_status(p, name, lines, sessions_dir):
     print(json.dumps(out))
 
 
-def cmd_orch_send(p, name):
-    """Type the text in the inbox's message.md into the session, then press Enter."""
+PANE_RULE = re.compile(r"^\s*[╭╰]?[─━═]{8,}[╮╯]?\s*$")
+PANE_PROMPT = re.compile(r"^[\s│┃|]*[>❯](?:\s|$)")
+PANE_MENU = re.compile(r"^[\s│┃|]*❯\s*\d+[.)]\s|(?:Esc|Enter) to (?:cancel|select|confirm)", re.I)
+
+
+def pasted_still_there(screen, text, plain=False):
+    """Between the paste and Enter: None when Enter would submit the pasted text, else why not.
+
+    Claude Code: its input box must still be at the bottom of the pane (a menu or dialog replaces it) and hold text, the
+    paste or its "[Pasted text]" placeholder; an empty box means the text is gone. plain (a box-less test stand-in): no
+    menu hints at the bottom and the start of the pasted text on screen."""
+    lines = [ln.rstrip() for ln in (screen or "").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return "the pane could not be read"
+    if plain:
+        if any(PANE_MENU.search(ln) for ln in [ln for ln in lines if ln.strip()][-25:]):
+            return "a menu is on screen"
+        first = text.strip().splitlines()[0][:30] if text.strip() else ""
+        return None if first and first in screen else "the pasted text is not on screen"
+    bot = next((i for i in range(len(lines) - 1, -1, -1) if PANE_RULE.match(lines[i])), None)
+    footer = [ln for ln in lines[bot + 1:] if ln.strip()] if bot is not None else []
+    if bot is None or len(footer) > 8 or any(PANE_PROMPT.match(ln) or PANE_MENU.search(ln) for ln in footer):
+        return "no input box at the bottom of the pane (a menu or another screen)"
+    p = next((i for i in range(bot - 1, max(0, bot - 41), -1) if PANE_PROMPT.match(lines[i]) and PANE_RULE.match(lines[i - 1])), None)
+    if p is None:
+        return "no input box at the bottom of the pane (a menu or another screen)"
+    body = [re.sub(r"^[\s│┃|]*[>❯]", "", lines[p], count=1)] + lines[p + 1:bot]
+    body = [ln.strip().strip("│┃").strip() for ln in body]
+    if not any(body) or body == ["Press up to edit queued messages"]:
+        return "the pasted text is gone from the input box"
+    return None
+
+
+def cmd_orch_send(p, name, plain=False):
+    """Type the text in the inbox's message.md into the session, then press Enter, unless the pane changed in between."""
     src = os.path.join(orch_inbox(p, name), "message.md")
     if not orch_alive(name):
         die(f"orch-{name} is not running", 4)
@@ -566,12 +602,17 @@ def cmd_orch_send(p, name):
         die("no message.md in the inbox")
     with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
         text = fh.read(20000)
-    # Exit 5: nothing was pasted (safe to try again). Exit 6: pasted, Enter failed (never paste again, only press Enter).
+    # Exit 5: nothing was pasted (safe to try again). Exit 6: pasted, Enter failed. Exit 7: pasted, Enter withheld because
+    # the pane became a menu or the pasted text is gone. After 6 or 7 never paste again; Enter only while the text is there.
     if tmux(name, "load-buffer", "-b", "swarm-msg", "-", input=text).returncode != 0:
         die("tmux load-buffer failed, nothing pasted", 5)
     if tmux(name, "paste-buffer", "-d", "-p", "-b", "swarm-msg", "-t", f"orch-{name}").returncode != 0:
         die("tmux paste-buffer failed, nothing pasted", 5)
     time.sleep(0.5)
+    shot = tmux(name, "capture-pane", "-p", "-J", "-t", f"orch-{name}")
+    why = pasted_still_there(shot.stdout if shot.returncode == 0 else "", text, plain)
+    if why:
+        die(f"pasted, Enter withheld: {why}", 7)
     if tmux(name, "send-keys", "-t", f"orch-{name}", "Enter").returncode != 0:
         die("pasted, but tmux send-keys Enter failed", 6)
     print(json.dumps({"sent": len(text)}))
@@ -666,7 +707,7 @@ def main(argv):
         rest, command = rest[:i], rest[i + 1:]
     it = iter(rest)
     for a in it:
-        if a in ("--scope", "--require-scope", "--drop-checkpoint"):
+        if a in ("--scope", "--require-scope", "--drop-checkpoint", "--plain"):
             opts[a] = True
         elif a.startswith("--"):
             opts[a] = next(it, None)
@@ -696,7 +737,7 @@ def main(argv):
     elif cmd == "orch-status" and len(positional) == 1:
         cmd_orch_status(p, positional[0], int(opts.get("--lines") or 0), opts.get("--sessions-dir"))
     elif cmd == "orch-send" and len(positional) == 1:
-        cmd_orch_send(p, positional[0])
+        cmd_orch_send(p, positional[0], opts.get("--plain", False))
     elif cmd == "orch-kill" and len(positional) == 1:
         cmd_orch_kill(p, positional[0])
     elif cmd == "orch-keys" and len(positional) >= 2 and not opts and not command:

@@ -1,6 +1,7 @@
 """Agent bus parts of the supervisor: idle message polling, bus token file, session environment, message cleaning.
 No tmux, no backend: the backend call and agent-exec are replaced."""
 import io
+import json
 import os
 import shutil
 import stat
@@ -18,6 +19,8 @@ import swarm_orchestrator as so  # noqa: E402
 import swarm_worker as sw  # noqa: E402
 
 SECRET = "ab_steward.1." + "e" * 40   # stand-in, not a real token
+# A real empty Claude Code input box: the guard fails closed, so an empty screen would get nothing.
+IDLE_SCREEN = open(os.path.join(HERE, "fixtures", "panes", "cap-idle.txt")).read()
 
 
 class Done:
@@ -51,6 +54,10 @@ class BusTest(unittest.TestCase):
         return self.api_result
 
     def fake_agent(self, *args, **kw):
+        if args[0] == "orch-status":
+            r = Done()
+            r.stdout = json.dumps({"alive": True, "dead": False, "tail": "", "screen": IDLE_SCREEN, "pid": 1})
+            return r
         if args[0] == "orch-send":
             with open(os.path.join(self.sup.inbox, "message.md")) as fh:
                 self.sent.append(fh.read())
@@ -64,7 +71,7 @@ class BusTest(unittest.TestCase):
 
     def step_idle(self, beats):
         """Run the idle branch of step() with a fake status and a fake heartbeat."""
-        st = {"alive": True, "dead": False, "tail": "", "screen": "", "pid": 1}
+        st = {"alive": True, "dead": False, "tail": "", "screen": IDLE_SCREEN, "pid": 1}
         self.sup.status = lambda: st
 
         def beat(release=False):
@@ -107,7 +114,7 @@ class BusTest(unittest.TestCase):
             if len(beats) == 1:
                 self.sup.message = {"id": 5, "sender": "chief", "text": "[bus #5 from=chief] hello"}
             return True
-        self.sup.status = lambda: {"alive": True, "dead": False, "tail": "", "screen": "", "pid": 1}
+        self.sup.status = lambda: {"alive": True, "dead": False, "tail": "", "screen": IDLE_SCREEN, "pid": 1}
         self.sup.beat = beat
         self.sup.step()
         self.assertEqual(self.sup.delivered, 5)

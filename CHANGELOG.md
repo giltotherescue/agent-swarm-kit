@@ -16,28 +16,52 @@ Queued messages now reach an orchestrator during a long busy turn (agent-control
   after it was sent. Claude Code queues it for the agent's next step. After a busy paste the rest of a continuous backlog
   follows `SWARM_ORCH_BUSY_GAP_SECONDS` (5) apart, whatever its own priority; once the queue has been empty a new message
   waits its full time again. Idle delivery on an empty prompt is unchanged (at once).
-- **Never onto a menu or a draft, idle or busy.** Before every paste and every Enter (idle delivery, busy delivery and
-  the stop/restart/delete wrap-up) the supervisor reads the screen. A choice menu or permission prompt, or typed text in
-  Claude Code's input box, blocks it. The box is the last `❯` prompt with the rule above it and exactly one rule below it
-  followed only by the footer; a second rule below the prompt (a pasted rule in a draft) counts as a draft. Only Claude
-  Code's exact hints count as empty: `Try "..."`, `Press up to edit queued messages` and
-  `Queued · ctrl+x ctrl+s to send now`; anything else (`Queued the release for Friday`, a lone `|`, a multiline draft
-  whose first line is empty) is a draft. Border bars are stripped only from a box with rounded corners. A busy paste
-  also needs a confirmed empty box; idle delivery onto a screen with no Claude Code box (not a draft, not a menu) still
-  happens. When the wrap-up cannot be sent safely it is skipped and the session ends at the stop deadline (120 s).
-- **Never twice.** `agent-exec orch-send` now exits 5 when nothing was pasted and 6 when the paste went in but Enter
-  failed. After a paste (or an unknown outcome) the supervisor never pastes that message again: it retries only Enter,
-  and only after Enter goes through does it send the receipt. If only the receipt failed, only the receipt is retried.
-  A cached message is dropped as soon as a heartbeat says nothing is queued.
+- **Fail closed, like agent-control PR 67.** Nothing is pasted and no Enter pressed unless the pane shows a confirmed
+  empty Claude Code input box: idle delivery, busy delivery, the Enter retry and the stop/restart/delete wrap-up alike.
+  A choice menu, a draft, a footer it does not recognize, a screen with no readable box, or a failed capture holds the
+  message (and skips the wrap-up; the session then ends at the stop deadline, 120 s). The one exception is a
+  positively identified box-less stand-in: `SWARM_ORCH_PANE_ADAPTER=plain`, set explicitly by the kit's tmux tests for
+  their fake Claude. With it, a readable screen with no box parts at all (no rule, no prompt line) and no menu takes an
+  idle delivery or the wrap-up; never a busy paste, and never an empty or failed capture. Missing chrome alone is never
+  taken as a stand-in.
+- **The box is read from the bottom.** The last rule is the box's bottom; the lines under it must be empty or start
+  with a line Claude Code draws there (mode line, `? for shortcuts`, `paste again to expand`, sign-in or update note)
+  and be at most 8. An empty box is exactly three rows: an unindented rule, the prompt line, the identical rule (or a
+  rounded box with both side bars). A prompt with a rule above it further up is a multiline draft; an indented or
+  different rule, or a second prompt between the top and an earlier rule (two candidate boxes), is a draft. The
+  only hint counted as empty is the verified literal `Press up to edit queued messages` on the prompt line; a quoted
+  `Try "..."` cannot be told from typed text in a capture, so it is a draft.
+- **Captured again at the send boundary.** Right before each paste (after the message poll and any other network work)
+  and before each Enter retry, the supervisor reads the pane again; the wrap-up started inside a heartbeat (an admin
+  restart) does the same. Menu words in the output above a readable empty box are history and do not block.
+- **No false receipts.** `agent-exec orch-send` exits 5 when nothing was pasted, 6 when the paste went in but Enter
+  failed, and 7 when it pasted but withheld Enter because the pane turned into a menu or the pasted text left the
+  box. The supervisor separates a definite failure before anything was typed (5, 2, 4, or agent-exec not starting:
+  pasted again later), a confirmed paste that was not submitted (6, 7: only Enter is retried, and only while the pasted
+  text is still in the box), and an unknown outcome (a timeout, an unexpected exit): Enter only if the text is still in
+  the box; if the box is empty the message is left unacknowledged, never pasted again by this supervisor, and reported
+  once as a `delivery-unknown` event. The wrap-up's single Enter retry follows the same rule. If only the receipt
+  failed, only the receipt is retried. A cached message is dropped as soon as a heartbeat says nothing is queued.
+- **Visible deferral.** A message the pane holds back for `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per
+  message and reason as a `delivery-deferred` event, `reason=unknown_footer|draft|menu|unreadable` (the same reasons
+  as agent-control PR 67's fix round), with no pane contents. A deferral never times out into a paste.
+- **Current folder trust screen.** Claude Code now asks "Quick safety check: Is this a project you created or one you
+  trust?" with `❯ No, exit` preselected. The supervisor presses Down, and Enter only once the `❯` is seen on
+  `Yes, I trust this folder` (each at most 3 times; a screen that does not move ends as `needs-login`). The older
+  "Do you trust the files in this folder" wording still gets Enter. A sign-in or API-key screen is never answered.
 - **Busy event recorded once.** The supervisor sends `delivered_busy_seconds` with the receipt and the backend records a
   `message-delivered-busy` event in the same first-delivery update as `message-delivered`, so a replayed receipt never
   records it twice. The backend still accepts `message-delivered-busy` in heartbeat events.
 - **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. While busy the supervisor also asks for the
   next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS` (so a message's wait can be timed).
+- **Python 3.11.** `server/swarm_bus.py` no longer uses a backslash inside an f-string expression, so it imports on
+  Python 3.11 again.
 - Tests: `tests/test_orchestrator_busy.py` runs the real supervisor loop on a fake clock (max wait from enqueue time,
-  urgent at about 15 s, backlog at the gap, empty-reply reset, null reply, paste/Enter failures, receipt replay, idle
-  menu/draft, wrap-up) with real Claude Code captures in `tests/fixtures/panes/`; urgent-head test in `tests/test_bus.py`,
-  replayed busy receipt in `tests/test_orchestrator.py`.
+  urgent at about 15 s, backlog at the gap, empty-reply reset, null reply, paste/Enter failures, pre-launch failure,
+  unknown outcomes, receipt replay, idle menu/draft, deferral events, the trust screen, wrap-up from a restart
+  heartbeat) with real Claude Code captures in `tests/fixtures/panes/`, plus `agent-exec`'s check between paste and
+  Enter and every probe of the second review; urgent-head test in `tests/test_bus.py`, replayed busy receipt in
+  `tests/test_orchestrator.py`.
 
 ## 0.8.0 (2026-11-21)
 

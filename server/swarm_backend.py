@@ -259,7 +259,7 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,80}$")
 ORCH_FIELDS = {"worker_id", "project", "repo", "owner_bot_id", "provider", "model", "brief", "secret_bundles", "relay_agent_name"}
 ORCH_STATES = ("stopped", "starting", "running", "restarting", "stopping", "crash-loop", "unreachable", "blocked", "needs-login")
 ORCH_EVENT_TYPES = ("start", "stop", "crash", "restart", "crash-loop", "adopt", "relay", "blocked", "supervisor", "needs-login",
-                    "first-run", "message-delivered-busy")
+                    "first-run", "message-delivered-busy", "delivery-deferred", "delivery-unknown")
 ORCH_DELETABLE = ("stopped", "crash-loop", "blocked", "needs-login", "unreachable")   # states with no session to end
 # A pending sign-in link in a terminal tail: anyone holding it while it is open can finish the sign-in.
 SIGNIN_URL_RE = re.compile(r"https?://\S*(?:oauth|authorize|code_challenge|device|/login)\S*", re.I)
