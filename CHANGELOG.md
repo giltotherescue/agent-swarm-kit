@@ -59,6 +59,44 @@ The publish policy, ported from agent-control PR 65 where the kit publishes. See
 - **Not ported:** PR 65's merge gate (CI allowlist, null/empty rollup handling, SHA-pinned REST merge, auto-merge
   disable) and deploy credit. The kit never merges or deploys; a human merges.
 
+Orchestrator message delivery during long busy turns, and one-line pointer delivery, ported from agent-control PRs 64
+and 67. See [docs/orchestrators.md](docs/orchestrators.md) and [docs/agent-bus.md](docs/agent-bus.md).
+
+- **Busy delivery.** A working session no longer holds its queue for the whole turn. The oldest queued message is sent once
+  it is `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90) old, or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when its first line
+  says `URGENT`, counted from when the backend queued it; the rest of a continuous backlog follows
+  `SWARM_ORCH_BUSY_GAP_SECONDS` (5) apart. Idle delivery on an empty prompt is unchanged (at once).
+- **One typed pointer line.** Claude Code 2.1.321 collapses a pasted multi-line message into `[Pasted text #N +L lines]`,
+  which cannot be verified, so nothing multi-line is pasted any more. A bus message (header and body) is written by
+  `agent-exec` to `<WORK>/orchestrators/NAME/.orchestrator/inbox/msg-ID.md` (mode 0600, written atomically, newest 200
+  and at most 7 days kept) and the session gets one line typed as literal keys: `New bus message #41 from chief
+  (URGENT): read <that path>`. A short one-line direct message is typed as is, `[Message from SENDER via swarm] TEXT`.
+- **Verified, recorded, then Enter.** `agent-exec orch-type` types the line into a confirmed empty editor and waits until
+  the editor holds exactly it (rows joined by display width, so an 80x24 pane works); otherwise it erases its own partial
+  text and no Enter follows. The supervisor then saves a `sending` record (fsync) and `agent-exec orch-enter` captures the
+  same pane ID again, presses Enter only while the editor still holds exactly the line, and confirms. A receipt needs the
+  line itself above the editor more often than before typing; Claude Code's generic queued-message hint is not one.
+- **Recovery never retypes.** After a crash the record decides: the line above the editor is a receipt, the line still
+  in the editor gets Enter (at most 3 in all), anything else is held and reported once as `delivery-unknown`. Holds,
+  sending records and pending receipts live in the state file, so a replacement supervisor never types a message twice.
+- **Release.** `swarmctl orchestrator release NAME ID` marks a held message delivered; `--resend` allows exactly one more
+  typing, used up (saved) before the keys go in; if it does not land the message is held again. New admin route
+  `POST /orchestrators/NAME/messages/ID/release` and column `orchestrator_messages.release_count`, added in place.
+- **Fail closed.** Nothing is typed and no Enter pressed on a menu, a draft, an unknown footer, an unreadable pane or a
+  failed capture, during idle and busy delivery and the stop wrap-up alike. A message held back for
+  `SWARM_ORCH_DEFER_REPORT_SECONDS` (120) is reported once per reason as a `delivery-deferred` event, with no pane
+  contents. One pane parser, defined in `agent-exec` and loaded by the supervisor.
+- **Sign-in and first-run screens.** Sign-in text above a live, empty editor (a tool printing `Invalid API key`) is
+  conversation output and no longer ends a healthy session as `needs-login`. The 2.1.321 theme picker (no key hint) is
+  recognized from its full layout and gets Enter; the folder trust question is answered from its selection. First-run
+  keys are sent only in the first 120 seconds after start; a first-run screen later is reported, never answered.
+- **Busy event recorded once.** The receipt carries `delivered_busy_seconds` and the backend records
+  `message-delivered-busy` in the same first-delivery update as `message-delivered`.
+- **Older backend fallback.** Only the exact `bad event type` 400 for the two new event types makes the supervisor drop
+  them; any other 400 keeps every event. `server/swarm_bus.py` imports on Python 3.11 again.
+- **Rollout.** The supervisor and `agent-exec` change together (`orch-send` is replaced by `orch-capture`, `orch-type` and
+  `orch-enter`); update both, then restart the orchestrator supervisor. See docs/updating-the-kit.md.
+
 ## 0.8.0 (2026-11-21)
 
 The Agent Bus: reliable messages between your agents, ported from agent-control. Nothing is on until you register agents.

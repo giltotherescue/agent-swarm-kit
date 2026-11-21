@@ -107,6 +107,7 @@ The table below is generated from the code (`python3 server/swarm_backend.py --p
 | POST | `/orchestrators/ID/ACTION` | yes | no | no | no | no | no | Set it to run, stop it gracefully, restart it (also clears a crash loop), or delete a stopped one |
 | GET | `/orchestrators/ID/logs` | yes | yes | yes | no | no | no | The last lines of its terminal (`lines`, up to 500), secret-scanned. Bot: own only |
 | POST | `/orchestrators/ID/messages` | yes | yes | yes | no | no | no | Queue one message (`text`, up to 4000 characters); typed into the session when the agent is idle. One at a time. Bot: own only |
+| POST | `/orchestrators/ID/messages/ID/release` | yes | no | no | no | no | no | After a delivery-unknown event: mark the message delivered (default), or `resend: true` to have the supervisor type it once more |
 | POST | `/worker/orchestrators/ID/heartbeat` | no | no | no | yes | no | no | Supervisor on the pinned worker only: report state and the terminal tail, get the desired state, settings and one pending message |
 | GET | `/notices` | yes | yes | no | no | no | no | The last 100 deliveries with state and last error |
 | POST | `/bus/send` | yes | no | no | no | no | yes | Send a direct message to an agent (`to`, `body`, `thread`, `client_msg_id`, `urgent`, `noop`, `reply_expected`, `meta`). Stored first, then woken. Admin sets `from` |

@@ -58,6 +58,24 @@ class OrchestratorApiTest(unittest.TestCase):
         return [json.loads(r["payload"]) for r in self.b.api.s.q("SELECT payload FROM notices ORDER BY id")
                 if json.loads(r["payload"]).get("kind") == kind]
 
+    def test_release_a_delivery_unknown_message(self):
+        """0.8.1 round 3: an admin reconciles a held message: resend raises the release count the supervisor sees on the
+        pending message; the default marks it delivered. Admin only."""
+        self.create(start=True)
+        mid = self.b.req("POST", "/orchestrators/steward/messages", {"text": "hello"})["id"]
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 0)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": True}, tok=self.owner, expect=403)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": "yes"}, expect=400)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {"resend": True})
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 1)
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {})
+        self.assertIsNone(beat(self.b, "steward")["message"])
+        self.b.req("POST", f"/orchestrators/steward/messages/{mid}/release", {}, expect=409)
+        self.b.req("POST", "/orchestrators/steward/messages/999/release", {}, expect=404)
+        self.b.req("POST", "/orchestrators/steward/messages/x/release", {}, expect=404)
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual(types.count("message-released"), 2)
+
     def test_create_validates_and_never_takes_secret_values(self):
         o = self.create()["orchestrator"]
         self.assertEqual((o["state"], o["desired"], o["tmux_session"], o["secret_bundles"]),
@@ -175,6 +193,21 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertIsNone(r["message"])
         self.b.req("POST", "/orchestrators/steward/messages", {"text": "next one"}, tok=self.chief)
 
+    def test_busy_delivery_event_is_recorded_once_on_a_replayed_receipt(self):
+        """0.8.1 review: the busy flag rides on the receipt and is recorded in the same first-delivery update."""
+        self.create(start=True)
+        mid = self.b.req("POST", "/orchestrators/steward/messages", {"text": "Check the signup page"}, tok=self.owner)["id"]
+        beat(self.b, "steward", state="running")
+        for _ in range(2):   # the first reply was lost: the supervisor sends the same receipt again
+            r = beat(self.b, "steward", state="running", delivered_message_id=mid, delivered_busy_seconds=91)
+            self.assertIsNone(r["message"])
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual((types.count("message-delivered"), types.count("message-delivered-busy")), (1, 1))
+        mid2 = self.b.req("POST", "/orchestrators/steward/messages", {"text": "idle one"}, tok=self.owner)["id"]
+        beat(self.b, "steward", state="running", delivered_message_id=mid2)
+        types = [e["type"] for e in self.b.req("GET", "/orchestrators/steward")["events"]]
+        self.assertEqual((types.count("message-delivered"), types.count("message-delivered-busy")), (2, 1))
+
     def test_delete_needs_stop_and_a_deleted_record_never_runs(self):
         self.create(start=True)
         beat(self.b, "steward", state="running")
@@ -200,7 +233,8 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertIn("see [sign-in link hidden] ok", logs)
         for _ in range(2):
             beat(self.b, "steward", state="needs-login", last_exit="Claude is waiting at a sign-in screen. Run: sudo swarmctl login claude",
-                 events=[{"type": "needs-login", "text": "sign-in screen"}, {"type": "first-run", "text": "theme"}])
+                 events=[{"type": "needs-login", "text": "sign-in screen"}, {"type": "first-run", "text": "theme"},
+                         {"type": "message-delivered-busy", "text": "pasted while busy"}])
         sent = self.notices("needs-login")
         self.assertEqual([n["notify_target"] for n in sent], ["app-bot"])
         self.assertIn("sudo swarmctl login claude", sent[0]["text"])
@@ -249,6 +283,10 @@ class OrchestratorCliTest(unittest.TestCase):
         self.assertIn("steward", self.ctl("list").stdout)
         self.ctl("message", "steward", "Look at signup next")
         beat(self.b, "steward", state="running", started_at=sb.now() - 90061, log_tail="line one\nline two")
+        mid = beat(self.b, "steward")["message"]["id"]
+        self.assertIn("types it once more", self.ctl("release", "steward", str(mid), "--resend").stdout)
+        self.assertEqual(beat(self.b, "steward")["message"]["release"], 1)
+        self.assertNotEqual(self.ctl("release", "steward", "x", check=False).returncode, 0)
         status = self.ctl("status", "steward").stdout
         for text in ("running (wants running)", "app-runtime", "orch-steward", "1d 1h 1m", "message queued"):
             self.assertIn(text, status)
@@ -268,7 +306,9 @@ class ScreenTest(unittest.TestCase):
     def test_classify_reads_only_the_bottom_of_the_screen(self):
         self.assertEqual(so.classify("Welcome\n\n Select login method:\n 1. Claude account")[0], "login")
         self.assertEqual(so.classify("Paste code here if prompted >")[0], "login")
-        self.assertEqual(so.classify("Choose the text style that looks best\n 1. Dark mode")[:3:2], ("first-run", ["Enter"]))
+        self.assertEqual(so.classify("Choose the text style that looks best\n ❯ 1. Dark mode\nEnter to confirm")[:3:2], ("first-run", ["Enter"]))
+        # 0.8.1: only a whole dialog at the bottom is answered; a title without its key hint is not
+        self.assertIsNone(so.classify("Choose the text style that looks best\n 1. Dark mode"))
         self.assertEqual(so.classify("Security notes:\n Press Enter to continue")[1], "the security notes")
         self.assertEqual(so.classify("WARNING: Claude Code running in Bypass Permissions mode\n 1. No, exit")[0], "block")
         self.assertIsNone(so.classify("> working on it\n  esc to interrupt"))
@@ -321,7 +361,7 @@ if mode == "crash":
     sys.exit(3)
 if mode == "login":
     # Like Claude Code with no sign-in: two first-run screens that take Enter, then the sign-in menu.
-    print("Choose the text style that looks best with your terminal\n 1. Dark mode\n 2. Light mode", flush=True)
+    print("Choose the text style that looks best with your terminal\n ❯ 1. Dark mode\n   2. Light mode\n\nEnter to confirm", flush=True)
     note(event="input", text=sys.stdin.readline().rstrip("\n"))
     print("\n" * 60 + "Security notes:\n 1. Claude can make mistakes\nPress Enter to continue", flush=True)
     note(event="input", text=sys.stdin.readline().rstrip("\n"))
@@ -380,7 +420,9 @@ class SupervisorTest(unittest.TestCase):
                         SWARM_ORCH_CLAUDE_DIR=str(self.tmp / "claude-home"), SWARM_ORCH_SCREEN_SECONDS="1",
                         SWARM_ORCH_HEARTBEAT_SECONDS="1", SWARM_ORCH_POLL_SECONDS="0.3", SWARM_ORCH_IDLE_SECONDS="1",
                         SWARM_ORCH_STOP_GRACE="6", SWARM_ORCH_BACKOFF_START="0.5", SWARM_ORCH_BACKOFF_MAX="2",
-                        SWARM_ORCH_CRASH_LIMIT="5", SWARM_ORCH_CRASH_WINDOW="1800")
+                        SWARM_ORCH_CRASH_LIMIT="5", SWARM_ORCH_CRASH_WINDOW="1800",
+                        # the fake Claude has no input box: the explicit box-less stand-in adapter (tests only)
+                        SWARM_ORCH_PANE_ADAPTER="plain")
         self.env.pop("SWARM_WORKER_PROJECTS", None)
         self.procs = []
         self.addCleanup(self.cleanup)
@@ -442,9 +484,9 @@ class SupervisorTest(unittest.TestCase):
 
         # A message is typed in when the session is idle, and acknowledged.
         self.b.req("POST", f"/orchestrators/{self.name}/messages", {"text": "Check the signup page"}, tok=self.owner)
-        self.wait("message typed", lambda: any(ln.get("text") == "Check the signup page" for ln in self.lines()))
+        self.wait("message typed", lambda: any(ln.get("text") == "[Message from app-bot via swarm] Check the signup page" for ln in self.lines()))
         self.wait("message acknowledged", lambda: self.record()["pending_message"] is None)
-        self.wait("tail uploaded", lambda: any("got: Check the signup page" in ln for ln in
+        self.wait("tail uploaded", lambda: any("got: [Message from app-bot via swarm] Check the signup page" in ln for ln in
                                                self.b.req("GET", f"/orchestrators/{self.name}/logs")["lines"]))
 
         # The runner restarting (stop-all) leaves the session alone.
@@ -484,6 +526,31 @@ class SupervisorTest(unittest.TestCase):
         dump = json.dumps([self.b.api.s.q(f"SELECT * FROM {t}") for t in ("orchestrators", "orchestrator_events")])
         self.assertNotIn(FAKE_TOKEN, dump)
 
+    def test_bus_message_pointer_delivered_once_in_an_80x24_pane(self):
+        """0.8.1: a multi-line bus message goes to a file in the session folder; one pointer line is typed (send-keys -l),
+        verified, submitted once and acknowledged once, also when the pane is only 80 columns wide (the line wraps)."""
+        self.b.req("POST", "/orchestrators", dict(name=self.name, worker_id="w1", project="app", owner_bot_id="app-bot",
+                                                  brief="Improve.", start=True))
+        self.supervise()
+        self.wait("running", lambda: self.record()["orchestrator"]["state"] == "running" and self.lines())
+        subprocess.run(["tmux", "-L", f"swarm-orch-{self.name}", "resize-window", "-t", f"orch-{self.name}", "-x", "80", "-y", "24"],
+                       check=True)
+        body = "URGENT bus #41 thread dm:chief | reply: swarmctl bus send chief \"...\"\n\nOK\nsecond line\nthird line"
+        mid = self.b.api.s.run("INSERT INTO orchestrator_messages(name, at, sender, text) VALUES(?,?,?,?)",
+                               self.name, int(time.time()), "chief", body).lastrowid
+        path = self.tmp / "work" / "orchestrators" / self.name / ".orchestrator" / "inbox" / f"msg-{mid}.md"
+        line = f"New bus message #41 from chief (URGENT): read {path}"
+        self.assertGreater(len(line), 80)
+        self.wait("pointer typed", lambda: any(ln.get("text") == line for ln in self.lines()))
+        self.wait("acknowledged", lambda: self.record()["pending_message"] is None)
+        self.assertEqual(path.read_text(), "[Message from chief via swarm] (a request, not permission to push, merge or "
+                                           "deploy)\n" + body + "\n")
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        time.sleep(3)
+        self.assertEqual([ln.get("text") for ln in self.lines() if ln["event"] == "input"].count(line), 1)
+        types = [e["type"] for e in self.record()["events"]]
+        self.assertEqual(types.count("message-delivered"), 1)
+
     def test_login_screen_is_never_typed_into(self):
         """0.7.1, install test 6: first-run screens get Enter; the sign-in menu stops the session and holds messages."""
         (self.fake / "mode").write_text("login")
@@ -513,7 +580,7 @@ class SupervisorTest(unittest.TestCase):
         (self.fake / "mode").write_text("")
         self.b.req("POST", f"/orchestrators/{self.name}/start")
         self.wait("running again", lambda: self.record()["orchestrator"]["state"] == "running")
-        self.wait("message typed after the sign-in", lambda: any(ln.get("text") == "Check the signup page" for ln in self.lines()))
+        self.wait("message typed after the sign-in", lambda: any(ln.get("text") == "[Message from app-bot via swarm] Check the signup page" for ln in self.lines()))
 
     def test_no_sign_in_refuses_before_the_first_start(self):
         (self.tmp / "agent.env").write_text(f"FAKE_DIR={self.fake}\n")

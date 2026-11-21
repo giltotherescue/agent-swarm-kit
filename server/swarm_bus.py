@@ -450,7 +450,8 @@ class Bus:
         text = str(e)
         if self.be.secret_hit(text) or self.CREDENTIAL_RE.search(text):
             return f"{name}: [text withheld]"
-        return f"{name}: {re.sub(r'[\x00-\x1f\x7f]+', ' ', self.be.scrub(text))[:160]}"
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", self.be.scrub(text))[:160]   # outside the f-string: Python 3.11
+        return f"{name}: {text}"
 
     def log(self, what, mid, e):
         print(what, mid, self.safe_err(e), file=sys.stderr, flush=True)
@@ -458,7 +459,7 @@ class Bus:
     # ---------------- tmux ----------------
     def tmux_enqueue(self, m, a):
         """Enqueue the tmux copy once: keyed by bus_message_id, so retries, the duplicate path and the flush repair never double up."""
-        head = f'bus #{m["id"]} thread {m["thread"]} | reply_expected={"true" if m["reply_expected"] else "false"} | reply: swarmctl bus send {m["sender"]} "..." | after acting: swarmctl bus ack {m["id"]}'
+        head = f'{"URGENT " if m["urgent"] else ""}bus #{m["id"]} thread {m["thread"]} | reply_expected={"true" if m["reply_expected"] else "false"} | reply: swarmctl bus send {m["sender"]} "..." | after acting: swarmctl bus ack {m["id"]}'
         if len(head) + 2 + len(m["body"]) > TMUX_TOTAL_MAX:
             raise ValueError("bus message too long for a tmux paste")  # unreachable: BODY_MAX leaves room
         self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text, bus_message_id) SELECT ?,?,?,?,? WHERE NOT EXISTS"

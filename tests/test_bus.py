@@ -593,6 +593,15 @@ class TmuxTest(BusCase):
         self.assertEqual(len(self.get(f"/bus/messages/{out['id']}", "chief")["attempts"]), 1)
         self.assertTrue(self.b.req("POST", f"/bus/messages/{out['id']}/ack", tok=self.tok["polisher"])["first"])
 
+    def test_urgent_message_head_starts_with_urgent_and_others_do_not(self):
+        """0.8.1: the supervisor reads URGENT from the first line to shorten the busy-pane wait."""
+        urgent = self.send("chief", expect=201, to="polisher", body="stop now", thread="task:t9", urgent=True)
+        plain = self.send("chief", expect=201, to="polisher", body="fyi", thread="task:t9", reply_expected=False)
+        texts = {r["bus_message_id"]: r["text"] for r in self.om_rows()}
+        self.assertTrue(texts[urgent["id"]].startswith(f"URGENT bus #{urgent['id']} thread task:t9 | "))
+        self.assertTrue(texts[plain["id"]].startswith(f"bus #{plain['id']} thread task:t9 | "))
+        self.assertEqual(texts[urgent["id"]].split("\n", 1)[0].count("URGENT"), 1)
+
     def test_legacy_orchestrator_message_mirrors_to_the_bus(self):
         r = self.b.req("POST", "/orchestrators/polisher/messages", {"text": "legacy hello"})
         self.assertTrue(r["queued"] and r["id"] and r["bus_id"])
