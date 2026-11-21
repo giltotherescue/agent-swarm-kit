@@ -113,7 +113,7 @@ class AuthzTest(unittest.TestCase):
 
     # ---- Astra 7: the permission matrix is enforced and published ----
     def test_route_matrix(self):
-        self.b.req("POST", "/tasks", {"prompt": "matrix task", "allow_duplicate": True})
+        self.b.req("POST", "/tasks", {"prompt": "matrix task", "allow_duplicate": True, "owner": "alice"})
         claimed = None
         while True:
             c = self.b.claim()
