@@ -451,7 +451,7 @@ class Bus:
     # ---------------- tmux ----------------
     def tmux_enqueue(self, m, a):
         """Enqueue the tmux copy once: keyed by bus_message_id, so retries, the duplicate path and the flush repair never double up."""
-        head = f'bus #{m["id"]} thread {m["thread"]} | reply_expected={"true" if m["reply_expected"] else "false"} | reply: swarmctl bus send {m["sender"]} "..." | after acting: swarmctl bus ack {m["id"]}'
+        head = f'{"URGENT " if m["urgent"] else ""}bus #{m["id"]} thread {m["thread"]} | reply_expected={"true" if m["reply_expected"] else "false"} | reply: swarmctl bus send {m["sender"]} "..." | after acting: swarmctl bus ack {m["id"]}'
         if len(head) + 2 + len(m["body"]) > TMUX_TOTAL_MAX:
             raise ValueError("bus message too long for a tmux paste")  # unreachable: BODY_MAX leaves room
         self.s.run("INSERT INTO orchestrator_messages(name, at, sender, text, bus_message_id) SELECT ?,?,?,?,? WHERE NOT EXISTS"

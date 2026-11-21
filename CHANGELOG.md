@@ -4,6 +4,27 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.8.1 (2026-11-21)
+
+Queued messages now reach an orchestrator during a long busy turn (agent-control PR 64).
+
+- **Busy delivery.** While the session is working (the spinner keeps the pane changing) the supervisor used to wait for
+  an idle pane, so a message could sit for the whole turn. Now the oldest queued message is typed in once it has waited
+  `SWARM_ORCH_BUSY_MAX_WAIT_SECONDS` (90), or `SWARM_ORCH_BUSY_URGENT_WAIT_SECONDS` (15) when the first line of the
+  message says `URGENT`; Claude Code queues it for the agent's next step. The next one follows after
+  `SWARM_ORCH_BUSY_GAP_SECONDS` (5). The wait keeps counting across a backlog. Idle delivery is unchanged. A new
+  `message-delivered-busy` event records each busy paste.
+- **Never over a draft or a menu.** The supervisor reads the whole input box between the rule lines around the `❯`
+  prompt. Claude Code's own hints (`Try "..."`, `Press up to edit queued messages`, `Queued ...`) count as empty; any
+  other text (including a multiline draft whose first line is empty) is a draft and nothing is pasted; a layout it
+  cannot read confidently also blocks. A choice menu or permission prompt blocks too.
+- **Never twice.** A message id this supervisor process already typed is never typed again; if only the receipt to the
+  backend failed, only the receipt is retried.
+- **Bus.** The tmux copy of an urgent bus message starts with `URGENT `. The backend accepts the `message-delivered-busy`
+  event type. While busy the supervisor also asks for the next message every `SWARM_ORCH_MESSAGE_POLL_SECONDS`.
+- Tests: `tests/test_orchestrator_busy.py` (input box fixtures, busy max wait, urgent, backlog, receipt retry) and an
+  urgent-head test in `tests/test_bus.py`.
+
 ## 0.8.0 (2026-11-21)
 
 The Agent Bus: reliable messages between your agents, ported from agent-control. Nothing is on until you register agents.

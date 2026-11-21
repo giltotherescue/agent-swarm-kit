@@ -200,7 +200,8 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertIn("see [sign-in link hidden] ok", logs)
         for _ in range(2):
             beat(self.b, "steward", state="needs-login", last_exit="Claude is waiting at a sign-in screen. Run: sudo swarmctl login claude",
-                 events=[{"type": "needs-login", "text": "sign-in screen"}, {"type": "first-run", "text": "theme"}])
+                 events=[{"type": "needs-login", "text": "sign-in screen"}, {"type": "first-run", "text": "theme"},
+                         {"type": "message-delivered-busy", "text": "pasted while busy"}])
         sent = self.notices("needs-login")
         self.assertEqual([n["notify_target"] for n in sent], ["app-bot"])
         self.assertIn("sudo swarmctl login claude", sent[0]["text"])

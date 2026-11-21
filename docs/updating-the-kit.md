@@ -105,6 +105,12 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to 0.8.1
+
+Run the setup script as usual and restart the supervisors (the upgrade does). No database change. Orchestrators now
+receive a queued message during a long busy turn (after 90 seconds, 15 if urgent) instead of waiting for an idle pane.
+`swarmctl`, `swarm_worker.py` and `agent-exec` are 0.8.1 together.
+
 ## Upgrading to 0.8.0
 
 Run the setup script as usual. The backend adds the Agent Bus tables (`agents`, `agent_aliases`, `bus_messages`,

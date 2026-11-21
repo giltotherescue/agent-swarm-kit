@@ -86,13 +86,15 @@ class BusTest(unittest.TestCase):
         self.step_idle(beats)
         self.assertEqual(len(beats), 1)       # interval respected
 
-    def test_no_poll_while_busy(self):
+    def test_busy_poll_only_times_the_wait(self):
+        """0.8.1: a busy pane is polled too (to time how long a message waited), but nothing is typed."""
         self.ready()
         self.sup.tail_changed = time.time()
         self.sup.last_beat = time.time() - 12
         beats = []
         self.step_idle(beats)
-        self.assertEqual(beats, [])
+        self.assertEqual(len(beats), 1)
+        self.assertEqual(self.sent, [])
 
     def test_polled_message_is_delivered(self):
         self.ready()
