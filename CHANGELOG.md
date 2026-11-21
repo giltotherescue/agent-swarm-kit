@@ -4,6 +4,28 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## Unreleased: publish policy (agent-control PR 65)
+
+Ported from agent-control PR 65 where the kit publishes. See docs/concepts.md, "Pull requests".
+
+- **`open_pr` is an absolute veto.** Only `--pr` opens a PR. The worker's single `gh pr create` call refuses without it,
+  and the backend drops (with a warning event) a PR link reported by a task without `--pr` unless it is the PR the task
+  was told to update (`--pr-number` or the parent's PR it inherited as a follow-up).
+- **PR base, never a guessed `main`.** A replacement for a merged or closed target PR uses that PR's live base, read from
+  GitHub after the push; if it cannot be read, no PR is opened. A fresh PR uses `--base`, then the parent's base, then the
+  repo default as GitHub (or origin's HEAD) reports it; if neither answers, `--base` is left out and GitHub chooses.
+- **Terminal targets reported honestly.** A `--pr-number` or inherited follow-up PR that was merged or closed is never
+  reported as the task's PR or as merged by it. The work is still pushed; the branch, commit and reason go to a publish
+  event (with `target_pr_state`) and a `## Publish note` at the end of REPORT.md. An open target is now reported as the
+  task's `pr_url` (a `--pr --pr-number N` task used to end "no PR was confirmed").
+- **Explicit null clears.** A finish with `pr_url: null` clears a PR link an earlier claim stored; an absent `pr_url`
+  keeps it.
+- **`--base` is persisted** (`swarmctl enqueue --base NAME`, new `tasks.base` column added in place): inherited by
+  follow-ups, and kept when a follow-up answers a waiting task, only when the answer is accepted. `POST /tasks/ID/answer`
+  takes `base` the same way.
+- **Not ported:** PR 65's merge gate (CI allowlist, null/empty rollup handling, SHA-pinned REST merge, auto-merge
+  disable) and deploy credit. The kit never merges or deploys; a human merges.
+
 ## 0.8.1 (unreleased)
 
 Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).

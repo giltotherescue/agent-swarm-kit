@@ -122,7 +122,7 @@ def cmd_enqueue(a):
             "open_pr": a.pr, "pr_number": a.pr_number, "branch": a.branch, "ask_human": a.ask_human,
             "untrusted_input": a.untrusted_input, "command": a.command, "idempotency_key": a.key,
             "title": a.title, "allow_duplicate": a.allow_duplicate, "parent_id": a.parent, "follow_up": a.follow_up,
-            "target_worker": a.worker,
+            "target_worker": a.worker, "base": a.base,
             "push_main": a.push_main, "allow_gitlink": a.allow_gitlink, "timeout_minutes": a.timeout_minutes, "chain": a.chain, "max_cycles": a.max_cycles}
     if a.attach:
         body["attachments"] = [{"name": os.path.basename(p), "content_base64": base64.b64encode(open(p, "rb").read()).decode()}
@@ -993,6 +993,8 @@ def main():
     e.add_argument("--pr", action="store_true", help="push agent/<id> and open a draft PR")
     e.add_argument("--push-main", action="store_true", help="push the default branch (only if the project allows it)")
     e.add_argument("--pr-number", type=int, help="work on top of this existing PR"); e.add_argument("--branch")
+    e.add_argument("--base", help="base branch for a fresh PR (follow-ups inherit the parent's; a replacement for a target PR "
+                                  "always uses that PR's live base)")
     e.add_argument("--ask-human", action="store_true", help="a question from this task goes to the human, not the bot")
     e.add_argument("--untrusted-input", action="store_true", help="brief came from email, tickets or scraped pages")
     e.add_argument("--command", help="script task: run this shell command with no model")
