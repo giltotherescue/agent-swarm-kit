@@ -686,6 +686,18 @@ class Backend:
             raise ApiError(404, "no such task")
         return t
 
+    def get_readable_task(self, who, task_id, kind=None):
+        """Like get_task, but a task token may also read the report and artifacts of the parent (or follow-up source)
+        of the task it currently holds, even when another worker ran that parent. Never attachments or anything else."""
+        if who["role"] == "task" and task_id != who["task"] and kind in ("report", "artifacts"):
+            mine = self.own_task(who, who["task"])
+            if mine["parent_id"] and mine["parent_id"] == task_id:
+                t = self.s.one("SELECT * FROM tasks WHERE id = ?", task_id)
+                if t:
+                    return t
+            raise ApiError(403, "a task token only works for its own task, or its parent's report and artifacts")
+        return self.get_task(who, task_id)
+
     def own_task(self, who, task_id, claim_id=None):
         """For task tokens: the task must be the token's own task, and the claim must still be live."""
         if who["role"] != "task":
@@ -3072,25 +3084,25 @@ def r_cancel(api, who, m, qs, body, h):
     return api.cancel(who, m[0])
 
 
-@route("GET", r"/tasks/([^/]+)/report", ("admin", "chief", "bot", "agent"), "REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns")
+@route("GET", r"/tasks/([^/]+)/report", ("admin", "chief", "bot", "agent", "task"), "REPORT.md as text. Bot: own only. Bus agent: tasks its bot owns. Task token: own task or its parent")
 def r_report(api, who, m, qs, body, h):
-    api.get_task(who, m[0])
+    api.get_readable_task(who, m[0], "report")
     f = api.s.one("SELECT data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", m[0])
     if not f:
         raise ApiError(404, "no report yet")
     return ("text/markdown; charset=utf-8", bytes(f["data"]))
 
 
-@route("GET", r"/tasks/([^/]+)/(artifacts|attachments)", ("admin", "chief", "bot", "task"), "List files. Bot and task token: own only")
+@route("GET", r"/tasks/([^/]+)/(artifacts|attachments)", ("admin", "chief", "bot", "task"), "List files. Bot and task token: own only (a task token may also list its parent's artifacts)")
 def r_files(api, who, m, qs, body, h):
-    api.get_task(who, m[0])
+    api.get_readable_task(who, m[0], m[1])
     kind = "artifact" if m[1] == "artifacts" else "attachment"
     return {"files": api.s.q("SELECT name, size, at FROM files WHERE task_id = ? AND kind = ? ORDER BY name", m[0], kind)}
 
 
-@route("GET", r"/tasks/([^/]+)/(artifacts|attachments)/([^/]+)", ("admin", "chief", "bot", "task"), "Download one file. Bot and task token: own only")
+@route("GET", r"/tasks/([^/]+)/(artifacts|attachments)/([^/]+)", ("admin", "chief", "bot", "task"), "Download one file. Bot and task token: own only (a task token may also read its parent's artifacts)")
 def r_file(api, who, m, qs, body, h):
-    api.get_task(who, m[0])
+    api.get_readable_task(who, m[0], m[1])
     kind = "artifact" if m[1] == "artifacts" else "attachment"
     f = api.s.one("SELECT data FROM files WHERE task_id = ? AND kind = ? AND name = ?", m[0], kind, urllib.parse.unquote(m[2]))
     if not f:

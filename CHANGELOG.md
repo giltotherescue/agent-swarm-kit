@@ -6,6 +6,15 @@ See docs/updating-the-kit.md for how to update.
 
 ## 0.8.1 (unreleased)
 
+Parent report and artifacts for follow-up and child tasks, ported from agent-control PR 71.
+
+- **`.task-context/parent/`** holds the parent's uploaded `REPORT.md` and artifacts (sanitized names; unsafe ones skipped and
+  noted). The runner fetches them with the task token before the agent starts; the agent has no key, so the URLs 401.
+  Missing pieces are noted in `.task-context/README` and `parent/NOTES.md`, never a failure. The brief and run rules say where.
+- **Small backend read rule:** a task token may GET the report and artifact list/files of the parent (`parent_id`) of the
+  task it holds, even when another worker ran it. Nothing else of the parent (attachments, bundles) is readable.
+- Update `swarm_worker.py`, `agent-exec` and `swarm_backend.py` together.
+
 Docs note on the pack-once, shard-in-parallel remote-run pattern, ported from agent-control PR 70. See
 [docs/sizing-and-sandboxes.md](docs/sizing-and-sandboxes.md). Docs only; the kit ships no task-shim or remote-run.
 
