@@ -351,5 +351,36 @@ class RepoWorkerTest(WorkerTest):
         self.assertIn("SWARM_TASK_ID=" + tid, env)
 
 
+    def test_failing_collector_diagnostic_is_redacted_in_log_and_finish(self):
+        # A collector that fails while naming a token-shaped pin, with padding past the old 500-character cut.
+        real = self.w.AGENT_EXEC
+        wrap = os.path.join(self.tmp, "collect-fails")
+        with open(wrap, "w") as fh:
+            fh.write("#!/usr/bin/env bash\n"
+                     "for a in \"$@\"; do if [[ $a == collect ]]; then\n"
+                     "  printf 'gitlink scan failed at TOKEN=abcdefgh12345\\n' >&2; printf '%0486d' 0 | tr 0 p >&2; exit 1\n"
+                     f"fi; done\nexec {real} \"$@\"\n")
+        os.chmod(wrap, 0o755)
+        sent, real_http = [], self.w.http
+        def spy(method, path, *a, **k):
+            if path.endswith("/finish"):
+                sent.append(json.dumps(a[1] if len(a) > 1 else k.get("body")))
+            return real_http(method, path, *a, **k)
+        import contextlib, io
+        buf = io.StringIO()
+        self.w.AGENT_EXEC, self.w.http = wrap, spy
+        try:
+            tid = self.admin("POST", "/tasks", {"prompt": "Paint the fence", "owner": "web"})["task"]["id"]
+            with contextlib.redirect_stdout(buf):
+                t = self.run_one()
+        finally:
+            self.w.AGENT_EXEC, self.w.http = real, real_http
+        self.assertEqual((t["id"], t["state"]), (tid, "failed"), t)
+        self.assertTrue(sent, "a finish was sent")
+        blob = buf.getvalue() + "\n".join(sent) + json.dumps(t)
+        self.assertIn("agent-exec collect failed", blob)
+        for frag in ("abcdefgh12345", "abcdefgh", "12345"):
+            self.assertNotIn(frag, blob)
+
 if __name__ == "__main__":
     unittest.main()

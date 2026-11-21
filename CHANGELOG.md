@@ -4,7 +4,9 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
-## Unreleased: primary/fallback worker routing (agent-control PR 68)
+## 0.8.1 (unreleased)
+
+Primary/fallback worker routing, ported from agent-control PR 68. See [docs/multi-worker.md](docs/multi-worker.md).
 
 - **Optional primary worker.** New backend setting `SWARM_PRIMARY_WORKER`, empty by default (first-come, as before). When
   set, other workers take an unpinned task only if the primary is stale (`SWARM_PRIMARY_STALE_SECONDS`, 90), never seen or
@@ -13,9 +15,7 @@ See docs/updating-the-kit.md for how to update.
 - **No schema change.** Liveness reuses the existing `workers.last_seen`, already written on every claim and heartbeat.
 - **Not ported:** the `remote-run-broker` socket setting and LaunchAgent example; the kit ships no remote-run broker.
 
-## Unreleased: review queue (agent-control PR 62)
-
-A simple port of agent-control's review queue. See [docs/review-queue.md](docs/review-queue.md).
+The review queue, a simple port of agent-control PR 62. See [docs/review-queue.md](docs/review-queue.md).
 
 - **File, list, decide.** Bots file items (`decision`, `copy`, `creative`, `social_post`, `deliverable`, `pr`) with
   `PUT /review/items`, upserted by project, bot and key (new revision on change, `unchanged` on an identical re-send,
@@ -32,9 +32,14 @@ A simple port of agent-control's review queue. See [docs/review-queue.md](docs/r
 - **Not ported:** the dashboard UI, meeting flags, SLA alerts, batches and sync, media, fill-ins and variants, the legacy
   item migration, and linked-task propagation with its retry ledger.
 
-## Unreleased: publish policy (agent-control PR 65)
+Auto-commit never stages submodule pins, ported from agent-control PR 63. See [docs/git-policy.md](docs/git-policy.md).
 
-Ported from agent-control PR 65 where the kit publishes. See docs/concepts.md, "Pull requests".
+- **Submodule gitlinks are never auto-committed.** The kit's auto-commits, the backend's weekly project-log export and `swarmctl log export --dir DIR --git`, share one guarded commit. It runs in a copy of the index and unstages added, modified and deleted gitlinks (index mode 160000), found from the index so `.gitmodules` is not needed and `diff.ignoreSubmodules=all` cannot hide them. A pin replaced by files, a pin and an ordinary file at the same path, a git error, a 60-second git timeout or a gitlink still staged aborts the commit and leaves the caller's index untouched. The commit is built with plumbing from exactly the inspected index (`write-tree`, `commit-tree`, compare-and-swap `update-ref`), so repository hooks never run for these automated commits: a formatting hook cannot stage the skipped pin, and a slow post-commit hook cannot report a failure after HEAD moved. `swarmctl log export --git` no longer runs `git add -A` on the real index or passes git's output through; it prints a redacted skip note, and on a failure a redacted error with exit code 1. The stock worker still never commits leftover work.
+- **Skips are recorded.** A finish may carry `gitlink_skipped` (path, old sha, new sha; at most 200) and `gitlink_skipped_count` (the true total). They are stored on the task, posted as a `publish` event, kept as exactly one note in the stored REPORT.md (also on publish failures; the note sits between `<!-- swarm:gitlink-skip-note -->` and `<!-- /swarm:gitlink-skip-note -->` lines, so report prose quoting its wording or a marker does not count) and added to bus notices (a WARNING line ahead of the report excerpt) and legacy webhook payloads (at most 10 entries, plus the true count). Each finish that sends `gitlink_skipped` replaces the earlier observation, also on a resumed claim; an explicit `[]` clears the list, the count and the note, and omitting the field keeps them and puts the note into the current report (also a fresh one uploaded by a resumed run). Only a generated block, each marker alone on its own line, is ever removed from a report; a marker quoted in prose is left alone.
+- **Redacted at the source, before truncation.** Every gitlink field, every log or error line that names one, and git's stderr in an export error goes through the secret patterns and agent-control's key=value rule (`TOKEN=...` becomes `TOKEN=[redacted]`) on the full value, in the worker before sending (including a failing collector's diagnostic and the `/finish` error), in both exports before logging, and again in the backend before storage, bus or webhook. A token-shaped path no longer gets the bus notice rejected.
+- **`swarmctl enqueue --allow-gitlink`** records that a pin bump is intended (task field `allow_gitlink`: `true`, `1`, `"true"`, `"1"` or `"yes"` opt in; `false`, `0`, `"false"`, `"0"`, `"no"` or `""` do not; anything else, including JSON `null`, is a 400). A follow-up inherits the parent's value only when it omits the field; an explicit value, JSON `false` included, overrides it. It is metadata for a worker that auto-commits; with the stock kit, commit an intentional pin bump explicitly.
+
+The publish policy, ported from agent-control PR 65 where the kit publishes. See docs/concepts.md, "Pull requests".
 
 - **`open_pr` is an absolute veto.** Only `--pr` opens a PR. The worker's single `gh pr create` call refuses without it,
   and the backend drops (with a warning event) a PR link reported by a task without `--pr` unless it is the PR the task

@@ -56,6 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 import swarm_bus
+import swarm_gitlink
 import swarm_review
 
 VERSION = "0.8.0"
@@ -201,7 +202,9 @@ MIGRATE_COLUMNS = {
               ("start_fresh", "INTEGER DEFAULT 0"), ("timeout", "INTEGER"), ("chain", "INTEGER DEFAULT 0"),
               ("chain_root", "TEXT"), ("cycle", "INTEGER DEFAULT 0"), ("max_cycles", "INTEGER"),
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
-              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"), ("base", "TEXT")],
+              ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"), ("base", "TEXT"),
+              # 0.8.1 (agent-control PR 63): opt-in for pin bumps; submodule pins the auto-commit left uncommitted (JSON list)
+              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT"), ("gitlink_skipped_count", "INTEGER")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -430,6 +433,20 @@ class Reply:
 
 def new_id(prefix="t"):
     return prefix + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + secrets.token_hex(3)
+
+
+def parse_flag(value, field):
+    """A yes/no API field: a JSON boolean, 0/1, or the strings true/false/1/0/yes/no. Anything else is a 400, so "false"
+    can never switch something on."""
+    if value is None or value is False:
+        return 0
+    if value is True:
+        return 1
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "false", "0", "no", ""):
+        return 1 if value.strip().lower() in ("true", "1", "yes") else 0
+    raise ApiError(400, f"{field} must be true or false")
 
 
 def clean_text(value, limit, field):
@@ -705,9 +722,40 @@ class Backend:
         }
         if unread and task["state"] in TERMINAL:
             p["unread_messages"] = unread
+        gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(task), patterns=self.secret_patterns,
+                                           count=task.get("gitlink_skipped_count"))
+        if gl["count"]:
+            p["gitlink_skipped"], p["gitlink_skipped_count"] = gl["items"], gl["count"]
         if task["state"] == "waiting":
             p["question"] = task.get("question")
         return p
+
+    def set_report_note(self, task_id, note):
+        """Make the task's stored REPORT.md carry exactly this (sanitized) gitlink skip note, replacing any generated note
+        from an earlier finish; note "" removes it. A task without a report gets one; a report that held only the note
+        is removed with it. Detection is by the note's markers, never by its wording."""
+        f = self.s.one("SELECT name, data FROM files WHERE task_id = ? AND kind = 'report' ORDER BY at DESC LIMIT 1", task_id)
+        text = bytes(f["data"]).decode(errors="replace") if f else ""
+        base = swarm_gitlink.strip_report_note(text)
+        if base == text and not note:
+            return
+        name = f["name"] if f else "REPORT.md"
+        data = (base.rstrip() + note).lstrip("\n").encode() if note else (base.rstrip() + "\n").lstrip("\n").encode()
+        if f and data == bytes(f["data"]):
+            return
+        if not data.strip():
+            self.s.run("DELETE FROM files WHERE task_id = ? AND kind = 'report' AND name = ?", task_id, name)
+            return
+        self.s.run("INSERT OR REPLACE INTO files(task_id, kind, name, data, size, at) VALUES(?,?,?,?,?,?)",
+                   task_id, "report", name, data, len(data), now())
+
+    @staticmethod
+    def stored_gitlinks(t):
+        try:
+            v = json.loads(t.get("gitlink_skipped") or "[]")
+        except (TypeError, ValueError):
+            return []
+        return v if isinstance(v, list) else []
 
     @staticmethod
     def cannot_push(task):
@@ -839,6 +887,8 @@ class Backend:
     def create_task(self, who, b):
         self.need(who, "admin", "chief", "bot")
         b = {k: v for k, v in b.items() if not str(k).startswith("_")}  # internal fields are never taken from a request
+        if "allow_gitlink" in b and b["allow_gitlink"] is None:
+            raise ApiError(400, "allow_gitlink must be true or false; omit it to inherit a follow-up's parent value")
         follow = clean_text(b.get("follow_up"), 80, "follow_up")
         if follow:
             return self.follow_up(who, follow, b)
@@ -881,6 +931,7 @@ class Backend:
         report_only = 1 if b.get("report_only") or command else 0
         untrusted = 1 if (b.get("untrusted_input") or b.get("untrusted")) else 0
         push_main = 1 if b.get("push_main") else 0
+        allow_gitlink = parse_flag(b.get("allow_gitlink"), "allow_gitlink")
         push = 1 if (b.get("push") or b.get("open_pr") or push_main) else 0
         if b.get("pr_number") is not None and not (report_only or untrusted):
             push = 1  # working on an existing PR means updating it
@@ -939,6 +990,8 @@ class Backend:
                  "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         if target_worker:
             canon["target_worker"] = target_worker
+        if allow_gitlink:
+            canon["allow_gitlink"] = 1
         if base:
             canon["base"] = base
         phash = hashlib.sha256(json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()
@@ -968,15 +1021,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, base)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, allow_gitlink, base)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
                     timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
-                    max_cycles, target_worker, base)
+                    max_cycles, target_worker, allow_gitlink, base)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -1064,7 +1117,7 @@ class Backend:
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "base")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "allow_gitlink", "base")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]
@@ -1072,6 +1125,10 @@ class Backend:
             inherit["branch"] = parent.get("pushed_branch") or parent.get("branch") or f"agent/{parent['id']}"
         body = dict(inherit)
         body.update({k: v for k, v in b.items() if v is not None and v is not False and v != "" and k != "follow_up"})
+        if "allow_gitlink" in b:
+            # an explicit value, JSON false included, overrides the parent's opt-in; only an omitted field inherits it
+            # (an explicit null was refused in create_task)
+            body["allow_gitlink"] = parse_flag(b["allow_gitlink"], "allow_gitlink")
         body["parent_id"] = parent["id"]
         body["_workspace_host"] = parent.get("workspace_host")
         held = self.s.one("SELECT id FROM tasks WHERE parent_id = ? AND follow_up = 1 AND state NOT IN ('done','failed','cancelled')"
@@ -1080,6 +1137,7 @@ class Backend:
 
     def public_task(self, t, events=False):
         out = {k: v for k, v in t.items() if k not in ("prompt_hash", "session_id")}
+        out["gitlink_skipped"] = self.stored_gitlinks(t)
         out["has_report"] = bool(self.s.one("SELECT 1 FROM files WHERE task_id = ? AND kind = 'report'", t["id"]))
         out["artifacts"] = [r["name"] for r in self.s.q("SELECT name FROM files WHERE task_id = ? AND kind = 'artifact' ORDER BY name", t["id"])]
         if events:
@@ -1394,6 +1452,33 @@ class Backend:
                           and not isinstance(b.get("unpushed_commits"), bool) and b["unpushed_commits"] >= 0 else t["unpushed_commits"],
                           workspace_host=c["worker"] if (b.get("workdir") or t["workdir"]) else t["workspace_host"],
                           pending_answer=None)
+            skipped = b.get("gitlink_skipped")
+            if isinstance(skipped, list):
+                # An explicit observation ([] included) replaces the earlier one: it describes the worktree now. Omitting
+                # the field keeps what was stored. Redact on the full value (then cut) before anything is stored: the task
+                # record, the event, the report note and every notice see only this. The true count is kept apart from the
+                # bounded list, never re-derived from display strings. A replayed finish returns above, so this runs once.
+                gl = swarm_gitlink.public_gitlinks(skipped, limit=swarm_gitlink.MAX_STORED, patterns=self.secret_patterns,
+                                                   count=b.get("gitlink_skipped_count"))
+                if gl["count"]:
+                    common["gitlink_skipped"] = json.dumps(gl["items"])
+                    common["gitlink_skipped_count"] = gl["count"]
+                    shown = gl["items"][:swarm_gitlink.MAX_ITEMS]
+                    self.event(task_id, "publish", actor, "Auto-commit " + swarm_gitlink.format_note(shown, gl["count"]))
+                    self.set_report_note(task_id, swarm_gitlink.report_note(shown, gl["count"]))
+                else:
+                    if t.get("gitlink_skipped_count"):
+                        self.event(task_id, "publish", actor, "Auto-commit: no submodule pin changes left uncommitted now")
+                    common["gitlink_skipped"], common["gitlink_skipped_count"] = None, None
+                    self.set_report_note(task_id, "")
+            elif t.get("gitlink_skipped_count"):
+                # Field omitted: the stored observation still stands, and the current report must say so. A resumed claim
+                # may have uploaded a fresh REPORT.md (without the note) just before this finish; render the stored note
+                # into it. set_report_note replaces any earlier generated note, so this never duplicates it.
+                gl = swarm_gitlink.public_gitlinks(self.stored_gitlinks(t), limit=swarm_gitlink.MAX_STORED,
+                                                   patterns=self.secret_patterns, count=t["gitlink_skipped_count"])
+                if gl["count"]:
+                    self.set_report_note(task_id, swarm_gitlink.report_note(gl["items"][:swarm_gitlink.MAX_ITEMS], gl["count"]))
             if "session_id" in b and b["session_id"] is None and b.get("session_reset"):
                 common["session_id"] = None
             for w in (b.get("warnings") or [])[:20]:
@@ -2793,11 +2878,11 @@ def git_commit(folder, message):
     try:
         if not os.path.isdir(os.path.join(folder, ".git")):
             subprocess.run(["git", "init", "-q"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True, timeout=60)
-        subprocess.run(["git", "-c", "user.name=swarm-backend", "-c", "user.email=swarm-backend@localhost", "commit", "-q",
-                        "-m", message], cwd=folder, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        print("log export: git commit failed:", repr(e), file=sys.stderr, flush=True)
+        swarm_gitlink.commit_leftover(folder, message, allow_gitlink=False,
+                                      log=lambda m: print("log export:", m, file=sys.stderr, flush=True))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        # commit_leftover already redacts its own messages; redact again so an OSError's path text is covered too.
+        print("log export: git commit failed:", type(e).__name__, swarm_gitlink.redact(str(e)), file=sys.stderr, flush=True)
 
 
 class FailLimiter:
