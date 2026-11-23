@@ -12,6 +12,7 @@ Fix: the health check failed on a healthy 0.8.1 install.
   could not queue its script task. `healthcheck` is a reserved owner: if no bot is registered with that id, the backend drops the finish
   notice for its tasks, so neither the Chief of Staff (`owner_not_registered`) nor a real bot is woken by a health check. Register a bot
   named `healthcheck` and it gets notices like any other owner.
+- The quiet `healthcheck` rule applies only when no bot **and** no bus agent (name, alias or bot id) resolves from that owner, so an alias still gets its notices. A failed health-check task is marked handled by the failure escalation but never alerts the Chief; other failures escalate as before.
 - Grepped every script, doc, template and example for `enqueue` without an owner; the smoke test was the only one that queues a task.
 - Test: `test_healthcheck_owner_task_runs_and_sends_no_notice` in tests/test_backend.py.
 

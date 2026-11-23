@@ -827,13 +827,22 @@ class Backend:
     def bot(self, bot_id):
         return self.s.one("SELECT * FROM bots WHERE lower(id) = lower(?)", bot_id) if bot_id else None
 
+    def is_quiet_healthcheck(self, task):
+        """A smoke-test task whose owner is not a registered bot or a bus agent name, alias or bot id: nobody owns its notices."""
+        if (task.get("owner") or "").lower() != HEALTHCHECK_OWNER or self.bot(HEALTHCHECK_OWNER):
+            return False
+        try:
+            return not self.bus.owner_agent(task["owner"], bus_only=False)
+        except Exception:
+            return False  # lookup failed: keep the normal routing
+
     def notify_task(self, task, no_bus=False):
         """Route a task event: owner bot first, Chief of Staff only for ownerless, waiting-on-human or fallback.
         An owner that resolves to a bus agent with notices=bus gets the notice on the bus only (no bot webhook, no Chief copy);
         if the bus send fails, the normal path below runs, Chief copy included."""
         if task["state"] not in NOTIFY_STATES:
             return
-        if (task.get("owner") or "").lower() == HEALTHCHECK_OWNER and not self.bot(HEALTHCHECK_OWNER):
+        if self.is_quiet_healthcheck(task):
             return  # the smoke test's own task: nobody to tell, and no stray notice to the Chief of Staff
         seq = self.s.one("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'state' AND text = ?",
                          task["id"], task["state"])["n"]
@@ -1641,13 +1650,13 @@ class Backend:
         unresolved = ("t.state = 'failed' AND t.failure_escalated_at IS NULL AND t.failure_resolved_at IS NULL"
                       " AND NOT EXISTS (SELECT 1 FROM tasks f WHERE f.parent_id = t.id AND f.follow_up = 1"
                       " AND f.state != 'cancelled')")
-        failed = self.s.q(f"SELECT t.id FROM tasks t WHERE {unresolved} ORDER BY t.finished_at LIMIT 100")
+        failed = self.s.q(f"SELECT t.id, t.owner FROM tasks t WHERE {unresolved} ORDER BY t.finished_at LIMIT 100")
         for task in failed:
             with self.s.tx():
                 marked = self.s.run(f"UPDATE tasks AS t SET failure_escalated_at = ? WHERE t.id = ? AND {unresolved}",
                                     now(), task["id"]).rowcount
-            if not marked:
-                continue
+            if not marked or self.is_quiet_healthcheck(task):
+                continue  # a failed health check is marked handled but never alerts the Chief
             try:
                 self.alert(f"task-failed:{task['id']}",
                            f"Task {task['id']} failed and has no follow-up. Review its report or queue a follow-up.",

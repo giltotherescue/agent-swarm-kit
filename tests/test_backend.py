@@ -264,6 +264,19 @@ class BackendTest(unittest.TestCase):
                                        f"alert:task-failed:{failed['related-only']}"))
         self.deliver()
 
+    def test_failed_healthcheck_task_does_not_alert_the_chief(self):
+        tid = self.req("POST", "/tasks", {"prompt": "Smoke test: fail", "owner": "healthcheck"})["task"]["id"]
+        self.work(tid, "failed")
+        other = self.req("POST", "/tasks", {"prompt": "real failure"}, tok=self.web)["task"]["id"]
+        self.work(other, "failed")
+        with patch.object(self.api, "alert") as alert:
+            self.api.escalate()
+        keys = [c.args[0] for c in alert.call_args_list]
+        self.assertNotIn(f"task-failed:{tid}", keys)
+        self.assertIn(f"task-failed:{other}", keys)
+        self.assertIsNotNone(self.api.s.one("SELECT failure_escalated_at AS f FROM tasks WHERE id = ?", tid)["f"])
+        self.deliver()
+
     def test_bot_cannot_promote_itself(self):
         self.req("PUT", "/bots/web", {"role": "chief"}, tok=self.web, expect=403)
         self.req("PUT", "/bots/shop", {"notify_url": "https://x.example"}, tok=self.web, expect=403)

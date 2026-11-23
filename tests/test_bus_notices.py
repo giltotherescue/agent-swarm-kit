@@ -132,6 +132,15 @@ class BusNoticeTest(NoticeBase):
         self.assertEqual([x["recipient"] for x in m], ["clozy"] * 4)
         self.assertEqual(self.notice_rows(), [])
 
+    def test_healthcheck_alias_still_gets_notices_but_plain_healthcheck_is_quiet(self):
+        self.reg("clozy", {"aliases": ["clozy-old", "healthcheck"]})
+        self.finished("healthcheck", "th1")
+        self.assertEqual([m["recipient"] for m in self.bus_msgs()], ["clozy"])
+        self.reg("clozy", {"aliases": ["clozy-old"]})
+        before = len(self.bus_msgs())
+        self.finished("healthcheck", "th2")
+        self.assertEqual(len(self.bus_msgs()), before)
+
     def test_duplicate_notice_does_not_create_a_second_message(self):
         t = self.finished("clozy-bot", "td1")
         self.api.notify_task(t)
