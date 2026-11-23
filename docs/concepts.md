@@ -69,6 +69,8 @@ The agent also writes `REPORT.md` with these headings, in this order:
 5. **Open questions**
 6. **Facts worth keeping**
 
+Keep the Summary short: five lines at most, one decision, one link. Tag each claim **verified** (with the evidence) or **asserted**. The agent checks its own claims before reporting, so the owner can read the Summary, the decision and the Handoff and skip the rest. Queue the task with the "Report format" line in [../templates/task-brief.md](../templates/task-brief.md) so the worker follows this.
+
 Files for the requester go in `artifacts/`. The worker uploads the report and artifacts to the backend, so a bot can read them without GitHub: `swarmctl report TASK_ID` and `swarmctl artifacts TASK_ID`.
 
 Read the Handoff first, and do the Re-check yourself.

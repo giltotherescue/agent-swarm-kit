@@ -24,6 +24,10 @@ Limits:
 - Keep local test runs small: only the test files you touched. Full suites run as a separate script task.
 - Shared keys: if a step needs one, write "run it with with-secrets NAME -- COMMAND". Never put the value here.
 
+Report format: keep REPORT.md Summary to five lines at most, with one decision for the owner (if any) and one link.
+Tag each claim in Summary as "verified (evidence)" or "asserted". Verify your own claims before reporting; the owner
+reads only Summary, Decision and Handoff.
+
 Deliver: <a draft pull request (--pr) | REPORT.md and artifacts/ only (--report-only)>
 
 Optional for trusted work: add a line `Activity log: yes` to let the task write one real update to

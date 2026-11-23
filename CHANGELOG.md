@@ -6,6 +6,12 @@ See docs/updating-the-kit.md for how to update.
 
 ## Unreleased
 
+Docs and templates: meeting mode and manager-message rules, from Gil and a kit user (2026-11-23).
+
+- `templates/chief-of-staff.md`: new "Live calls with the human", "Messages to managers" and "Push work to workers" sections.
+- `templates/task-brief.md` and `docs/concepts.md`: report format asks for a five-line Summary with verified/asserted tags.
+  The worker's built-in report rules in `server/swarm_worker.py` are unchanged (docs/templates only).
+
 Informational bus messages, ported from agent-control PR 75 (wake filters). Only the bus part applies to the kit.
 
 - **`bus_messages.actionable`** (default 1, added in place on startup). `actionable: false` (`swarmctl bus send --fyi`) waits for a webhook
