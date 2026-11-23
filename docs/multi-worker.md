@@ -39,13 +39,13 @@ bash scripts/setup-macos.sh --backend-url https://BACKEND-PRIVATE-ADDRESS --work
 ```
 
 Send the worker token over a private channel and delete the copy after the install (the installer keeps its own, mode 600). Pin Apple-only work
-with `swarmctl enqueue --worker spare-mac ...`, and keep sensitive repos off it with `SWARM_WORKER_PROJECTS`. Because jobs there run as you
+with `swarmctl enqueue --worker spare-mac --owner <bot> ...`, and keep sensitive repos off it with `SWARM_WORKER_PROJECTS`. Because jobs there run as you
 and can read your GitHub login, do not use a Mac that holds your personal files for untrusted work.
 
 ## Route jobs only when you need to
 
 - Unpinned tasks go to the first eligible worker. Pin one when it needs something specific:
-  `swarmctl enqueue --worker build-box -p website brief.md` (API field: `target_worker`). A pinned
+  `swarmctl enqueue --worker build-box -p website --owner website-bot brief.md` (API field: `target_worker`). A pinned
   task waits rather than spilling to another machine. Follow-ups inherit the pin unless you supply
   a different worker; answering a waiting task does not change the pin.
 - To limit a worker to certain projects, set `SWARM_WORKER_PROJECTS=website,docs` and restart it.

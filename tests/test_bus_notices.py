@@ -278,6 +278,20 @@ class BusFailureFallbackTest(NoticeBase):
         self.assertEqual(len(self.notice_rows()), 3)
 
 
+    def test_alias_removed_before_permanent_failure_still_sends_one_fallback_notice(self):
+        self.add_chief()
+        self.reg("clozy", {"aliases": ["clozy-old", "healthcheck"]})
+        self.hook.status = 503
+        self.finished("healthcheck", "th3")
+        self.assertEqual(self.notice_rows(), [])
+        self.reg("clozy", {"aliases": ["clozy-old"]})  # alias gone before the retry window ends
+        later = int(time.time()) + 3 * 3600
+        self.api.bus.flush(now=later)
+        self.api.bus.flush(now=later + 60)
+        self.assertEqual([(r["target"], r["reason"]) for r in self.notice_rows() if r["reason"] != "alert"],
+                         [("chief-bot", "owner_not_registered")])
+
+
 class ReportExcerptTest(NoticeBase):
     def test_report_excerpt_is_included(self):
         self.finished("clozy-bot", "ts1", report="# Summary\nExcerpt line")

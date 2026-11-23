@@ -842,8 +842,8 @@ class Backend:
         if the bus send fails, the normal path below runs, Chief copy included."""
         if task["state"] not in NOTIFY_STATES:
             return
-        if self.is_quiet_healthcheck(task):
-            return  # the smoke test's own task: nobody to tell, and no stray notice to the Chief of Staff
+        if not no_bus and self.is_quiet_healthcheck(task):
+            return  # the smoke test's own task: nobody to tell. Not for a bus fallback: that notice was promised, so it must land.
         seq = self.s.one("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'state' AND text = ?",
                          task["id"], task["state"])["n"]
         event_id = f"{task['id']}:{task['state']}:{seq}"
