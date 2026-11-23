@@ -146,6 +146,21 @@ class BackendTest(unittest.TestCase):
         self.assertEqual([(g[0], g[3]["state"], g[3]["summary"]) for g in got], [("/web", "done", "Header fixed")])
         self.assertTrue(got[0][1].startswith(tid + ":done:"))
 
+    def test_healthcheck_owner_task_runs_and_sends_no_notice(self):
+        """The smoke test's e2e path: queue with --owner healthcheck, run a script task to done, nobody is notified."""
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "smoke-test.sh")).read()
+        self.assertRegex(src, r"swarmctl enqueue --owner healthcheck ")
+        # (Ownerless rejection is covered in test_enqueue_owner.) With the health-check owner it queues, finishes, and nobody is told.
+        tid = self.req("POST", "/tasks", {"prompt": "Smoke test: print ok", "command": "echo ok", "owner": "healthcheck",
+                                          "title": "smoke test"})["task"]["id"]
+        self.assertEqual(self.work(tid, "done")["state"], "done")
+        self.assertEqual(self.deliver(), [])
+        # A real bot registered under that id still gets its notices.
+        self.req("PUT", "/bots/healthcheck", {"notify_url": self.rx_url + "/web"})
+        tid = self.req("POST", "/tasks", {"prompt": "again", "owner": "healthcheck"})["task"]["id"]
+        self.work(tid, "done")
+        self.assertEqual([g[0] for g in self.deliver()], ["/web"])
+
     def test_ownerless_and_human_questions_go_to_chief(self):
         tid = self.req("POST", "/tasks", {"prompt": "no owner here", "owner": "ghost"})["task"]["id"]
         self.api.s.run("UPDATE tasks SET owner = NULL WHERE id = ?", tid)  # a legacy ownerless row still routes to the Chief

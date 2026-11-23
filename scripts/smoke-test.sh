@@ -82,8 +82,9 @@ fi
 
 if [[ $RUN_TASK -eq 1 ]]; then
   echo "== One script task, end to end (no model)"
+  # Queue requires an owner (0.8.1). 'healthcheck' is reserved: its finish notices are dropped, so no real bot is woken.
   key="smoke-$(date -u +%Y%m%d%H%M%S)"
-  out=$(echo "Smoke test: print ok" | swarmctl enqueue --command 'echo ok' --key "$key" --title "smoke test" - 2>&1)
+  out=$(echo "Smoke test: print ok" | swarmctl enqueue --owner healthcheck --command 'echo ok' --key "$key" --title "smoke test" - 2>&1)
   tid=$(awk '{print $1}' <<<"$out")
   if [[ -z "$tid" || "$tid" == swarmctl:* ]]; then fail "could not queue a task: $out"
   else

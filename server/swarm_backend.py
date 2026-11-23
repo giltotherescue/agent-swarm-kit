@@ -59,7 +59,7 @@ import swarm_bus
 import swarm_gitlink
 import swarm_review
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 MAX_FILE = 25 * 1024 * 1024
 MAX_BUNDLE = int(os.environ.get("SWARM_MAX_BUNDLE_MB", "100")) * 1024 * 1024
 MAX_TASK_BODY = 48 * 1024 * 1024
@@ -262,6 +262,8 @@ CREATE INDEX IF NOT EXISTS review_items_bot ON review_items(lower(bot), updated_
 # 7 = orchestrators (0.7.0). 8 = agent bus and wake policy (0.8.0).
 SCHEMA_VERSION = 8
 ACTIVITY_KINDS = ("activity", "shipped", "blocked", "decision")
+# Reserved owner for scripts/smoke-test.sh. Finish notices for it are dropped unless a bot with this id is registered.
+HEALTHCHECK_OWNER = "healthcheck"
 DECIDERS = ("owner", "delegated", "bot")
 CROSS_PROJECT = "cross-project"  # swarm-wide entries: any bot may write, only admin and chief read
 DEDUPE_WINDOW = 24 * 3600
@@ -831,6 +833,8 @@ class Backend:
         if the bus send fails, the normal path below runs, Chief copy included."""
         if task["state"] not in NOTIFY_STATES:
             return
+        if (task.get("owner") or "").lower() == HEALTHCHECK_OWNER and not self.bot(HEALTHCHECK_OWNER):
+            return  # the smoke test's own task: nobody to tell, and no stray notice to the Chief of Staff
         seq = self.s.one("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'state' AND text = ?",
                          task["id"], task["state"])["n"]
         event_id = f"{task['id']}:{task['state']}:{seq}"

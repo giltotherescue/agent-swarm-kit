@@ -4,6 +4,17 @@ All notable changes to this kit. Versions follow semantic versioning (MAJOR.MINO
 MAJOR breaks something you set up, MINOR adds something, PATCH fixes something.
 See docs/updating-the-kit.md for how to update.
 
+## 0.8.2
+
+Fix: the health check failed on a healthy 0.8.1 install.
+
+- **`scripts/smoke-test.sh` end-to-end step passes `--owner healthcheck`.** Since 0.8.1 the queue rejects ownerless tasks, so the step
+  could not queue its script task. `healthcheck` is a reserved owner: if no bot is registered with that id, the backend drops the finish
+  notice for its tasks, so neither the Chief of Staff (`owner_not_registered`) nor a real bot is woken by a health check. Register a bot
+  named `healthcheck` and it gets notices like any other owner.
+- Grepped every script, doc, template and example for `enqueue` without an owner; the smoke test was the only one that queues a task.
+- Test: `test_healthcheck_owner_task_runs_and_sends_no_notice` in tests/test_backend.py.
+
 ## Unreleased
 
 Informational bus messages, ported from agent-control PR 75 (wake filters). Only the bus part applies to the kit.
