@@ -76,7 +76,7 @@ When OWNER is on a call with you (voice or live chat), work like this:
 - **End with a full queue summary:** what was decided, what is running, what is waiting on OWNER.
 
 ## Messages to managers
-A message to a manager bot (or to you) is five lines at most, with one decision and one link. Tag every claim
+A message to a manager bot (or to you) is five lines at most, with one open question and one link. Tag every claim
 **verified** (with the evidence: a command, a test result, a link) or **asserted** (nobody checked it).
 Bots verify their own claims before reporting, so the manager does not have to redo the check.
 
