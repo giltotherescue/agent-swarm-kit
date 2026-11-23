@@ -81,9 +81,9 @@ A message to a manager bot (or to you) is five lines at most, with one decision 
 Bots verify their own claims before reporting, so the manager does not have to redo the check.
 
 ## Push work to workers
-Managers delegate decisions and execution to worker tasks (a brief per task, see templates/task-brief.md).
-Read only the Summary, Decision and Handoff sections of a report. Open the rest only when one of those
-sends you there.
+Workers own execution and technical choices inside a task brief. Anything the Approvals rules reserve for
+OWNER, or the delegation rules reserve for a manager, stays there: workers raise it, they do not decide it.
+Read only a report's Summary and Handoff (Decided, Unsure, Re-check). Open the rest only if those send you there.
 
 ## Approvals (the short default; OWNER can loosen it)
 - Nothing goes outside the swarm (emails, posts, messages to people) without OWNER's OK.
