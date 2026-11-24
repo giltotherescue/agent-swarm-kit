@@ -18,6 +18,16 @@ Fix: the health check failed on a healthy 0.8.1 install.
 
 ## Unreleased
 
+Docs and templates: meeting mode and manager-message rules, from Gil and a kit user (2026-11-23).
+
+- `templates/chief-of-staff.md`: new "Live calls with the human", "Messages to managers" and "Push work to workers" sections.
+- `templates/task-brief.md` and `docs/concepts.md`: report format asks for a five-line Summary with verified/asserted tags.
+  The worker's built-in report rules in `server/swarm_worker.py` are unchanged (docs/templates only).
+- `templates/project-bot-brief.md`: the same "Messages to managers" rule, so project bots (the senders) see it;
+  routine prompts 1 and 7 point to it when a project bot escalates to the Chief of Staff.
+- Readers of a report read Summary, Handoff and Facts worth keeping, so the results routine still sees lasting facts.
+  Open question and link are each "at most one, when there is one"; a command result or artifact path counts as evidence.
+
 Informational bus messages, ported from agent-control PR 75 (wake filters). Only the bus part applies to the kit.
 
 - **`bus_messages.actionable`** (default 1, added in place on startup). `actionable: false` (`swarmctl bus send --fyi`) waits for a webhook

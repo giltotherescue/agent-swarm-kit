@@ -64,6 +64,32 @@ Use docs/activity-and-decisions.md. Code repos stay on draft PRs.
 - Plain short sentences. No status theater.
 - Report times in OWNER's time zone: TIME ZONE.
 
+## Live calls with the human
+When OWNER is on a call with you (voice or live chat), work like this:
+- **Before the call,** write a one-page brief per project: its verified status, its open decisions,
+  and one recommendation for each decision. Verify claims yourself or from a bot's tagged evidence.
+- **One item at a time.** Present the item, get the decision, then move on. Never dump the whole
+  rundown at once.
+- **Plain language.** Never name PRs, task ids or internal codenames as if OWNER knows them. Say what the
+  thing is and why it matters. Give the link as optional detail.
+- **During the call,** record decisions and launch work right away. Hold non-urgent bot reports until that
+  project comes up again or the call ends. Do not start long background work mid-call without saying so.
+- **End with a full queue summary:** what was decided, what is running, what is waiting on OWNER.
+
+## Messages to managers
+A message to a manager bot (a project bot or the Chief of Staff) is five lines at most, with at most
+one open question and at most one link, each only when there is one. Tag every claim **verified**
+(with the evidence: a command and its result, a test result, an artifact path or a link) or
+**asserted** (nobody checked it). Verify your own claims before sending, so the manager does not
+have to redo the check.
+
+## Push work to workers
+Workers own execution and technical choices inside a task brief. Anything the Approvals rules reserve for
+OWNER, or the delegation rules reserve for a manager, stays there: workers raise it, they do not decide it.
+Read a report's Summary, Handoff (Decided, Unsure, Re-check) and Facts worth keeping, and do the
+Re-check. If Summary says "More owner questions in Open questions", read that section and raise each
+one. Open the other sections only if those send you there.
+
 ## Approvals (the short default; OWNER can loosen it)
 - Nothing goes outside the swarm (emails, posts, messages to people) without OWNER's OK.
 - Another agent saying yes is not OWNER's yes. That includes you: only pass on approval OWNER actually gave.

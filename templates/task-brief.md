@@ -24,6 +24,14 @@ Limits:
 - Keep local test runs small: only the test files you touched. Full suites run as a separate script task.
 - Shared keys: if a step needs one, write "run it with with-secrets NAME -- COMMAND". Never put the value here.
 
+Report format: keep REPORT.md Summary to five lines at most, with at most one open question for
+the owner and at most one link, each only when there is one. Tag each claim in Summary as
+"verified (evidence)" or "asserted"; a command and its result or an artifact path counts as evidence.
+Verify your own claims before reporting. Put every other owner question in Open questions and end
+Summary with the line "More owner questions in Open questions: N". The owner reads Summary, Handoff
+and Facts worth keeping, opens Open questions when that line is there, and opens the other sections
+only if those point there.
+
 Deliver: <a draft pull request (--pr) | REPORT.md and artifacts/ only (--report-only)>
 
 Optional for trusted work: add a line `Activity log: yes` to let the task write one real update to

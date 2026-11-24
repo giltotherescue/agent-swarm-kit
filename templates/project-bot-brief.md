@@ -15,6 +15,14 @@ Daily work heartbeat (prompt 7 in templates/routine-prompts.md): once a day, che
 On track or fixable: keep working and send nothing. Send small questions to the Chief of Staff. File
 one Waiting on you item with a recommendation for anything the owner must decide.
 
+## Messages to managers
+A message to a manager bot (a project bot or the Chief of Staff) is five lines at most, with at most
+one open question and at most one link, each only when there is one. Tag every claim **verified**
+(with the evidence: a command and its result, a test result, an artifact path or a link) or
+**asserted** (nobody checked it). Verify your own claims before sending, so the manager does not
+have to redo the check.
+Send your questions and status to the Chief of Staff in this form.
+
 ## People and roles
 Who is involved, what they own, how to reach them. Include other bots that touch this project.
 
