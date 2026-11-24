@@ -28,9 +28,13 @@ You are MY-BOT-ID. A swarm event arrived as JSON.
    (POST SWARM_URL/waiting, dedupe_key = "task-TASK_ID", task_id = TASK_ID). Stop.
 5. If "state" is "done": GET the report_url with my token. Read the Handoff section first and do the
    Re-check it names myself. Do not trust the worker's word on it. If Summary says "More owner
-   questions in Open questions", read that section too and handle each question there as in step 4
-   (answer it, send it to the Chief of Staff, or file it as a Waiting on you item with
-   dedupe_key "task-TASK_ID-qN", N being its number in the list, so no item replaces another), then go on to step 6.
+   questions in Open questions", read that section too. The task is done, so never POST
+   SWARM_URL/tasks/TASK_ID/answer for its questions (the backend returns 409). For each question:
+   if my briefs settle it, act on it or queue a fix with --follow-up TASK_ID. Send small open questions
+   to the Chief of Staff. For an owner-only
+   call, file one Waiting on you item with a recommendation (POST SWARM_URL/waiting,
+   dedupe_key = "task-TASK_ID-qN", N being its number in the list, task_id = TASK_ID); the human
+   answers it by item id and I get an "item_answer" event. Then go on to step 6.
 6. Promote only verified facts from "Facts worth keeping" into my project brief. Skip guesses.
    The task result is already in my project log (kind "result"); add a "learning" entry only for a
    lasting lesson. Log one new ship, change or block in the activity feed if it matters and the task

@@ -1,5 +1,6 @@
 """Regression checks for the bot templates and report docs (PR 30 review findings)."""
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -140,6 +141,74 @@ class EveryOwnerQuestionSurfaces(unittest.TestCase):
         report = write_report(["Ship it?"])
         self.assertNotIn(POINTER, report)
         self.assertIn("Ship it?", read_report(report))
+
+
+RESULT_HANDLER = "1. Task result handler (every bot, webhook-triggered)"
+
+
+def result_handler_step5(report, task_id, owner_only, call):
+    """A bot following step 5 of the result handler on a done report. `owner_only` is the bot's
+    judgment per question; `call(method, path, body)` is the API. Returns what it did locally."""
+    questions = [line.split("Question: ", 1)[1] for line in section(report, "Summary").splitlines()
+                 if line.startswith("Question: ")]
+    if POINTER in section(report, "Summary"):
+        questions += [re.sub(r"^\d+\. ", "", q) for q in section(report, "Open questions").splitlines()
+                      if q.strip()]
+    acted = []
+    for n, q in enumerate(questions, 1):
+        if not owner_only[q]:
+            acted.append(q)  # settled by the briefs: act on it or queue --follow-up; no task answer
+            continue
+        call("POST", "/waiting", {"project": "site", "kind": "decision", "ask": q, "recommendation": "Yes",
+                                  "dedupe_key": f"task-{task_id}-q{n}", "task_id": task_id})
+    return acted
+
+
+class DoneReportQuestionsGoToWaiting(unittest.TestCase):
+    """Review t20261124211526-930bcc: /tasks/TASK_ID/answer returns 409 for a done task, so the result
+    handler must file owner-only questions on a done report as Waiting items, not task answers."""
+
+    def test_step5_forbids_task_answer_and_files_items(self):
+        step5 = flat(section(read("templates/routine-prompts.md"), RESULT_HANDLER))
+        step5 = step5[step5.index('5. If "state" is "done"'):step5.index("6. Promote")]
+        self.assertIn("never POST SWARM_URL/tasks/TASK_ID/answer", step5)
+        self.assertIn("POST SWARM_URL/waiting", step5)
+        self.assertIn('dedupe_key = "task-TASK_ID-qN"', step5)
+        self.assertIn("task_id = TASK_ID", step5)
+
+    def test_local_then_owner_only_question_on_done_report(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from helpers import Backend
+        b = Backend()
+        self.addCleanup(b.close)
+        bot = b.bot("alice", projects=["site"], repo="acme/site")
+        chief = b.bot("chief", role="chief")
+        tid = b.req("POST", "/tasks", {"prompt": "Build the pricing page"}, tok=bot)["task"]["id"]
+        b.finish(b.claim(), status="done")
+        self.assertEqual(b.req("GET", f"/tasks/{tid}", tok=bot)["task"]["state"], "done")
+
+        local_q = "Use the existing button style?"
+        owner_q = "May we email the beta list about the new prices?"
+        report = write_report([local_q, owner_q])
+        calls = []
+
+        def call(method, path, body):
+            calls.append((method, path, body))
+            return b.req(method, path, body, tok=bot)
+
+        acted = result_handler_step5(report, tid, {local_q: False, owner_q: True}, call)
+        self.assertEqual(acted, [local_q])
+        self.assertFalse([c for c in calls if c[1].endswith("/answer")], "no task-answer call")
+        self.assertEqual([(c[0], c[1], c[2]["ask"], c[2]["dedupe_key"]) for c in calls],
+                         [("POST", "/waiting", owner_q, f"task-{tid}-q2")])
+
+        # Why: the backend refuses a task answer on a done task ...
+        b.req("POST", f"/tasks/{tid}/answer", {"answer": "Yes"}, tok=bot, expect=409)
+        # ... but the human can answer the filed item by its id.
+        items = [i for i in b.req("GET", "/waiting", tok=chief)["items"] if i.get("ask") == owner_q]
+        self.assertEqual(len(items), 1)
+        out = b.req("POST", f"/waiting/{items[0]['id']}", {"action": "answer", "answer": "Yes"}, tok=chief)
+        self.assertEqual(out["item"]["status"], "answered")
 
 
 class Formatting(unittest.TestCase):
