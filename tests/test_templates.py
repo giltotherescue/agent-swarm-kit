@@ -35,9 +35,13 @@ class MessageRuleReachesSenders(unittest.TestCase):
         self.assertIn("**asserted**", rule)
 
     def test_escalation_routines_point_at_rule(self):
-        routines = flat(read("templates/routine-prompts.md"))
-        n = routines.count('Send small open questions to the Chief of Staff, in the "Messages to managers" form')
-        self.assertEqual(n, 2, "results routine (step 4) and work heartbeat (step 7)")
+        routines = read("templates/routine-prompts.md")
+        rule = 'Send small open questions to the Chief of Staff, in the "Messages to managers" form'
+        for heading in ("1. Task result handler (every bot, webhook-triggered)",
+                        "7. Daily work heartbeat (every project bot)"):
+            body = section(routines, heading)
+            self.assertIsNotNone(body, heading)
+            self.assertIn(rule, flat(body), heading)
 
     def test_question_and_link_optional(self):
         for rel in ("templates/chief-of-staff.md", "templates/project-bot-brief.md"):
@@ -67,6 +71,75 @@ class FactsWorthKeepingIsRead(unittest.TestCase):
             t = flat(read(rel))
             self.assertIn("at most one link", t, rel)
             self.assertIn("artifact path", t, rel)
+
+
+POINTER = "More owner questions in Open questions"
+
+
+def write_report(questions):
+    """A worker following the task-brief Report format: one owner question in Summary, the rest in
+    Open questions, and the pointer line in Summary when any are left there."""
+    summary = ["Status: done", "Shipped the pricing page (verified: npm test passed)."]
+    summary.append("Question: " + questions[0])
+    rest = questions[1:]
+    if rest:
+        summary.append(f"{POINTER}: {len(rest)}")
+    open_q = "\n".join(f"{i}. {q}" for i, q in enumerate(rest, 1)) or "None."
+    return (
+        "## Summary\n" + "\n".join(summary) + "\n\n"
+        "## Handoff\n- Decided: none\n- Unsure: none\n- Re-check: the page renders.\n\n"
+        "## What changed\nPricing page.\n\n## Verification\nnpm test passed.\n\n"
+        "## Open questions\n" + open_q + "\n\n## Facts worth keeping\nNone.\n"
+    )
+
+
+def read_report(report, follow_pointer=True):
+    """An owner following the reader rule: Summary, Handoff and Facts worth keeping, plus Open
+    questions when Summary carries the pointer line. Returns the text the owner actually saw."""
+    seen = [section(report, h) for h in ("Summary", "Handoff", "Facts worth keeping")]
+    if follow_pointer and POINTER in section(report, "Summary"):
+        seen.append(section(report, "Open questions"))
+    return "\n".join(seen)
+
+
+class EveryOwnerQuestionSurfaces(unittest.TestCase):
+    """Review t20261124160625-b67032: a second owner question in Open questions could go unseen."""
+
+    def test_writer_rule_requires_pointer(self):
+        for rel in ("templates/task-brief.md", "docs/concepts.md"):
+            t = flat(read(rel))
+            self.assertIn(f'"{POINTER}: N"', t, rel)
+            self.assertIn("every other owner question in Open questions" if "task-brief" in rel
+                          else "Any other question for the owner goes in Open questions", t, rel)
+
+    def test_reader_rules_follow_pointer(self):
+        routines = read("templates/routine-prompts.md")
+        texts = {
+            "task-brief": flat(read("templates/task-brief.md")),
+            "concepts": flat(read("docs/concepts.md")),
+            "chief": flat(section(read("templates/chief-of-staff.md"), "Push work to workers")),
+            "results routine": flat(section(routines, "1. Task result handler (every bot, webhook-triggered)")),
+        }
+        for name, t in texts.items():
+            self.assertIn(POINTER, t, name)
+        self.assertIn('"task-TASK_ID-qN"', texts["results routine"], "one Waiting item per question")
+
+    def test_two_independent_questions_both_reach_owner(self):
+        q1 = "Should the annual plan show a discount?"
+        q2 = "May we email the beta list about the new prices?"
+        report = write_report([q1, q2])
+        self.assertIn(q2, section(report, "Open questions"))
+        self.assertNotIn(q2, section(report, "Summary"))
+        seen = read_report(report)
+        self.assertIn(q1, seen)
+        self.assertIn(q2, seen)
+        # Without the pointer rule the second question is lost: this is the bug being fixed.
+        self.assertNotIn(q2, read_report(report, follow_pointer=False))
+
+    def test_single_question_needs_no_pointer(self):
+        report = write_report(["Ship it?"])
+        self.assertNotIn(POINTER, report)
+        self.assertIn("Ship it?", read_report(report))
 
 
 class Formatting(unittest.TestCase):

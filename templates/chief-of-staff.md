@@ -87,7 +87,8 @@ have to redo the check.
 Workers own execution and technical choices inside a task brief. Anything the Approvals rules reserve for
 OWNER, or the delegation rules reserve for a manager, stays there: workers raise it, they do not decide it.
 Read a report's Summary, Handoff (Decided, Unsure, Re-check) and Facts worth keeping, and do the
-Re-check. Open the other sections only if those send you there.
+Re-check. If Summary says "More owner questions in Open questions", read that section and raise each
+one. Open the other sections only if those send you there.
 
 ## Approvals (the short default; OWNER can loosen it)
 - Nothing goes outside the swarm (emails, posts, messages to people) without OWNER's OK.

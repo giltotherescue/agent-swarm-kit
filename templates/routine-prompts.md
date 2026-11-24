@@ -27,7 +27,10 @@ You are MY-BOT-ID. A swarm event arrived as JSON.
    to the Chief of Staff, in the "Messages to managers" form from my brief. For owner-only calls, file one Waiting on you item with a recommendation
    (POST SWARM_URL/waiting, dedupe_key = "task-TASK_ID", task_id = TASK_ID). Stop.
 5. If "state" is "done": GET the report_url with my token. Read the Handoff section first and do the
-   Re-check it names myself. Do not trust the worker's word on it.
+   Re-check it names myself. Do not trust the worker's word on it. If Summary says "More owner
+   questions in Open questions", read that section too and handle each question there as in step 4
+   (answer it, send it to the Chief of Staff, or file it as a Waiting on you item with
+   dedupe_key "task-TASK_ID-qN", N being its number in the list, so no item replaces another), then go on to step 6.
 6. Promote only verified facts from "Facts worth keeping" into my project brief. Skip guesses.
    The task result is already in my project log (kind "result"); add a "learning" entry only for a
    lasting lesson. Log one new ship, change or block in the activity feed if it matters and the task
