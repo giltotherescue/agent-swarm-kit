@@ -146,6 +146,21 @@ class BackendTest(unittest.TestCase):
         self.assertEqual([(g[0], g[3]["state"], g[3]["summary"]) for g in got], [("/web", "done", "Header fixed")])
         self.assertTrue(got[0][1].startswith(tid + ":done:"))
 
+    def test_healthcheck_owner_task_runs_and_sends_no_notice(self):
+        """The smoke test's e2e path: queue with --owner healthcheck, run a script task to done, nobody is notified."""
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "smoke-test.sh")).read()
+        self.assertRegex(src, r"swarmctl enqueue --owner healthcheck ")
+        # (Ownerless rejection is covered in test_enqueue_owner.) With the health-check owner it queues, finishes, and nobody is told.
+        tid = self.req("POST", "/tasks", {"prompt": "Smoke test: print ok", "command": "echo ok", "owner": "healthcheck",
+                                          "title": "smoke test"})["task"]["id"]
+        self.assertEqual(self.work(tid, "done")["state"], "done")
+        self.assertEqual(self.deliver(), [])
+        # A real bot registered under that id still gets its notices.
+        self.req("PUT", "/bots/healthcheck", {"notify_url": self.rx_url + "/web"})
+        tid = self.req("POST", "/tasks", {"prompt": "again", "owner": "healthcheck"})["task"]["id"]
+        self.work(tid, "done")
+        self.assertEqual([g[0] for g in self.deliver()], ["/web"])
+
     def test_ownerless_and_human_questions_go_to_chief(self):
         tid = self.req("POST", "/tasks", {"prompt": "no owner here", "owner": "ghost"})["task"]["id"]
         self.api.s.run("UPDATE tasks SET owner = NULL WHERE id = ?", tid)  # a legacy ownerless row still routes to the Chief
@@ -247,6 +262,19 @@ class BackendTest(unittest.TestCase):
                              int(label in ("unresolved", "related-only")))
         self.assertTrue(self.api.s.one("SELECT 1 FROM notices WHERE event_id = ? AND target = 'chief'",
                                        f"alert:task-failed:{failed['related-only']}"))
+        self.deliver()
+
+    def test_failed_healthcheck_task_does_not_alert_the_chief(self):
+        tid = self.req("POST", "/tasks", {"prompt": "Smoke test: fail", "owner": "healthcheck"})["task"]["id"]
+        self.work(tid, "failed")
+        other = self.req("POST", "/tasks", {"prompt": "real failure"}, tok=self.web)["task"]["id"]
+        self.work(other, "failed")
+        with patch.object(self.api, "alert") as alert:
+            self.api.escalate()
+        keys = [c.args[0] for c in alert.call_args_list]
+        self.assertNotIn(f"task-failed:{tid}", keys)
+        self.assertIn(f"task-failed:{other}", keys)
+        self.assertIsNotNone(self.api.s.one("SELECT failure_escalated_at AS f FROM tasks WHERE id = ?", tid)["f"])
         self.deliver()
 
     def test_bot_cannot_promote_itself(self):

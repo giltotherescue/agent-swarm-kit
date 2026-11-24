@@ -132,6 +132,15 @@ class BusNoticeTest(NoticeBase):
         self.assertEqual([x["recipient"] for x in m], ["clozy"] * 4)
         self.assertEqual(self.notice_rows(), [])
 
+    def test_healthcheck_alias_still_gets_notices_but_plain_healthcheck_is_quiet(self):
+        self.reg("clozy", {"aliases": ["clozy-old", "healthcheck"]})
+        self.finished("healthcheck", "th1")
+        self.assertEqual([m["recipient"] for m in self.bus_msgs()], ["clozy"])
+        self.reg("clozy", {"aliases": ["clozy-old"]})
+        before = len(self.bus_msgs())
+        self.finished("healthcheck", "th2")
+        self.assertEqual(len(self.bus_msgs()), before)
+
     def test_duplicate_notice_does_not_create_a_second_message(self):
         t = self.finished("clozy-bot", "td1")
         self.api.notify_task(t)
@@ -267,6 +276,20 @@ class BusFailureFallbackTest(NoticeBase):
         self.assertEqual(calls, [("tn1", True)])
         self.assertEqual(len(self.bus_msgs("sender = 'agent-control' AND recipient = 'chief'")), 1)
         self.assertEqual(len(self.notice_rows()), 3)
+
+
+    def test_alias_removed_before_permanent_failure_still_sends_one_fallback_notice(self):
+        self.add_chief()
+        self.reg("clozy", {"aliases": ["clozy-old", "healthcheck"]})
+        self.hook.status = 503
+        self.finished("healthcheck", "th3")
+        self.assertEqual(self.notice_rows(), [])
+        self.reg("clozy", {"aliases": ["clozy-old"]})  # alias gone before the retry window ends
+        later = int(time.time()) + 3 * 3600
+        self.api.bus.flush(now=later)
+        self.api.bus.flush(now=later + 60)
+        self.assertEqual([(r["target"], r["reason"]) for r in self.notice_rows() if r["reason"] != "alert"],
+                         [("chief-bot", "owner_not_registered")])
 
 
 class ReportExcerptTest(NoticeBase):
