@@ -24,9 +24,11 @@ Limits:
 - Keep local test runs small: only the test files you touched. Full suites run as a separate script task.
 - Shared keys: if a step needs one, write "run it with with-secrets NAME -- COMMAND". Never put the value here.
 
-Report format: keep REPORT.md Summary to five lines at most, with one open question for the owner (if any) and one link.
-Tag each claim in Summary as "verified (evidence)" or "asserted". Verify your own claims before reporting; the owner
-reads only Summary and Handoff.
+Report format: keep REPORT.md Summary to five lines at most, with at most one open question for
+the owner and at most one link, each only when there is one. Tag each claim in Summary as
+"verified (evidence)" or "asserted"; a command and its result or an artifact path counts as evidence.
+Verify your own claims before reporting. The owner reads Summary, Handoff and Facts worth keeping,
+and opens the other sections only if those point there.
 
 Deliver: <a draft pull request (--pr) | REPORT.md and artifacts/ only (--report-only)>
 
