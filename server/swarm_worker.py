@@ -889,7 +889,7 @@ class Runner(threading.Thread):
     def upload(self, summary, extra_report=None):
         h = {"X-Claim-Id": self.claim_id}
         report = extra_report if extra_report is not None else safe_read(self.outbox, "REPORT.md", 25 * 1024 * 1024)
-        if report is not None and extra_report is None and self.report_suffix:
+        if report is not None and extra_report is None and getattr(self, "report_suffix", None):
             report = report.rstrip() + b"\n\n" + self.report_suffix.encode()
         if report is not None:
             self.tapi("PUT", "/files/report/REPORT.md", raw=report, headers=h)
