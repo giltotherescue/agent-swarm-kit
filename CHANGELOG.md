@@ -18,6 +18,24 @@ Fix: the health check failed on a healthy 0.8.1 install.
 
 ## Unreleased
 
+Code review policy (owner approved 2026-11-25; mirrors agent-control). See docs/code-review.md.
+
+- **`swarmctl review` picks the opposite family**: `--dev-task TASK_ID` (its used provider, so a fallback counts) or
+  `--author-provider`. Claude-written code gets Codex (`SWARM_REVIEW_CODEX_MODEL`, or `SWARM_REVIEW_CODEX_HIGH_MODEL` when
+  high risk); Codex-written code gets Claude (`SWARM_REVIEW_CLAUDE_MODEL`, default `opus`). `-P`/`-m` still win.
+- **Risk tiers from paths**, with `--risk` override and `SWARM_REVIEW_HIGH_RISK_PATHS`: high (auth, deletion, money,
+  production data, backup/restore, webhooks, migrations, skills that can publish), ordinary, none (docs, changelog,
+  comment-only). `swarmctl review-tier` reads changed paths on stdin and prints tier, cap and reviewer.
+- **Round cap**: 2 ordinary, 3 high. `swarmctl review --recheck REVIEW_TASK_ID` queues the next round with only the prior
+  must-fix items and refuses past the cap or when nothing blocked. A review past the cap that reaches the worker finishes
+  done without a model; no Waiting-on-you card.
+- **Reviewer prompts** (`templates/review-prompt.md`, new `templates/review-recheck-prompt.md`): impact-based blocking bar,
+  `## Must-fix findings` and `## Follow-up findings`.
+- **Follow-ups to GitHub, host-side**: after a marked review the worker files the follow-ups on one `review-followup` issue
+  per PR (created or commented), links it from the PR, and appends a "Review policy" note (tier, round, issue) to the report.
+- Reviews queued without `swarmctl review` (no marker) run as before.
+- Tests: tests/test_codereview.py; `test_review_policy_note_and_cap_stop` in tests/test_worker.py.
+
 Docs and templates: meeting mode and manager-message rules, from Gil and a kit user (2026-11-23).
 
 - `templates/chief-of-staff.md`: new "Live calls with the human", "Messages to managers" and "Push work to workers" sections.

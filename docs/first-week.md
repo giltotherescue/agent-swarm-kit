@@ -88,11 +88,15 @@ The worker works on branch `agent/TASK_ID`, pushes it when the agent says `done`
 
 ## Day 5: review and tests before merge
 
-1. Ask a different model to review the pull request. Review tasks are report-only and never push:
+1. Ask the other model family to review the pull request. Review tasks are report-only and never push. `--dev-task`
+   names the task that wrote the PR, so the reviewer is the family that did not write it:
 
 ```bash
-swarmctl review -r YOUR-ORG/website --pr-number 12 -P codex --owner website-bot
+swarmctl review -r YOUR-ORG/website --pr-number 12 --dev-task TASK_ID --owner website-bot
 ```
+
+   Docs-only and typo changes with green CI need no review, and the loop is capped (two rounds, three for high-risk
+   changes). See [code review](code-review.md).
 
 2. Run the full test suite as a script task. No model runs, so no tokens are spent watching tests:
 
@@ -102,7 +106,7 @@ swarmctl enqueue -r YOUR-ORG/website --branch agent/TASK_ID --command "npm ci &&
 
    The output is in the task's `script.log` artifact. A nonzero exit marks the task failed.
 
-3. If the review found issues, queue a fix as a follow-up of the task that made the pull request: `swarmctl enqueue --follow-up TASK_ID fix-brief.md`. It reuses the same branch and pull request, and the same folder and session if they are still on the worker. When review and tests pass, **you** merge on GitHub. The kit never merges.
+3. If the review found must-fix issues, queue a fix as a follow-up of the task that made the pull request: `swarmctl enqueue --follow-up TASK_ID fix-brief.md`. It reuses the same branch and pull request, and the same folder and session if they are still on the worker. When review and tests pass, **you** merge on GitHub. The kit never merges.
 
 ## Day 6: the Waiting on you list
 

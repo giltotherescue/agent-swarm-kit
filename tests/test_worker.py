@@ -343,6 +343,23 @@ class RepoWorkerTest(WorkerTest):
         calls = open(os.path.join(self.w.WORK, tid, "CALLS")).read().splitlines()
         self.assertEqual(len(calls), 2)
 
+    def test_review_policy_note_and_cap_stop(self):
+        # docs/code-review.md: a marked review gets the tier and round in its report; past the cap no model runs
+        tid = self.admin("POST", "/tasks", {"prompt": "REVIEW please\n<!-- swarm-review: round=1 tier=ordinary model=policy -->",
+                                            "kind": "review", "report_only": True})["task"]["id"]
+        self.assertEqual(self.run_one()["state"], "done")
+        rep = self.admin("GET", f"/tasks/{tid}/report")
+        self.assertIn("## Review policy", rep)
+        self.assertIn("- Risk tier: ordinary (set by the caller)", rep)
+        self.assertIn("- Round: 1 of at most 2", rep)
+        tid = self.admin("POST", "/tasks", {"prompt": "REVIEW again\n<!-- swarm-review: round=3 tier=ordinary model=policy -->",
+                                            "kind": "review", "report_only": True})["task"]["id"]
+        t = self.run_one()
+        self.assertEqual(t["state"], "done", t)
+        self.assertIn("Review cap reached", t["summary"])
+        self.assertIn("No review ran", self.admin("GET", f"/tasks/{tid}/report"))
+        self.assertFalse(os.path.exists(os.path.join(self.w.WORK, tid, "CALLS")), "no model ran")
+
     def test_agent_environment_holds_no_worker_token(self):
         tid = self.admin("POST", "/tasks", {"prompt": "show env", "command": "env > artifacts/env.txt; id -un >> artifacts/env.txt"})["task"]["id"]
         self.assertEqual(self.run_one()["state"], "done")

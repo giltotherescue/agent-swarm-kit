@@ -11,7 +11,9 @@ Examples:
   swarmctl enqueue --owner website-bot --report-only --key seo-audit-2026-01 brief.md
   swarmctl enqueue -r you/app --command "npm ci && npm test" --owner app-bot - <<< "Run the full test suite"
   swarmctl enqueue --follow-up TASK_ID brief.md        continue earlier work (same repo, branch and folder)
-  swarmctl review -r you/app --pr-number 12 -P codex --owner app-bot
+  swarmctl review -r you/app --pr-number 12 --dev-task TASK_ID --owner app-bot   (opposite family; docs/code-review.md)
+  swarmctl review --recheck REVIEW_TASK_ID --owner app-bot      round 2: only the prior must-fix items
+  gh pr diff 12 --name-only | swarmctl review-tier               risk tier, round cap, whether review is needed
   swarmctl list --state waiting
   swarmctl show TASK_ID ; swarmctl report TASK_ID
   swarmctl answer TASK_ID "Use the blue logo"
@@ -150,14 +152,76 @@ def cmd_enqueue(a):
     print(f"{t['id']} {t['state']} {t['provider']}/{t['model']}{note}")
 
 
+def review_policy():
+    sys.path.insert(0, os.path.join(KIT_DIR, "server"))
+    import swarm_codereview
+    return swarm_codereview
+
+
 def cmd_review(a):
+    """Queue a cross-model review under the review policy (docs/code-review.md): opposite family, risk tier, round cap,
+    and on --recheck only the prior must-fix items."""
     need_owner(a)
-    tmpl = open(os.path.join(KIT_DIR, "templates", "review-prompt.md")).read()
-    prompt = tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)) + ("\n\n" + read_prompt(a.extra) if a.extra else "")
+    cr = review_policy()
+    author = a.author_provider
+    if a.dev_task:
+        dev = call("GET", f"/tasks/{a.dev_task}")["task"]
+        author = dev.get("session_provider") or dev.get("provider")  # the family that wrote the final commit
+    tier, round_no, prior, must = a.risk, 1, None, []
+    if a.recheck:
+        pt = call("GET", f"/tasks/{a.recheck}")["task"]
+        if pt.get("kind") != "review":
+            sys.exit(f"error: {a.recheck} is not a review task")
+        pm = cr.parse_marker(pt.get("prompt")) or {"round": 1, "tier": "auto"}
+        report = call("GET", f"/tasks/{a.recheck}/report", raw=True).decode(errors="replace") if pt.get("has_report") else ""
+        seen = re.findall(r"^- Risk tier: (none|ordinary|high)\b", report, re.M)  # the worker's note is last
+        prior_tier = seen[-1] if seen else pm["tier"]
+        if prior_tier != "auto":
+            tier = cr.higher(prior_tier, tier) if tier != "auto" else prior_tier
+        round_no, prior = pm["round"] + 1, a.recheck
+        must, _ = cr.split_findings(report)
+        a.repo, a.pr_number = a.repo or pt.get("repo"), a.pr_number or pt.get("pr_number")
+        if not must:
+            sys.exit(f"error: review {a.recheck} has no must-fix findings, so there is nothing to recheck. "
+                     "Ship it (its follow-ups are on the review-followup issue).")
+        if tier != "auto" and round_no > cr.CAPS[tier]:
+            sys.exit(cr.cap_message(round_no, tier))
+    if not (a.repo and a.pr_number):
+        sys.exit("error: --repo and --pr-number are required (a --recheck takes them from the earlier review)")
+    provider, model, mpolicy = a.provider, a.model, "given" if a.model else "policy"
+    if not provider and author:
+        provider, pmodel = cr.reviewer_for(author, tier)
+        model = model or pmodel  # explicit, so a project default model for the other family never leaks in
+    elif not provider:
+        print("WARNING: no --dev-task, --author-provider or -P: the review runs on the default provider, which may be the "
+              "family that wrote the code. Reviews should use the opposite family.", file=sys.stderr)
+    tier_line = ("Risk tier: " + tier + "." if tier != "auto" else "The worker sets the risk tier from the changed files.")
+    name = "review-recheck-prompt.md" if prior else "review-prompt.md"
+    tmpl = open(os.path.join(KIT_DIR, "templates", name)).read()
+    prompt = (tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)).replace("{{ROUND}}", str(round_no))
+              .replace("{{TIER_LINE}}", tier_line).replace("{{PRIOR}}", prior or "")
+              .replace("{{MUST_FIX}}", "\n".join(f"- {m}" for m in must)))
+    prompt += "\n" + cr.marker(round_no, tier, mpolicy, prior) + "\n"
+    if a.extra:
+        prompt += "\n" + read_prompt(a.extra)
     r = call("POST", "/tasks", {k: v for k, v in {"prompt": prompt, "repo": a.repo, "pr_number": a.pr_number, "kind": "review",
-                                                  "report_only": True, "provider": a.provider, "model": a.model,
-                                                  "owner": a.owner, "project": a.project}.items() if v is not None})
-    print(r["task"]["id"], r["task"]["state"], r["task"]["provider"] + "/" + r["task"]["model"])
+                                                  "report_only": True, "provider": provider, "model": model,
+                                                  "owner": a.owner, "project": a.project, "parent_id": a.recheck}.items()
+                                if v is not None})
+    print(r["task"]["id"], r["task"]["state"], r["task"]["provider"] + "/" + r["task"]["model"], f"round {round_no}",
+          f"tier {tier}")
+
+
+def cmd_review_tier(a):
+    """Print the risk tier, cap and reviewer for a list of changed paths (one per line on stdin)."""
+    cr = review_policy()
+    paths = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+    tier, why = cr.classify(paths, override=a.risk if a.risk != "auto" else None, extra_globs=cr.extra_high_risk_globs())
+    out = {"tier": tier, "reason": why, "cap": cr.CAPS[tier], "review": {"none": "not required when CI is green",
+           "ordinary": "light: one opposite-family pass", "high": "full: opposite family, high-risk model"}[tier]}
+    if a.author_provider:
+        out["reviewer"] = dict(zip(("provider", "model"), cr.reviewer_for(a.author_provider, tier)))
+    show(out)
 
 
 def cmd_list(a):
@@ -1073,11 +1137,21 @@ def main():
     e.add_argument("--max-cycles", type=int, help="chain: stop after this many cycles (default 20)")
     e.set_defaults(fn=cmd_enqueue)
 
-    r = sub.add_parser("review", help="queue a second-model review of a PR (report only)")
-    r.add_argument("-r", "--repo", required=True); r.add_argument("--pr-number", type=int, required=True)
-    r.add_argument("-P", "--provider", choices=["claude", "codex"]); r.add_argument("-m", "--model")
+    r = sub.add_parser("review", help="queue a cross-model review of a PR (report only; docs/code-review.md)")
+    r.add_argument("-r", "--repo"); r.add_argument("--pr-number", type=int)
+    r.add_argument("-P", "--provider", choices=["claude", "codex"], help="reviewer; default: the family that did not write it")
+    r.add_argument("-m", "--model")
+    r.add_argument("--author-provider", choices=["claude", "codex"], help="the family that wrote the PR")
+    r.add_argument("--dev-task", metavar="TASK_ID", help="the task that wrote the PR: its used provider picks the reviewer")
+    r.add_argument("--risk", choices=["auto", "ordinary", "high"], default="auto",
+                   help="override the path-based risk tier (default: the worker decides from the changed files)")
+    r.add_argument("--recheck", metavar="REVIEW_TASK_ID", help="recheck only that review's must-fix items (next round)")
     r.add_argument("--owner"); r.add_argument("-p", "--project"); r.add_argument("--extra", help="file with extra context")
     r.set_defaults(fn=cmd_review)
+    rt = sub.add_parser("review-tier", help="risk tier and round cap for changed paths on stdin (gh pr diff N --name-only)")
+    rt.add_argument("--risk", choices=["auto", "ordinary", "high", "none"], default="auto")
+    rt.add_argument("--author-provider", choices=["claude", "codex"])
+    rt.set_defaults(fn=cmd_review_tier)
 
     ls = sub.add_parser("list", help="list tasks")
     for f in ("--state", "--owner", "--project", "--since", "--limit"):

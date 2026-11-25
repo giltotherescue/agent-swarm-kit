@@ -318,6 +318,7 @@ Start with the concepts, then follow your path.
 - [Backend](docs/backend.md): the task tracker, its API and who can call what.
 - [Results routing](docs/results-routing.md): straight to the owner bot, with a fallback.
 - [Model routing](docs/model-routing.md): which model for which job.
+- [Code review](docs/code-review.md): cross-model PR review, risk tiers, round caps and the `review-followup` issue.
 - [Approvals](docs/approvals.md): a light default you can loosen.
 - [Secrets](docs/secrets.md): set up encrypted bundles, use `with-secrets`, and rotate or recover keys.
 - [Usage and cost](docs/usage-and-cost.md): keep bots quiet and spend low.
