@@ -28,6 +28,11 @@ family that did **not** write the final commit reviews. `--author-provider claud
 the bot's environment for `swarmctl`). Out of the box both Codex settings are `default`; set the high-risk one to your
 strongest Codex model.
 
+The author family is recorded on the review's marker. A recheck keeps the same independent reviewer, `-P` naming the
+author's family is refused, a worker refuses to run a marked review on the author's family, and a usage limit on a
+marked review does not fall back to the other family (`SWARM_FALLBACK_PROVIDER`); it finishes as a normal limit and is
+retried later.
+
 ## Risk tiers
 
 | Tier | What | Review | Rounds (cap) |
@@ -73,14 +78,18 @@ swarmctl review --recheck REVIEW_TASK_ID --owner app-bot
 
 The recheck gets only the earlier must-fix items. It verifies each one, and may raise a new must-fix only if the new
 issue itself meets the blocking bar. It may not raise new edge, race or hardening items as blockers. `swarmctl` refuses a
-recheck when the earlier review had no must-fix items (ship it), and when the next round would pass the cap.
+recheck when the next round would pass the cap, and when the earlier review is not done or its report has no
+`## Must-fix findings` section (the result is unavailable; re-run it). When the earlier review had no must-fix items,
+`swarmctl` says "Ship it" only if the reviewed commit is still the PR's head and every CI check on it passed (it asks
+`gh pr view`); otherwise it says why and gives no ship advice.
 
 ## When the cap is hit
 
 Ordinary PRs get two rounds (the first review plus one recheck). High-risk PRs get three. At the cap the bot does one
 of two things:
 
-- **ship** with the residual non-blocking items recorded (the follow-up issue below), or
+- **ship** with the residual non-blocking items recorded (the follow-up issue below), only once a review with no
+  must-fix items covers the PR's current head and CI is green, or
 - **retire** the PR and close it with the reason written on it.
 
 It files a Waiting on you item only if the choice between shipping and retiring truly needs you. Parked is not a resting
@@ -94,6 +103,11 @@ open GitHub issue per PR, in the same repo, titled `PR #N review follow-ups: <fi
 (created if missing), and linked from the PR with a comment. A later round adds its follow-ups to the same issue as a
 comment. The issue link is at the end of the review report under "Review policy". If `gh` fails, the report says so and
 the follow-ups are still in the report; file the issue by hand.
+
+Filing the issue is a write with the worker's GitHub credentials, so it happens only when the caller opted in: `swarmctl
+review` does unless you pass `--no-followup-issue` (use that when the worker's token has no Issues write; the
+residuals then stay in the report). The worker never files for a task queued with untrusted input, because the report
+may quote a private ticket or email. A fine-grained token needs **Issues: read and write** on the repository for this.
 
 If a bot will really do the work later, it may also queue a follow-up task on the same branch. Do not leave residuals
 only in a review report, and do not put them on the Waiting on you list unless you have to decide something.

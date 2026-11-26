@@ -33,8 +33,20 @@ Code review policy (owner approved 2026-11-25; mirrors agent-control). See docs/
   `## Must-fix findings` and `## Follow-up findings`.
 - **Follow-ups to GitHub, host-side**: after a marked review the worker files the follow-ups on one `review-followup` issue
   per PR (created or commented), links it from the PR, and appends a "Review policy" note (tier, round, issue) to the report.
+- **Follow-ups are published only with a trusted opt-in**: never for an untrusted-input task, and only when the marker says
+  `followups=issue` (`swarmctl review` sets it unless `--no-followup-issue`). Filing needs Issues write on the token.
+- **No ship advice without a pass on the current head**: `--recheck` of a review that is not done, or whose report has no
+  `## Must-fix findings` section, says the result is unavailable. A clean review gets "Ship it" only when its reviewed
+  commit is the PR's current head and CI is green (`gh pr view`).
+- **Reviewer independence**: the marker records the author family; a recheck keeps that reviewer, `-P` on the author's
+  family is refused, the worker refuses a same-family marked review, and a marked review does not use
+  `SWARM_FALLBACK_PROVIDER` to switch families on a usage limit. A recheck rejects a `--repo`/`--pr-number` that does not
+  match the earlier review.
+- **Non-UTF-8 diffs** (for example a Latin-1 `.po` file) no longer abort tier selection: git output is read as bytes, and
+  the content diff is skipped when the paths or `--risk` settle the tier, or when it is over 2 MB.
 - Reviews queued without `swarmctl review` (no marker) run as before.
-- Tests: tests/test_codereview.py; `test_review_policy_note_and_cap_stop` in tests/test_worker.py.
+- Tests: tests/test_codereview.py; `test_review_policy_note_and_cap_stop`, `ReviewIndependenceTest` and
+  `ReviewPolicyUnitTest` in tests/test_worker.py.
 
 Docs and templates: meeting mode and manager-message rules, from Gil and a kit user (2026-11-23).
 

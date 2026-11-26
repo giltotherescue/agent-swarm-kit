@@ -51,6 +51,31 @@ class ReviewerTest(unittest.TestCase):
         m = cr.parse_marker("Review it.\n" + cr.marker(2, "high", "policy", "t1") + "\n")
         self.assertEqual((m["round"], m["tier"], m["model"], m["prior"]), (2, "high", "policy", "t1"))
         self.assertIsNone(cr.parse_marker("no marker"))
+        m = cr.parse_marker(cr.marker(1, author="codex", followups=False))
+        self.assertEqual((m["author"], m["followups"]), ("codex", "report"))
+        self.assertEqual(cr.parse_marker(cr.marker(1))["followups"], "issue")
+        self.assertNotIn("author", cr.parse_marker(cr.marker(1)))
+
+
+class ShipCheckTest(unittest.TestCase):
+    def test_only_a_pass_on_the_current_head_with_green_ci(self):
+        green = {"headRefOid": "abc123", "statusCheckRollup": [{"name": "unittest", "conclusion": "SUCCESS"},
+                                                                {"context": "lint", "state": "SUCCESS"}]}
+        self.assertTrue(cr.ship_check("abc123", green)[0])
+        self.assertIn("not the reviewed", cr.ship_check("old999", green)[1])
+        self.assertFalse(cr.ship_check(None, green)[0])
+        self.assertFalse(cr.ship_check("abc123", None)[0])
+        self.assertFalse(cr.ship_check("abc123", {"headRefOid": "abc123", "statusCheckRollup": []})[0])
+        pending = {"headRefOid": "abc123", "statusCheckRollup": [{"name": "unittest", "status": "IN_PROGRESS", "conclusion": ""}]}
+        self.assertIn("pending", cr.ship_check("abc123", pending)[1])
+        red = {"headRefOid": "abc123", "statusCheckRollup": [{"name": "unittest", "conclusion": "FAILURE"}]}
+        self.assertFalse(cr.ship_check("abc123", red)[0])
+
+    def test_findings_sections(self):
+        self.assertTrue(cr.has_findings_sections(REPORT))
+        self.assertTrue(cr.has_findings_sections("## Must-fix findings\n- None\n"))
+        self.assertFalse(cr.has_findings_sections("## Summary\nok\n## Findings\n- High: bad\n"))
+        self.assertFalse(cr.has_findings_sections(""))
 
 
 REPORT = """## Summary
@@ -121,15 +146,86 @@ class SwarmctlReviewTest(unittest.TestCase):
         tok = os.path.join(cls.home, "admin.token")
         with open(tok, "w") as fh:
             fh.write(ADMIN)
-        cls.env = dict(os.environ, HOME=cls.home, SWARM_URL=cls.b.base, SWARM_TOKEN_FILE=tok, ENQUEUE_OWNER="tester")
+        # A fake gh that prints $FAKE_GH_JSON for `gh pr view` (or fails when it is unset)
+        bindir = os.path.join(cls.home, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "gh"), "w") as fh:
+            fh.write('#!/usr/bin/env bash\n[[ -n "$FAKE_GH_JSON" ]] || exit 1\nprintf "%s" "$FAKE_GH_JSON"\n')
+        os.chmod(os.path.join(bindir, "gh"), 0o755)
+        cls.env = dict(os.environ, HOME=cls.home, SWARM_URL=cls.b.base, SWARM_TOKEN_FILE=tok, ENQUEUE_OWNER="tester",
+                       PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        cls.env.pop("FAKE_GH_JSON", None)
 
     @classmethod
     def tearDownClass(cls):
         cls.b.close()
 
-    def sw(self, *args, stdin=None):
-        return subprocess.run([os.path.join(SERVER, "swarmctl")] + list(args), env=self.env, capture_output=True, text=True,
+    def sw(self, *args, stdin=None, gh=None):
+        env = dict(self.env, FAKE_GH_JSON=json.dumps(gh)) if gh is not None else self.env
+        return subprocess.run([os.path.join(SERVER, "swarmctl")] + list(args), env=env, capture_output=True, text=True,
                               input=stdin)
+
+    def done_review(self, report, head="abc123", author="codex"):
+        r = self.sw("review", "-r", "acme/app", "--pr-number", "8", "--author-provider", author, "--risk", "ordinary")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tid = r.stdout.split()[0]
+        c = self.claim(tid)
+        if report is not None:
+            self.put_report(c, report)
+        self.b.finish(c, "done", head_sha=head)
+        return tid
+
+    def test_recheck_of_an_unfinished_or_legacy_review_is_no_ship_advice(self):
+        r = self.sw("review", "-r", "acme/app", "--pr-number", "8", "--author-provider", "codex")
+        queued = r.stdout.split()[0]
+        r = self.sw("review", "--recheck", queued)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not done", r.stderr)
+        self.assertNotIn("Ship it", r.stdout + r.stderr)
+        self.claim(queued)  # out of the way of later claims
+        for report in (None, "## Summary\nStatus: done\n\n## Findings\n- High: bad thing at a.py:1\n"):
+            r = self.sw("review", "--recheck", self.done_review(report))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("result is unavailable", r.stderr)
+            self.assertNotIn("Ship it", r.stdout + r.stderr)
+
+    def test_pass_is_ship_advice_only_on_the_current_head_with_green_ci(self):
+        clean = "## Summary\nReady to merge\n\n## Must-fix findings\n- None\n\n## Follow-up findings\n- None\n"
+        tid = self.done_review(clean, head="abc123")
+        green = {"headRefOid": "abc123", "statusCheckRollup": [{"name": "unittest", "conclusion": "SUCCESS"}]}
+        r = self.sw("review", "--recheck", tid, gh=green)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Ship it", r.stdout)
+        for gh in (dict(green, headRefOid="def456"), {"headRefOid": "abc123", "statusCheckRollup": [{"name": "u", "conclusion": "FAILURE"}]},
+                   None):
+            r = self.sw("review", "--recheck", tid, gh=gh)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Ship it", r.stdout + r.stderr)
+            self.assertIn("Not ship advice", r.stderr)
+
+    def test_recheck_keeps_the_independent_family(self):
+        # Claude wrote it, so Codex reviews; the recheck must not drop back to the default provider (claude).
+        first = self.done_review(REPORT, author="claude")
+        self.assertEqual(self.task(first)["provider"], "codex")
+        r = self.sw("review", "--recheck", first)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        t2 = self.task(r.stdout.split()[0])
+        self.assertEqual(t2["provider"], "codex")
+        self.assertEqual(cr.parse_marker(t2["prompt"])["author"], "claude")
+        self.claim(t2["id"])
+        r = self.sw("review", "--recheck", first, "-P", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("other family", r.stderr)
+        r = self.sw("review", "--recheck", first, "--pr-number", "99")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("do not match", r.stderr)
+
+    def test_no_followup_issue_opt_out_is_on_the_marker(self):
+        r = self.sw("review", "-r", "acme/app", "--pr-number", "9", "--author-provider", "claude", "--no-followup-issue")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tid = r.stdout.split()[0]
+        self.assertEqual(cr.parse_marker(self.task(tid)["prompt"])["followups"], "report")
+        self.claim(tid)
 
     def task(self, tid):
         return self.b.req("GET", f"/tasks/{tid}")["task"]

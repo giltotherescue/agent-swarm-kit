@@ -792,6 +792,11 @@ class Runner(threading.Thread):
                 self.upload({}, extra_report=(f"## Summary\nStatus: done\n\nNo review ran. {msg}\n\n" +
                                               self.policy_note(policy)).encode())
                 return "done", {"workdir": self.workname, "summary": msg[:500]}
+            if policy.get("author") and swarm_codereview.family(provider) == policy["author"]:
+                msg = (f"review not run: the reviewer ({provider}) is the family that wrote the code ({policy['author']}). "
+                       "Re-queue it on the other family (docs/code-review.md).")
+                log(t["id"], msg)
+                return "failed", {"workdir": self.workname, "error": msg, "outcome": "same_family_reviewer"}
             if policy["model"] == "policy" and provider == "codex" and policy["tier"] == "high":
                 model = os.environ.get("SWARM_REVIEW_CODEX_HIGH_MODEL") or model
             note = ((note + "\n") if note else "") + (
@@ -802,7 +807,10 @@ class Runner(threading.Thread):
                                      self.write_prompt(build_prompt(t, "resume" if session else "start", note))] +
                                     ([session] if session else []))
         fb = os.environ.get("SWARM_FALLBACK_PROVIDER")
-        if code == 75 and fb and fb != provider and not self.lost:
+        if code == 75 and fb and policy and swarm_codereview.family(fb) != swarm_codereview.family(provider):
+            # A policy review stays on the independent family: the fallback would be the author's family.
+            log(t["id"], f"{provider} hit a usage limit; not falling back to {fb} for a cross-family review")
+        elif code == 75 and fb and fb != provider and not self.lost:
             log(t["id"], f"{provider} hit a usage limit; falling back to {fb}")
             provider, model = fb, os.environ.get("SWARM_FALLBACK_MODEL", "default")
             code, started = self.launch([RUN_AGENT, provider, model, os.path.join(WORK, self.workname),
@@ -832,15 +840,30 @@ class Runner(threading.Thread):
         if not m:
             return None
         paths, diff = None, None
+        override = None if m["tier"] == "auto" else m["tier"]
+        globs = swarm_codereview.extra_high_risk_globs()
         if t.get("repo") and self.pr_base and self.branch:
             rng = f"refs/heads/{self.pr_base}...refs/heads/{self.branch}"
-            r = sh(["git", "diff", "--name-only", rng], cwd=self.clone, check=False)
-            if r.returncode == 0:
-                paths = r.stdout.split("\n")
-                diff = sh(["git", "diff", "--unified=0", "--no-color", "--no-ext-diff", rng], cwd=self.clone, check=False).stdout
-        tier, why = swarm_codereview.classify(paths, diff, override=None if m["tier"] == "auto" else m["tier"],
-                                              extra_globs=swarm_codereview.extra_high_risk_globs())
-        return {"tier": tier, "why": why, "round": m["round"], "cap": swarm_codereview.CAPS[tier], "model": m.get("model")}
+            paths = self.git_text(["diff", "--name-only", rng])
+            paths = paths.split("\n") if paths is not None else None
+            # The content diff only matters for the comment-only check; read it as bytes (a Latin-1 .po file is fine),
+            # and skip it when the paths or the caller already settle the tier, or when it is too big to scan.
+            if paths and override is None and swarm_codereview.classify(paths, extra_globs=globs)[0] == "ordinary":
+                diff = self.git_text(["diff", "--unified=0", "--no-color", "--no-ext-diff", rng], limit=2 * 1024 * 1024)
+        tier, why = swarm_codereview.classify(paths, diff, override=override, extra_globs=globs)
+        return {"tier": tier, "why": why, "round": m["round"], "cap": swarm_codereview.CAPS[tier], "model": m.get("model"),
+                "author": m.get("author"), "followups": m.get("followups")}
+
+    def git_text(self, args, limit=None):
+        """git output decoded without failing on non-UTF-8 bytes; None on error or when longer than limit bytes."""
+        try:
+            r = subprocess.run(["git"] + args, cwd=self.clone, capture_output=True, timeout=300,
+                               env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0 or (limit is not None and len(r.stdout) > limit):
+            return None
+        return r.stdout.decode("utf-8", errors="replace")
 
     def file_followups(self, policy):
         """Host side (the review session has no GitHub credentials): put the report's follow-ups on the PR's
@@ -852,6 +875,12 @@ class Runner(threading.Thread):
         status = (safe_read(self.outbox, "AGENT_STATUS", 200) or b"").decode(errors="replace").strip().lower()
         if not follow or not status.startswith("done"):  # file once, from a finished review
             return None
+        # Publishing is a write with the worker's GitHub credentials. Never for untrusted input (the report may quote a
+        # private ticket), and only when the caller opted in on the marker (swarmctl review does unless told not to).
+        if t.get("untrusted"):
+            return "not filed: this task has untrusted input, so the residuals stay in this report"
+        if policy.get("followups") != "issue":
+            return "not filed: the review was queued without a follow-up issue, so the residuals stay in this report"
 
         def run(cmd):
             r = sh(cmd, cwd=self.clone if os.path.isdir(self.clone) else None, check=False, timeout=120)
@@ -869,8 +898,9 @@ class Runner(threading.Thread):
         if followup:
             lines.append(f"- Follow-up issue: {followup}")
         if policy.get("must_fix") and policy["round"] >= policy["cap"]:
-            lines.append("- This was the last review round. Do not queue another: fix the must-fix items and ship with the "
-                         "follow-ups recorded, or retire the PR and close it with the reason written on it.")
+            lines.append("- This was the last review round, and it is not a pass. Do not queue another: fix the must-fix items "
+                         "and ship only with the fixes verified on the PR's current head and CI green, follow-ups recorded; "
+                         "or retire the PR and close it with the reason written on it.")
         return "## Review policy\n" + "\n".join(lines) + "\n"
 
     def session_id(self, summary, provider):

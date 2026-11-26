@@ -111,8 +111,11 @@ def reviewer_for(author_provider, tier, environ=None):
     return "codex", env.get("SWARM_REVIEW_CODEX_HIGH_MODEL", ordinary) if tier == "high" else ordinary
 
 
-def marker(round_no, tier="auto", model="policy", prior=None):
-    parts = [f"round={int(round_no)}", f"tier={tier}", f"model={model}"] + ([f"prior={prior}"] if prior else [])
+def marker(round_no, tier="auto", model="policy", prior=None, author=None, followups=True):
+    """author: the family that wrote the code, so the worker can refuse a same-family reviewer. followups=issue is the
+    caller's opt-in to publishing residuals as a GitHub issue; the worker never publishes for untrusted-input tasks."""
+    parts = ([f"round={int(round_no)}", f"tier={tier}", f"model={model}"] + ([f"prior={prior}"] if prior else [])
+             + ([f"author={family(author)}"] if author else []) + [f"followups={'issue' if followups else 'report'}"])
     return "<!-- swarm-review: " + " ".join(parts) + " -->"
 
 
@@ -127,18 +130,36 @@ def parse_marker(prompt):
         out["round"] = 1
     if out.get("tier") not in TIERS + ("auto",):
         out["tier"] = "auto"
+    if out.get("author") not in ("claude", "codex"):
+        out.pop("author", None)
     return out
 
 
 def cap_message(round_no, tier):
     cap = CAPS[tier]
     return (f"Review cap reached: this would be round {round_no} and {tier}-risk PRs get {cap}. Do not queue another review. "
-            "Either ship with the residual non-blocking items recorded (the review-followup issue on the PR), or retire the PR "
-            "and close it with the reason written on it. File a Waiting-on-you item only if the choice truly needs the human.")
+            "Ship only if a review with no must-fix findings covers the PR's current head and CI is green, with the residual "
+            "non-blocking items recorded; otherwise retire the PR and close it with the reason written on it. File a "
+            "Waiting-on-you item only if the choice truly needs the human.")
 
 
 LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*]|\d+[.)])\s+(.*)")
 NONE_ITEM = re.compile(r"^(?:none|no findings|nothing found|n/a)\b", re.I)
+
+
+def _section(title):
+    title = title.lower()
+    if "follow" in title or "non-blocking" in title or "residual" in title:
+        return "follow"
+    if "must" in title or "blocking" in title or "blocker" in title:
+        return "must"
+    return None
+
+
+def has_findings_sections(report):
+    """True when the report has the must-fix heading the review templates ask for. Without it (a legacy "## Findings"
+    report, a failed run, no report) an empty must-fix list means "unknown", not "clean"."""
+    return any(_section(h) == "must" for h in re.findall(r"^#+\s+(.*)", report or "", re.M))
 
 
 def split_findings(report):
@@ -148,13 +169,7 @@ def split_findings(report):
     for ln in (report or "").splitlines():
         h = re.match(r"^#+\s+(.*)", ln)
         if h:
-            title = h.group(1).lower()
-            if "follow" in title or "non-blocking" in title or "residual" in title:
-                cur = "follow"
-            elif "must" in title or "blocking" in title or "blocker" in title:
-                cur = "must"
-            else:
-                cur = None
+            cur = _section(h.group(1))
             items = None
             continue
         if cur is None:
@@ -211,3 +226,26 @@ def file_followups(repo, pr_number, follow_ups, run, task_id=None):
         return None, "could not open the review-followup issue; the residuals are only in this report"
     code, _ = run(["gh", "pr", "comment", str(pr_number), "-R", repo, "--body", f"Review follow-ups (non-blocking): {url}"])
     return url, None if code == 0 else "opened the issue but could not link it from the PR"
+
+
+GREEN = ("SUCCESS", "NEUTRAL", "SKIPPED")
+
+
+def ship_check(reviewed_head, pr):
+    """(ok, reason): may a passing review be called shippable? pr is `gh pr view --json headRefOid,statusCheckRollup`
+    output (a dict) or None when it could not be read. Ship advice needs the reviewed commit to be the PR's current head
+    and every check to have passed; anything unknown is a no."""
+    if not reviewed_head:
+        return False, "the review recorded no reviewed commit"
+    if not isinstance(pr, dict) or not pr.get("headRefOid"):
+        return False, "could not read the PR's current head and CI from GitHub"
+    if pr["headRefOid"] != reviewed_head:
+        return False, f"the PR head is now {pr['headRefOid'][:12]}, not the reviewed {reviewed_head[:12]}"
+    checks = pr.get("statusCheckRollup") or []
+    if not checks:
+        return False, "the PR has no CI results on its head"
+    for c in checks:
+        result = (c.get("conclusion") or c.get("state") or "").upper()
+        if result not in GREEN:
+            return False, f"CI is not green ({c.get('name') or c.get('context') or 'a check'}: {result.lower() or 'pending'})"
+    return True, "reviewed head is the PR head and CI is green"
