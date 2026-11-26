@@ -11,8 +11,10 @@ Your scope:
 1. For each item above, say whether it is fixed, with the path:line that shows it.
 2. Report a new issue as must fix only if it itself meets the blocking bar: security or auth, data loss or corruption,
    wrong behavior on a common path, money or entitlements, or red CI, with the realistic trigger in one or two sentences.
-3. Do not raise new edge cases, races or hardening as must fix. List them as follow-ups (non-blocking) if they are worth
-   keeping.
+3. Do not raise new edge cases, races or hardening as must fix when they have no realistic blocking impact (probe-only
+   interleavings, leftover hardening). List those as follow-ups (non-blocking) if they are worth keeping. A race, retry or
+   interleaving that a plausible real-world trigger turns into a rule 2 problem is must fix: for example a normal payment
+   retry that now charges twice. Name the trigger.
 
 Every finding needs a file path and line (`path/to/file.ext:42`). Do not rewrite the code. Do not commit or push.
 

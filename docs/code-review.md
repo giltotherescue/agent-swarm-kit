@@ -43,8 +43,11 @@ retried later.
 
 The tier comes from the changed paths: path words such as `auth`, `session`, `billing`, `stripe`, `webhook`,
 `migrations`, `delete`, `retention`, `backup`, `restore`, `deploy` or `publish`, plus `*.sql`. A prose file (`.md`,
-`.txt`, changelog) is never high on its words alone, except under a `skills/` folder, because a skill is something an
-agent runs. A diff whose changed lines are all comments counts as comment-only.
+`.txt`, changelog) is never high on its words alone, except a skill (`SKILL.md`, or under `skills/`), because a skill is
+something an agent runs; a skill about charging, access, admin or customers is high. Operational text is never
+docs-only, whatever its extension: dependency lists (`requirements*.txt`, `constraints*.txt`), skills, files under
+`prompts/` or `.github/`, and agent instructions (`AGENTS.md`, `CLAUDE.md`) are at least ordinary. A diff whose changed
+lines are all comments counts as comment-only.
 
 - **Check before you queue:** `gh pr diff 12 --name-only | swarmctl review-tier --author-provider claude` prints the
   tier, the reason, the cap and the reviewer. `none` with green CI means you can skip the review.
@@ -77,11 +80,18 @@ swarmctl review --recheck REVIEW_TASK_ID --owner app-bot
 ```
 
 The recheck gets only the earlier must-fix items. It verifies each one, and may raise a new must-fix only if the new
-issue itself meets the blocking bar. It may not raise new edge, race or hardening items as blockers. `swarmctl` refuses a
+issue itself meets the blocking bar. It may not raise new edge cases, races or hardening as blockers when they have no
+realistic blocking impact; a race or retry with a plausible real-world trigger that meets the bar (a normal payment
+retry that now charges twice) is still must fix, with the trigger named. `swarmctl` refuses a
 recheck when the next round would pass the cap, and when the earlier review is not done or its report has no
 `## Must-fix findings` section (the result is unavailable; re-run it). When the earlier review had no must-fix items,
-`swarmctl` says "Ship it" only if the reviewed commit is still the PR's head and every CI check on it passed (it asks
-`gh pr view`); otherwise it says why and gives no ship advice.
+`swarmctl` says "Ship it" only if the report is an explicit pass (every `## Must-fix findings` section is exactly
+`- None`, it says "Ready to merge" and never "Do not merge"), the reviewed commit is still the PR's head, and CI on it
+passed with at least one check that actually succeeded (all skipped or neutral is not a pass; pending or failing is a
+no). It asks `gh pr view`. Otherwise it says why and gives no ship advice.
+
+A recheck inherits the earlier review's restrictions: an untrusted-input review gives an untrusted recheck (it never
+publishes), and a review queued with `--no-followup-issue` gives a recheck that keeps its residuals in the report.
 
 ## When the cap is hit
 
@@ -106,7 +116,8 @@ the follow-ups are still in the report; file the issue by hand.
 
 Filing the issue is a write with the worker's GitHub credentials, so it happens only when the caller opted in: `swarmctl
 review` does unless you pass `--no-followup-issue` (use that when the worker's token has no Issues write; the
-residuals then stay in the report). The worker never files for a task queued with untrusted input, because the report
+residuals then stay in the report). The opt-in is stored on the task (`review_followups`), not read from the prompt, so
+text a recheck quotes from an earlier report cannot turn it on; a task without it does not publish. The worker never files for a task queued with untrusted input, because the report
 may quote a private ticket or email. A fine-grained token needs **Issues: read and write** on the repository for this.
 
 If a bot will really do the work later, it may also queue a follow-up task on the same branch. Do not leave residuals

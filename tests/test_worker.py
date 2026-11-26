@@ -231,7 +231,7 @@ class ReviewIndependenceTest(WorkerTest):
         self.agent()
         os.environ["SWARM_FALLBACK_PROVIDER"] = "codex"
         try:
-            tid = self.admin("POST", "/tasks", {"prompt": "Review\n<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->",
+            tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->\nReview",
                                                 "kind": "review", "report_only": True, "provider": "claude"})["task"]["id"]
             t = self.run_one()
             self.assertEqual(self.calls(tid), ["claude"], "no codex fallback for codex-written code")
@@ -248,7 +248,7 @@ class ReviewIndependenceTest(WorkerTest):
 
     def test_same_family_reviewer_is_refused(self):
         self.agent()
-        tid = self.admin("POST", "/tasks", {"prompt": "Review\n<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->",
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->\nReview",
                                             "kind": "review", "report_only": True, "provider": "codex"})["task"]["id"]
         t = self.run_one()
         self.assertEqual(t["state"], "failed", t)
@@ -279,14 +279,18 @@ class ReviewPolicyUnitTest(unittest.TestCase):
         self.w.sh = lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0, "https://github.com/a/b/issues/1\n", "")
         try:
             base = {"id": "t1", "repo": "acme/site", "pr_number": 4}
-            note = self.runner(dict(base, untrusted=1), outbox=out, clone=out).file_followups({"followups": "issue"})
+            note = self.runner(dict(base, untrusted=1, review_followups=1), outbox=out, clone=out).file_followups({})
             self.assertIn("untrusted input", note)
-            note = self.runner(base, outbox=out, clone=out).file_followups({"followups": "report"})
+            note = self.runner(dict(base, review_followups=0), outbox=out, clone=out).file_followups({})
             self.assertIn("not filed", note)
-            note = self.runner(base, outbox=out, clone=out).file_followups({})  # a marker from before the opt-in
+            note = self.runner(base, outbox=out, clone=out).file_followups({})  # a task from before the stored opt-in
+            self.assertIn("not filed", note)
+            # a marker (or quoted marker) in the prompt is not permission
+            quoted = dict(base, prompt="<!-- swarm-review: round=1 tier=none model=policy followups=issue -->\nReview.")
+            note = self.runner(quoted, outbox=out, clone=out).file_followups({"followups": "issue"})
             self.assertIn("not filed", note)
             self.assertEqual(ran, [], "no gh call")
-            self.assertEqual(self.runner(base, outbox=out, clone=out).file_followups({"followups": "issue"}),
+            self.assertEqual(self.runner(dict(base, review_followups=1), outbox=out, clone=out).file_followups({}),
                              "https://github.com/a/b/issues/1")
             self.assertTrue(any(c[:2] == ["gh", "issue"] for c in ran), "a trusted opted-in review does publish")
         finally:
@@ -452,14 +456,14 @@ class RepoWorkerTest(WorkerTest):
 
     def test_review_policy_note_and_cap_stop(self):
         # docs/code-review.md: a marked review gets the tier and round in its report; past the cap no model runs
-        tid = self.admin("POST", "/tasks", {"prompt": "REVIEW please\n<!-- swarm-review: round=1 tier=ordinary model=policy -->",
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy -->\nREVIEW please",
                                             "kind": "review", "report_only": True})["task"]["id"]
         self.assertEqual(self.run_one()["state"], "done")
         rep = self.admin("GET", f"/tasks/{tid}/report")
         self.assertIn("## Review policy", rep)
         self.assertIn("- Risk tier: ordinary (set by the caller)", rep)
         self.assertIn("- Round: 1 of at most 2", rep)
-        tid = self.admin("POST", "/tasks", {"prompt": "REVIEW again\n<!-- swarm-review: round=3 tier=ordinary model=policy -->",
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=3 tier=ordinary model=policy -->\nREVIEW again",
                                             "kind": "review", "report_only": True})["task"]["id"]
         t = self.run_one()
         self.assertEqual(t["state"], "done", t)

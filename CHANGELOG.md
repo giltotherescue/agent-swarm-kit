@@ -33,11 +33,18 @@ Code review policy (owner approved 2026-11-25; mirrors agent-control). See docs/
   `## Must-fix findings` and `## Follow-up findings`.
 - **Follow-ups to GitHub, host-side**: after a marked review the worker files the follow-ups on one `review-followup` issue
   per PR (created or commented), links it from the PR, and appends a "Review policy" note (tier, round, issue) to the report.
-- **Follow-ups are published only with a trusted opt-in**: never for an untrusted-input task, and only when the marker says
-  `followups=issue` (`swarmctl review` sets it unless `--no-followup-issue`). Filing needs Issues write on the token.
+- **Follow-ups are published only with a trusted opt-in**: never for an untrusted-input task, and only when the task's
+  stored `review_followups` field is set (new column; `swarmctl review` sets it unless `--no-followup-issue`). It is never
+  read from prompt text, and the worker trusts only a review marker at the start of the prompt, so a marker quoted from
+  an earlier report changes nothing. A recheck inherits the parent's `untrusted` flag and its follow-up restriction.
+  Filing needs Issues write on the token (docs/worker-setup.md, docs/updating-the-kit.md).
 - **No ship advice without a pass on the current head**: `--recheck` of a review that is not done, or whose report has no
-  `## Must-fix findings` section, says the result is unavailable. A clean review gets "Ship it" only when its reviewed
-  commit is the PR's current head and CI is green (`gh pr view`).
+  `## Must-fix findings` section, says the result is unavailable. A review gets "Ship it" only when its report is an
+  explicit pass (`- None` alone under every must-fix heading, "Ready to merge", no "Do not merge"), its reviewed commit is
+  the PR's current head, and CI passed with at least one successful check (skipped-only is not green) (`gh pr view`).
+- **Operational text is not docs-only**: `requirements*.txt`, `constraints*.txt`, `SKILL.md` and files under `skills/`
+  or `prompts/`, `AGENTS.md`/`CLAUDE.md` are at least ordinary; skills about charging, access, admin or customers are high.
+- The recheck prompt keeps races with a realistic blocking trigger (a payment retry that charges twice) in scope.
 - **Reviewer independence**: the marker records the author family; a recheck keeps that reviewer, `-P` on the author's
   family is refused, the worker refuses a same-family marked review, and a marked review does not use
   `SWARM_FALLBACK_PROVIDER` to switch families on a usage limit. A recheck rejects a `--repo`/`--pr-number` that does not

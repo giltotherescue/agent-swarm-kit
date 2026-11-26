@@ -178,6 +178,7 @@ def cmd_review(a):
         dev = call("GET", f"/tasks/{a.dev_task}")["task"]
         author = dev.get("session_provider") or dev.get("provider")  # the family that wrote the final commit
     tier, round_no, prior, must, prior_provider = a.risk, 1, None, [], None
+    untrusted, followups = False, not a.no_followup_issue
     if a.recheck:
         pt = call("GET", f"/tasks/{a.recheck}")["task"]
         if pt.get("kind") != "review":
@@ -196,6 +197,10 @@ def cmd_review(a):
             tier = cr.higher(prior_tier, tier) if tier != "auto" else prior_tier
         round_no, prior = pm["round"] + 1, a.recheck
         must, _ = cr.split_findings(report)
+        # The recheck carries the parent's restrictions: untrusted input stays untrusted (it never publishes), and a
+        # parent that kept its residuals in the report keeps the child's there too. Missing fields mean "restricted".
+        untrusted = bool(pt.get("untrusted"))
+        followups = followups and not untrusted and pt.get("review_followups") in (1, True)
         if (a.repo and a.repo != pt.get("repo")) or (a.pr_number and a.pr_number != pt.get("pr_number")):
             sys.exit(f"error: --repo/--pr-number do not match review {a.recheck} ({pt.get('repo')} #{pt.get('pr_number')})")
         a.repo, a.pr_number = pt.get("repo"), pt.get("pr_number")
@@ -203,6 +208,10 @@ def cmd_review(a):
         author = author or pm.get("author")
         prior_provider = pt.get("provider")
         if not must:
+            ok, why = cr.clean_review(report)
+            if not ok:
+                sys.exit(f"error: review {a.recheck} listed no must-fix items, but {why}, so its result is unclear. Not ship "
+                         "advice: read its report, or queue a fresh review of the current head.")
             ok, why = cr.ship_check(pt.get("head_sha"), gh_pr_state(a.repo, a.pr_number))
             if ok:
                 print(f"Review {a.recheck} found no must-fix items on {pt['head_sha'][:12]}, which is the PR's current head, "
@@ -229,15 +238,18 @@ def cmd_review(a):
     tier_line = ("Risk tier: " + tier + "." if tier != "auto" else "The worker sets the risk tier from the changed files.")
     name = "review-recheck-prompt.md" if prior else "review-prompt.md"
     tmpl = open(os.path.join(KIT_DIR, "templates", name)).read()
-    prompt = (tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)).replace("{{ROUND}}", str(round_no))
+    # The marker goes first: the worker trusts only a marker at the start, never one quoted from an earlier report.
+    prompt = cr.marker(round_no, tier, mpolicy, prior, author) + "\n" + (
+        tmpl.replace("{{REPO}}", a.repo).replace("{{PR}}", str(a.pr_number)).replace("{{ROUND}}", str(round_no))
               .replace("{{TIER_LINE}}", tier_line).replace("{{PRIOR}}", prior or "")
               .replace("{{MUST_FIX}}", "\n".join(f"- {m}" for m in must)))
-    prompt += "\n" + cr.marker(round_no, tier, mpolicy, prior, author, followups=not a.no_followup_issue) + "\n"
     if a.extra:
         prompt += "\n" + read_prompt(a.extra)
     r = call("POST", "/tasks", {k: v for k, v in {"prompt": prompt, "repo": a.repo, "pr_number": a.pr_number, "kind": "review",
                                                   "report_only": True, "provider": provider, "model": model,
-                                                  "owner": a.owner, "project": a.project, "parent_id": a.recheck}.items()
+                                                  "owner": a.owner, "project": a.project, "parent_id": a.recheck,
+                                                  "untrusted": True if untrusted else None,
+                                                  "review_followups": bool(followups)}.items()
                                 if v is not None})
     print(r["task"]["id"], r["task"]["state"], r["task"]["provider"] + "/" + r["task"]["model"], f"round {round_no}",
           f"tier {tier}")

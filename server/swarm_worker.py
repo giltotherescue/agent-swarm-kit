@@ -852,7 +852,7 @@ class Runner(threading.Thread):
                 diff = self.git_text(["diff", "--unified=0", "--no-color", "--no-ext-diff", rng], limit=2 * 1024 * 1024)
         tier, why = swarm_codereview.classify(paths, diff, override=override, extra_globs=globs)
         return {"tier": tier, "why": why, "round": m["round"], "cap": swarm_codereview.CAPS[tier], "model": m.get("model"),
-                "author": m.get("author"), "followups": m.get("followups")}
+                "author": m.get("author")}
 
     def git_text(self, args, limit=None):
         """git output decoded without failing on non-UTF-8 bytes; None on error or when longer than limit bytes."""
@@ -876,10 +876,11 @@ class Runner(threading.Thread):
         if not follow or not status.startswith("done"):  # file once, from a finished review
             return None
         # Publishing is a write with the worker's GitHub credentials. Never for untrusted input (the report may quote a
-        # private ticket), and only when the caller opted in on the marker (swarmctl review does unless told not to).
+        # private ticket), and only when the caller opted in on the task's stored review_followups field (swarmctl review
+        # sets it unless told not to; a recheck inherits it from the parent). Never from prompt or report text.
         if t.get("untrusted"):
             return "not filed: this task has untrusted input, so the residuals stay in this report"
-        if policy.get("followups") != "issue":
+        if t.get("review_followups") not in (1, True):
             return "not filed: the review was queued without a follow-up issue, so the residuals stay in this report"
 
         def run(cmd):
