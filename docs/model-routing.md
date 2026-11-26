@@ -17,7 +17,7 @@ Copy [the model routing template](../templates/model-routing.md) into each bot's
 | Images (ad graphics, illustrations, mockups) | `codex` | `default`, using Codex CLI's built-in image generation |
 | Support queues, stats, coordination | none | the Grok Bot itself, no task |
 
-A good habit: when a strong model writes something important, have the other provider review it. Different models miss different things. See [the review prompt](../templates/review-prompt.md) and `swarmctl review`.
+Code is reviewed by the other model family: Claude-written code by Codex, Codex-written code by Claude, with a stronger Codex model for high-risk changes. `swarmctl review --dev-task TASK_ID` picks the reviewer; see [code review](code-review.md) for tiers, round caps and where follow-ups go.
 
 ## Full test suites are script tasks
 

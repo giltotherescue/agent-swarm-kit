@@ -187,8 +187,10 @@ That runs `gh auth login --hostname github.com --git-protocol https --web --skip
 By hand: `sudo -u swarm-runner -H gh auth login` and `sudo -u swarm-runner -H gh auth setup-git`.
 
 The device flow gives the runner whatever access the account you sign in with has. If you want a narrower login, use a
-**fine-grained token** limited to the repos the swarm works on, with "Contents: read and write" and "Pull requests: read and write" only, and give it
-to `gh auth login --with-token` instead. The runner pushes `agent/<task-id>` branches and opens draft pull requests. It never pushes the main branch unless a project allows it (`swarmctl project set NAME --allow-push-main`), and it never merges.
+**fine-grained token** limited to the repos the swarm works on, with "Contents: read and write" and "Pull requests: read and write", and give it
+to `gh auth login --with-token` instead. Add "Issues: read and write" if you use `swarmctl review`: by default the worker files a
+review's non-blocking follow-ups as a `review-followup` issue ([code-review.md](code-review.md#where-follow-ups-go)). Without
+Issues write, queue reviews with `swarmctl review --no-followup-issue` so the follow-ups stay in the report. The runner pushes `agent/<task-id>` branches and opens draft pull requests. It never pushes the main branch unless a project allows it (`swarmctl project set NAME --allow-push-main`), and it never merges.
 
 If you logged in GitHub as `agent` before, log it out: `sudo -iu agent gh auth logout`.
 

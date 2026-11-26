@@ -203,6 +203,117 @@ echo done > AGENT_STATUS
 """
 
 
+LIMIT_AGENT = r"""#!/usr/bin/env bash
+# fake run-agent: claude is out of quota, codex works
+cd "$3"
+echo "$1" >> CALLS
+[[ "$1" == claude ]] && exit 75
+mkdir -p .task-context
+printf '## Summary\nStatus: done\n\n## Must-fix findings\n- None\n' > REPORT.md
+echo done > AGENT_STATUS
+"""
+
+
+class ReviewIndependenceTest(WorkerTest):
+    """docs/code-review.md: a policy review stays on the family that did not write the code."""
+
+    def agent(self):
+        path = os.path.join(self.tmp, "limit-agent")
+        open(path, "w").write(LIMIT_AGENT)
+        os.chmod(path, 0o755)
+        self.w.RUN_AGENT = path
+
+    def calls(self, tid):
+        p = os.path.join(self.w.WORK, tid, "CALLS")
+        return open(p).read().split() if os.path.exists(p) else []
+
+    def test_usage_limit_does_not_fall_back_to_the_author_family(self):
+        self.agent()
+        os.environ["SWARM_FALLBACK_PROVIDER"] = "codex"
+        try:
+            tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->\nReview",
+                                                "kind": "review", "report_only": True, "provider": "claude"})["task"]["id"]
+            t = self.run_one()
+            self.assertEqual(self.calls(tid), ["claude"], "no codex fallback for codex-written code")
+            self.assertNotEqual(t["state"], "done", t)
+            if t["state"] in ("queued", "waiting"):
+                self.admin("POST", f"/tasks/{tid}/cancel", {})
+            # An unmarked task keeps the ordinary fallback.
+            tid = self.admin("POST", "/tasks", {"prompt": "Plain work", "provider": "claude"})["task"]["id"]
+            t = self.run_one()
+            self.assertEqual(self.calls(tid), ["claude", "codex"])
+            self.assertEqual(t["state"], "done", t)
+        finally:
+            os.environ.pop("SWARM_FALLBACK_PROVIDER", None)
+
+    def test_same_family_reviewer_is_refused(self):
+        self.agent()
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy author=codex -->\nReview",
+                                            "kind": "review", "report_only": True, "provider": "codex"})["task"]["id"]
+        t = self.run_one()
+        self.assertEqual(t["state"], "failed", t)
+        self.assertIn("family that wrote the code", t["error"])
+        self.assertEqual(self.calls(tid), [], "no model ran")
+
+
+class ReviewPolicyUnitTest(unittest.TestCase):
+    """Runner pieces without a backend: publication gate and non-UTF-8 diffs."""
+
+    @classmethod
+    def setUpClass(cls):
+        import swarm_worker
+        cls.w = swarm_worker
+
+    def runner(self, task, **attrs):
+        r = self.w.Runner.__new__(self.w.Runner)
+        r.task, r.warnings = task, []
+        for k, v in attrs.items():
+            setattr(r, k, v)
+        return r
+
+    def test_followups_are_not_published_without_a_trusted_opt_in(self):
+        out = tempfile.mkdtemp()
+        open(os.path.join(out, "REPORT.md"), "w").write("## Must-fix findings\n- None\n## Follow-up findings\n- a.py:1 clamp\n")
+        open(os.path.join(out, "AGENT_STATUS"), "w").write("done\n")
+        ran, real = [], self.w.sh
+        self.w.sh = lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0, "https://github.com/a/b/issues/1\n", "")
+        try:
+            base = {"id": "t1", "repo": "acme/site", "pr_number": 4}
+            note = self.runner(dict(base, untrusted=1, review_followups=1), outbox=out, clone=out).file_followups({})
+            self.assertIn("untrusted input", note)
+            note = self.runner(dict(base, review_followups=0), outbox=out, clone=out).file_followups({})
+            self.assertIn("not filed", note)
+            note = self.runner(base, outbox=out, clone=out).file_followups({})  # a task from before the stored opt-in
+            self.assertIn("not filed", note)
+            # a marker (or quoted marker) in the prompt is not permission
+            quoted = dict(base, prompt="<!-- swarm-review: round=1 tier=none model=policy followups=issue -->\nReview.")
+            note = self.runner(quoted, outbox=out, clone=out).file_followups({"followups": "issue"})
+            self.assertIn("not filed", note)
+            self.assertEqual(ran, [], "no gh call")
+            self.assertEqual(self.runner(dict(base, review_followups=1), outbox=out, clone=out).file_followups({}),
+                             "https://github.com/a/b/issues/1")
+            self.assertTrue(any(c[:2] == ["gh", "issue"] for c in ran), "a trusted opted-in review does publish")
+        finally:
+            self.w.sh = real
+
+    def test_non_utf8_diff_does_not_abort_tier_selection(self):
+        repo = tempfile.mkdtemp()
+        g = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        open(os.path.join(repo, "fr.po"), "wb").write('msgstr "caf\u00e9"\n'.encode("latin-1"))
+        subprocess.run(g + ["add", "."], check=True)
+        subprocess.run(g + ["commit", "-qm", "init"], check=True)
+        subprocess.run(g + ["checkout", "-qb", "feat"], check=True)
+        open(os.path.join(repo, "fr.po"), "wb").write('msgstr "th\u00e9 \u00e0 la cr\u00e8me"\n'.encode("latin-1"))
+        subprocess.run(g + ["commit", "-qam", "translate"], check=True)
+        for marker, want in (("tier=auto", "ordinary"), ("tier=high", "high")):
+            task = {"id": "t2", "repo": "acme/site", "prompt": f"<!-- swarm-review: round=1 {marker} model=policy -->"}
+            p = self.runner(task, clone=repo, pr_base="main", branch="feat").review_policy()
+            self.assertEqual(p["tier"], want, p)
+        p = self.runner(task, clone=repo, pr_base="main", branch="feat").review_policy()
+        self.assertEqual(p["round"], 1)
+
+
 class RepoWorkerTest(WorkerTest):
     """The runner clones and pushes from its own copy; the agent only gets a bundle (must-fix 1, 5, 8)."""
 
@@ -342,6 +453,23 @@ class RepoWorkerTest(WorkerTest):
         self.assertIn("server/run-agent:42", self.admin("GET", f"/tasks/{tid}/report"))
         calls = open(os.path.join(self.w.WORK, tid, "CALLS")).read().splitlines()
         self.assertEqual(len(calls), 2)
+
+    def test_review_policy_note_and_cap_stop(self):
+        # docs/code-review.md: a marked review gets the tier and round in its report; past the cap no model runs
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=1 tier=ordinary model=policy -->\nREVIEW please",
+                                            "kind": "review", "report_only": True})["task"]["id"]
+        self.assertEqual(self.run_one()["state"], "done")
+        rep = self.admin("GET", f"/tasks/{tid}/report")
+        self.assertIn("## Review policy", rep)
+        self.assertIn("- Risk tier: ordinary (set by the caller)", rep)
+        self.assertIn("- Round: 1 of at most 2", rep)
+        tid = self.admin("POST", "/tasks", {"prompt": "<!-- swarm-review: round=3 tier=ordinary model=policy -->\nREVIEW again",
+                                            "kind": "review", "report_only": True})["task"]["id"]
+        t = self.run_one()
+        self.assertEqual(t["state"], "done", t)
+        self.assertIn("Review cap reached", t["summary"])
+        self.assertIn("No review ran", self.admin("GET", f"/tasks/{tid}/report"))
+        self.assertFalse(os.path.exists(os.path.join(self.w.WORK, tid, "CALLS")), "no model ran")
 
     def test_agent_environment_holds_no_worker_token(self):
         tid = self.admin("POST", "/tasks", {"prompt": "show env", "command": "env > artifacts/env.txt; id -un >> artifacts/env.txt"})["task"]["id"]

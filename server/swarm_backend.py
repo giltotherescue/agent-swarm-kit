@@ -204,7 +204,10 @@ MIGRATE_COLUMNS = {
               ("target_worker", "TEXT"), ("failure_escalated_at", "INTEGER"), ("failure_resolved_at", "INTEGER"),
               ("head_sha", "TEXT"), ("unpushed_commits", "INTEGER"), ("base", "TEXT"),
               # 0.8.1 (agent-control PR 63): opt-in for pin bumps; submodule pins the auto-commit left uncommitted (JSON list)
-              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT"), ("gitlink_skipped_count", "INTEGER")],
+              ("allow_gitlink", "INTEGER DEFAULT 0"), ("gitlink_skipped", "TEXT"), ("gitlink_skipped_count", "INTEGER"),
+              # review policy: the caller's opt-in to filing review residuals as a GitHub issue (off unless set, never
+              # for untrusted input). Stored here, not read from prompt text a report could have quoted.
+              ("review_followups", "INTEGER DEFAULT 0")],
     "bots": [("notify_auth_fp", "TEXT"), ("notify_version", "INTEGER DEFAULT 0")],
     "projects": [("bots", "TEXT"), ("repos", "TEXT"), ("allow_push_main", "INTEGER DEFAULT 0"), ("log_git", "INTEGER DEFAULT 0")],
     "log_entries": [("ref", "TEXT"), ("status", "TEXT"), ("version", "INTEGER"), ("author", "TEXT"), ("source", "TEXT"),
@@ -971,6 +974,7 @@ class Backend:
         if b.get("pr_number") is not None and not (report_only or untrusted):
             push = 1  # working on an existing PR means updating it
         open_pr = 1 if b.get("open_pr") and not push_main else 0
+        review_followups = 1 if parse_flag(b.get("review_followups"), "review_followups") and not untrusted else 0
         if (push or open_pr) and (report_only or untrusted):
             raise ApiError(400, "report-only, script and untrusted-input tasks cannot push or open a PR")
         if (push or open_pr) and not repo:
@@ -1022,7 +1026,7 @@ class Backend:
                  "branch": branch, "pr_number": pr_number, "report_only": report_only, "push": push, "open_pr": open_pr,
                  "push_main": push_main, "ask_human": bool(b.get("ask_human")), "untrusted": untrusted, "kind": kind,
                  "project": project, "parent_id": parent_id, "follow_up": follow_up, "timeout": timeout, "chain": chain,
-                 "max_cycles": max_cycles, "cycle": b.get("_cycle"), "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
+                 "max_cycles": max_cycles, "cycle": b.get("_cycle"), "review_followups": review_followups, "attachments": sorted((n, hashlib.sha256(d).hexdigest()) for n, d in decoded)}
         if target_worker:
             canon["target_worker"] = target_worker
         if allow_gitlink:
@@ -1056,15 +1060,15 @@ class Backend:
                     "INSERT INTO tasks(id, created_at, updated_at, project, owner, kind, title, prompt, prompt_hash, repo,"
                     " branch, pr_number, provider, model, command, report_only, push, open_pr, ask_human, untrusted,"
                     " idempotency_key, state, max_attempts, parent_id, follow_up, held_behind, push_main, workspace_host,"
-                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, allow_gitlink, base)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " timeout, chain, chain_root, cycle, max_cycles, target_worker, allow_gitlink, base, review_followups)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     tid, t, t, project, owner, kind, clean_text(b.get("title"), 200, "title"), prompt, phash, repo,
                     branch, int(pr_number) if pr_number is not None else None,
                     provider, model, command, report_only, push, open_pr, 1 if b.get("ask_human") else 0, untrusted,
                     idem, "queued", min(int(b.get("max_attempts") or self.max_attempts), 50), parent_id,
                     1 if follow_up else 0, held_behind, push_main, b.get("_workspace_host"),
                     timeout, chain, (b.get("_chain_root") or tid) if chain else None, int(b.get("_cycle") or 1) if chain else 0,
-                    max_cycles, target_worker, allow_gitlink, base)
+                    max_cycles, target_worker, allow_gitlink, base, review_followups)
             except sqlite3.IntegrityError:
                 raise ApiError(409, "a task with that id or idempotency_key already exists")
             for name, data in decoded:
@@ -1152,7 +1156,8 @@ class Backend:
             r.update(answered_parent=True, duplicate=False)
             return r
         inherit = {k: parent[k] for k in ("project", "repo", "provider", "kind", "pr_number", "push", "open_pr", "push_main",
-                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "allow_gitlink", "base")}
+                                          "report_only", "untrusted", "ask_human", "owner", "target_worker", "allow_gitlink", "base",
+                                          "review_followups")}
         inherit["model"] = parent.get("session_model") or parent.get("model")
         if parent.get("command"):
             inherit["command"] = parent["command"]

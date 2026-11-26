@@ -18,6 +18,43 @@ Fix: the health check failed on a healthy 0.8.1 install.
 
 ## Unreleased
 
+Code review policy (owner approved 2026-11-25; mirrors agent-control). See docs/code-review.md.
+
+- **`swarmctl review` picks the opposite family**: `--dev-task TASK_ID` (its used provider, so a fallback counts) or
+  `--author-provider`. Claude-written code gets Codex (`SWARM_REVIEW_CODEX_MODEL`, or `SWARM_REVIEW_CODEX_HIGH_MODEL` when
+  high risk); Codex-written code gets Claude (`SWARM_REVIEW_CLAUDE_MODEL`, default `opus`). `-P`/`-m` still win.
+- **Risk tiers from paths**, with `--risk` override and `SWARM_REVIEW_HIGH_RISK_PATHS`: high (auth, deletion, money,
+  production data, backup/restore, webhooks, migrations, skills that can publish), ordinary, none (docs, changelog,
+  comment-only). `swarmctl review-tier` reads changed paths on stdin and prints tier, cap and reviewer.
+- **Round cap**: 2 ordinary, 3 high. `swarmctl review --recheck REVIEW_TASK_ID` queues the next round with only the prior
+  must-fix items and refuses past the cap or when nothing blocked. A review past the cap that reaches the worker finishes
+  done without a model; no Waiting-on-you card.
+- **Reviewer prompts** (`templates/review-prompt.md`, new `templates/review-recheck-prompt.md`): impact-based blocking bar,
+  `## Must-fix findings` and `## Follow-up findings`.
+- **Follow-ups to GitHub, host-side**: after a marked review the worker files the follow-ups on one `review-followup` issue
+  per PR (created or commented), links it from the PR, and appends a "Review policy" note (tier, round, issue) to the report.
+- **Follow-ups are published only with a trusted opt-in**: never for an untrusted-input task, and only when the task's
+  stored `review_followups` field is set (new column; `swarmctl review` sets it unless `--no-followup-issue`). It is never
+  read from prompt text, and the worker trusts only a review marker at the start of the prompt, so a marker quoted from
+  an earlier report changes nothing. A recheck inherits the parent's `untrusted` flag and its follow-up restriction.
+  Filing needs Issues write on the token (docs/worker-setup.md, docs/updating-the-kit.md).
+- **No ship advice without a pass on the current head**: `--recheck` of a review that is not done, or whose report has no
+  `## Must-fix findings` section, says the result is unavailable. A review gets "Ship it" only when its report is an
+  explicit pass (`- None` alone under every must-fix heading, "Ready to merge", no "Do not merge"), its reviewed commit is
+  the PR's current head, and CI passed with at least one successful check (skipped-only is not green) (`gh pr view`).
+- **Operational text is not docs-only**: `requirements*.txt`, `constraints*.txt`, `SKILL.md` and files under `skills/`
+  or `prompts/`, `AGENTS.md`/`CLAUDE.md` are at least ordinary; skills about charging, access, admin or customers are high.
+- The recheck prompt keeps races with a realistic blocking trigger (a payment retry that charges twice) in scope.
+- **Reviewer independence**: the marker records the author family; a recheck keeps that reviewer, `-P` on the author's
+  family is refused, the worker refuses a same-family marked review, and a marked review does not use
+  `SWARM_FALLBACK_PROVIDER` to switch families on a usage limit. A recheck rejects a `--repo`/`--pr-number` that does not
+  match the earlier review.
+- **Non-UTF-8 diffs** (for example a Latin-1 `.po` file) no longer abort tier selection: git output is read as bytes, and
+  the content diff is skipped when the paths or `--risk` settle the tier, or when it is over 2 MB.
+- Reviews queued without `swarmctl review` (no marker) run as before.
+- Tests: tests/test_codereview.py; `test_review_policy_note_and_cap_stop`, `ReviewIndependenceTest` and
+  `ReviewPolicyUnitTest` in tests/test_worker.py.
+
 Docs and templates: meeting mode and manager-message rules, from Gil and a kit user (2026-11-23).
 
 - `templates/chief-of-staff.md`: new "Live calls with the human", "Messages to managers" and "Push work to workers" sections.

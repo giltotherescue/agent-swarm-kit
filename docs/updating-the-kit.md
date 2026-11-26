@@ -105,6 +105,15 @@ sudo swarmctl undrain
 
 The database stays as the newer version left it. Newer versions only add tables and columns, so an older version keeps working with it. If the changelog says otherwise for a release, restore the backup from step 2 with `scripts/restore-backup.sh` ([backend.md](backend.md#backups-and-restore)).
 
+## Upgrading to the code review policy (unreleased)
+
+- `swarmctl review` now files a review's non-blocking follow-ups as a `review-followup` GitHub issue by default. If the
+  runner's GitHub login is a fine-grained token with only Contents and Pull requests access, either add
+  "Issues: read and write" for the task repos, or pass `--no-followup-issue` to every `swarmctl review` (the follow-ups
+  then stay in the report). See [code-review.md](code-review.md#where-follow-ups-go).
+- The backend adds a `tasks.review_followups` column on startup. Reviews queued before the upgrade do not have it, so
+  they and their rechecks keep follow-ups in the report.
+
 ## Upgrading to 0.8.1 (unreleased)
 
 Auto-commits never stage submodule pins (agent-control PR 63). Nothing to do unless you bump a submodule on purpose; see [git-policy.md](git-policy.md).

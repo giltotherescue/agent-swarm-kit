@@ -23,6 +23,13 @@ one open question and at most one link, each only when there is one. Tag every c
 have to redo the check.
 Send your questions and status to the Chief of Staff in this form.
 
+## Code review
+Every PR you queue is reviewed by the other model family (`swarmctl review --dev-task TASK_ID`), under
+docs/code-review.md: skip review for docs, typo, changelog or comment-only changes with green CI; only
+security, data loss, money, a broken common path or red CI block; two review rounds (three for high
+risk). At the cap, ship with the follow-ups on the `review-followup` issue, or retire the PR with the
+reason written on it. Ask the owner only if that choice truly needs them.
+
 ## People and roles
 Who is involved, what they own, how to reach them. Include other bots that touch this project.
 

@@ -9,7 +9,7 @@ to let a CLI pick its own default). Check the current list with `claude` then `/
 | Job | Where it runs | Provider and model (`-P` / `-m`) |
 | --- | --- | --- |
 | Strategy, decisions, top-quality design and copy | worker | `-P claude -m opus` |
-| Second opinion or review of work another model did | worker | the other provider: `-P codex -m default` |
+| Code review of a PR | worker | the other family: `swarmctl review --dev-task TASK_ID` picks it (docs/code-review.md) |
 | Everyday coding | worker | `-P codex -m default` or `-P claude -m sonnet` |
 | Frontend and web design | worker | `-P claude -m sonnet` |
 | Cheap research, scraping, bulk lookups | worker | `-P claude -m haiku` or a small Codex model |

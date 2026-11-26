@@ -40,6 +40,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 URL = os.environ.get("SWARM_URL", "http://127.0.0.1:8750").rstrip("/")
 sys.path.insert(0, HERE)
 import swarm_gitlink  # noqa: E402
+import swarm_codereview  # noqa: E402
 NAME = os.environ.get("SWARM_WORKER_NAME") or os.uname().nodename
 PROJECTS = os.environ.get("SWARM_WORKER_PROJECTS")
 WORK = os.path.expanduser(os.environ.get("SWARM_WORK_DIR", "~/work"))
@@ -478,6 +479,8 @@ class Runner(threading.Thread):
         self.workname = task["id"]
         self.branch = None
         self.default_branch = None
+        self.pr_base = None        # the PR's base branch, for a task on an existing PR
+        self.report_suffix = None  # review policy note added to the uploaded REPORT.md (docs/code-review.md)
         self.warnings = []
         self.prompt_n = 0
         self.timeout = int(self.task.get("timeout") or TIMEOUT)
@@ -586,8 +589,10 @@ class Runner(threading.Thread):
     def decide_branch(self):
         t = self.task
         if t.get("pr_number"):
-            r = sh(["gh", "pr", "view", str(t["pr_number"]), "-R", t["repo"], "--json", "headRefName,isCrossRepository"], cwd=self.clone)
+            r = sh(["gh", "pr", "view", str(t["pr_number"]), "-R", t["repo"], "--json", "headRefName,baseRefName,isCrossRepository"],
+                   cwd=self.clone)
             info = json.loads(r.stdout)
+            self.pr_base = info.get("baseRefName")
             if info.get("isCrossRepository"):
                 raise RuntimeError("this PR comes from a fork; the worker only works on PRs from branches in the same repo")
             return info["headRefName"]
@@ -779,12 +784,33 @@ class Runner(threading.Thread):
 
         if t.get("command"):
             return self.run_script(t)
+        policy = self.review_policy() if t.get("kind") == "review" else None
+        if policy:
+            if policy["round"] > policy["cap"]:
+                log(t["id"], f"review cap: round {policy['round']} of {policy['cap']}; not running a model")
+                msg = swarm_codereview.cap_message(policy["round"], policy["tier"])
+                self.upload({}, extra_report=(f"## Summary\nStatus: done\n\nNo review ran. {msg}\n\n" +
+                                              self.policy_note(policy)).encode())
+                return "done", {"workdir": self.workname, "summary": msg[:500]}
+            if policy.get("author") and swarm_codereview.family(provider) == policy["author"]:
+                msg = (f"review not run: the reviewer ({provider}) is the family that wrote the code ({policy['author']}). "
+                       "Re-queue it on the other family (docs/code-review.md).")
+                log(t["id"], msg)
+                return "failed", {"workdir": self.workname, "error": msg, "outcome": "same_family_reviewer"}
+            if policy["model"] == "policy" and provider == "codex" and policy["tier"] == "high":
+                model = os.environ.get("SWARM_REVIEW_CODEX_HIGH_MODEL") or model
+            note = ((note + "\n") if note else "") + (
+                f"Note from the worker: risk tier {policy['tier']} ({policy['why']}); this is review round {policy['round']} "
+                f"of at most {policy['cap']}.")
 
         code, started = self.launch([RUN_AGENT, provider, model, os.path.join(WORK, self.workname),
                                      self.write_prompt(build_prompt(t, "resume" if session else "start", note))] +
                                     ([session] if session else []))
         fb = os.environ.get("SWARM_FALLBACK_PROVIDER")
-        if code == 75 and fb and fb != provider and not self.lost:
+        if code == 75 and fb and policy and swarm_codereview.family(fb) != swarm_codereview.family(provider):
+            # A policy review stays on the independent family: the fallback would be the author's family.
+            log(t["id"], f"{provider} hit a usage limit; not falling back to {fb} for a cross-family review")
+        elif code == 75 and fb and fb != provider and not self.lost:
             log(t["id"], f"{provider} hit a usage limit; falling back to {fb}")
             provider, model = fb, os.environ.get("SWARM_FALLBACK_MODEL", "default")
             code, started = self.launch([RUN_AGENT, provider, model, os.path.join(WORK, self.workname),
@@ -802,7 +828,81 @@ class Runner(threading.Thread):
                        "Do not change your conclusions. Then write AGENT_STATUS again.")
                 code, started = self.launch([RUN_AGENT, provider, model, os.path.join(WORK, self.workname), self.write_prompt(fix), sid])
                 summary = self.collect()
+        if policy and code == 0 and not self.lost:
+            self.report_suffix = self.policy_note(policy, self.file_followups(policy))
         return self.decide(code, started, provider, model, summary)
+
+    def review_policy(self):
+        """Tier, round and cap for a review task queued by swarmctl review (it carries a swarm-review marker). The tier
+        comes from the PR's changed files here on the host, unless the caller set one. None for an unmarked review."""
+        t = self.task
+        m = swarm_codereview.parse_marker(t.get("prompt"))
+        if not m:
+            return None
+        paths, diff = None, None
+        override = None if m["tier"] == "auto" else m["tier"]
+        globs = swarm_codereview.extra_high_risk_globs()
+        if t.get("repo") and self.pr_base and self.branch:
+            rng = f"refs/heads/{self.pr_base}...refs/heads/{self.branch}"
+            paths = self.git_text(["diff", "--name-only", rng])
+            paths = paths.split("\n") if paths is not None else None
+            # The content diff only matters for the comment-only check; read it as bytes (a Latin-1 .po file is fine),
+            # and skip it when the paths or the caller already settle the tier, or when it is too big to scan.
+            if paths and override is None and swarm_codereview.classify(paths, extra_globs=globs)[0] == "ordinary":
+                diff = self.git_text(["diff", "--unified=0", "--no-color", "--no-ext-diff", rng], limit=2 * 1024 * 1024)
+        tier, why = swarm_codereview.classify(paths, diff, override=override, extra_globs=globs)
+        return {"tier": tier, "why": why, "round": m["round"], "cap": swarm_codereview.CAPS[tier], "model": m.get("model"),
+                "author": m.get("author")}
+
+    def git_text(self, args, limit=None):
+        """git output decoded without failing on non-UTF-8 bytes; None on error or when longer than limit bytes."""
+        try:
+            r = subprocess.run(["git"] + args, cwd=self.clone, capture_output=True, timeout=300,
+                               env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0 or (limit is not None and len(r.stdout) > limit):
+            return None
+        return r.stdout.decode("utf-8", errors="replace")
+
+    def file_followups(self, policy):
+        """Host side (the review session has no GitHub credentials): put the report's follow-ups on the PR's
+        review-followup issue. Returns the issue URL or a note saying why not."""
+        t = self.task
+        report = (safe_read(self.outbox, "REPORT.md") or b"").decode(errors="replace")
+        must, follow = swarm_codereview.split_findings(report)
+        policy["must_fix"] = len(must)
+        status = (safe_read(self.outbox, "AGENT_STATUS", 200) or b"").decode(errors="replace").strip().lower()
+        if not follow or not status.startswith("done"):  # file once, from a finished review
+            return None
+        # Publishing is a write with the worker's GitHub credentials. Never for untrusted input (the report may quote a
+        # private ticket), and only when the caller opted in on the task's stored review_followups field (swarmctl review
+        # sets it unless told not to; a recheck inherits it from the parent). Never from prompt or report text.
+        if t.get("untrusted"):
+            return "not filed: this task has untrusted input, so the residuals stay in this report"
+        if t.get("review_followups") not in (1, True):
+            return "not filed: the review was queued without a follow-up issue, so the residuals stay in this report"
+
+        def run(cmd):
+            r = sh(cmd, cwd=self.clone if os.path.isdir(self.clone) else None, check=False, timeout=120)
+            return r.returncode, r.stdout
+        try:
+            url, problem = swarm_codereview.file_followups(t.get("repo"), t.get("pr_number"), follow, run, t["id"])
+        except Exception as e:  # gh missing or broken: the residuals are still in the report
+            url, problem = None, f"could not open the review-followup issue ({str(e)[:200]})"
+        if problem:
+            self.warnings.append(problem)
+        return url or problem
+
+    def policy_note(self, policy, followup=None):
+        lines = [f"- Risk tier: {policy['tier']} ({policy['why']})", f"- Round: {policy['round']} of at most {policy['cap']}"]
+        if followup:
+            lines.append(f"- Follow-up issue: {followup}")
+        if policy.get("must_fix") and policy["round"] >= policy["cap"]:
+            lines.append("- This was the last review round, and it is not a pass. Do not queue another: fix the must-fix items "
+                         "and ship only with the fixes verified on the PR's current head and CI green, follow-ups recorded; "
+                         "or retire the PR and close it with the reason written on it.")
+        return "## Review policy\n" + "\n".join(lines) + "\n"
 
     def session_id(self, summary, provider):
         for name in (f"session-{provider}", "session"):
@@ -820,6 +920,8 @@ class Runner(threading.Thread):
     def upload(self, summary, extra_report=None):
         h = {"X-Claim-Id": self.claim_id}
         report = extra_report if extra_report is not None else safe_read(self.outbox, "REPORT.md", 25 * 1024 * 1024)
+        if report is not None and extra_report is None and getattr(self, "report_suffix", None):
+            report = report.rstrip() + b"\n\n" + self.report_suffix.encode()
         if report is not None:
             self.tapi("PUT", "/files/report/REPORT.md", raw=report, headers=h)
         adir = os.path.join(self.outbox, "artifacts")
